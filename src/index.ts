@@ -1,4 +1,4 @@
-export * from './zarr-maplibre-layer';
+export * from './zarr-layer';
 export * from './zarr-store';
 export * from './maplibre-utils';
 export * from './maplibre-shaders';

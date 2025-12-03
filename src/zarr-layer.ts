@@ -1,5 +1,5 @@
 /**
- * @module zarr-maplibre-layer
+ * @module zarr-layer
  *
  * MapLibre/MapBox custom layer implementation for rendering Zarr datasets.
  * Implements CustomLayerInterface for direct WebGL rendering.
@@ -42,7 +42,7 @@ const MAX_CACHED_TILES = 64;
  *
  * @example
  * ```ts
- * const layer = new ZarrMaplibreLayer({
+ * const layer = new ZarrLayer({
  *   id: 'my-zarr-layer',
  *   source: 'https://example.com/data.zarr',
  *   variable: 'temperature',
@@ -53,7 +53,7 @@ const MAX_CACHED_TILES = 64;
  * map.addLayer(layer);
  * ```
  */
-export class ZarrMaplibreLayer {
+export class ZarrLayer {
   type: "custom" = "custom";
   renderingMode: "2d" = "2d";
 

@@ -191,7 +191,7 @@
         // For local testing, you need to build the project first: npm run build
 
         // Import from the MapLibre-specific build (no Cesium dependencies)
-        import { ZarrMaplibreLayer } from './dist/index.mjs';
+        import { ZarrLayer } from './dist/index.mjs';
 
         // Initialize MapLibre map
         const map = new maplibregl.Map({
@@ -311,7 +311,7 @@
                     ? { band: 0, month: 0 }
                     : { time: 0 };
 
-                zarrLayer = new ZarrMaplibreLayer({
+                zarrLayer = new ZarrLayer({
                     id: 'zarr-layer',
                     source: config.source,
                     variable: config.variable,
@@ -473,7 +473,7 @@
                     : { time: 0 };
 
                 // Create new layer
-                zarrLayer = new ZarrMaplibreLayer({
+                zarrLayer = new ZarrLayer({
                     id: 'zarr-layer',
                     source: config.source,
                     variable: config.variable,

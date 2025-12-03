@@ -22,7 +22,7 @@ npm run build
 
 ```ts
 import maplibregl from "maplibre-gl";
-import { ZarrMaplibreLayer } from "zarr-maplibre";
+import { ZarrLayer } from "zarr-maplibre";
 
 const map = new maplibregl.Map({
   container: "map",
@@ -33,7 +33,7 @@ const map = new maplibregl.Map({
 
 map.on("load", () => {
   map.addLayer(
-    new ZarrMaplibreLayer({
+    new ZarrLayer({
       id: "zarr-layer",
       source: "https://example.com/my.zarr",
       variable: "temperature",
