@@ -26,7 +26,7 @@ interface RendererUniforms {
   offset: number
 }
 
-export interface MultiBandShaderConfig {
+export interface CustomShaderConfig {
   bands: string[]
   customFrag?: string
   customUniforms?: Record<string, number>
@@ -66,7 +66,7 @@ interface RenderParams {
   singleImage?: SingleImageParams
   shaderData?: ShaderData
   projectionData?: ProjectionData
-  multiBandConfig?: MultiBandShaderConfig
+  customShaderConfig?: CustomShaderConfig
 }
 
 interface ShaderProgram {
@@ -102,7 +102,7 @@ interface ShaderProgram {
   vertexLoc: number
   pixCoordLoc: number
   isGlobe: boolean
-  isMultiBand: boolean
+  useCustomShader: boolean
   bandTexLocs: Map<string, WebGLUniformLocation>
   customUniformLocs: Map<string, WebGLUniformLocation>
 }
@@ -112,14 +112,14 @@ export class ZarrRenderer {
   private fragmentShaderSource: string
   private shaderCache: Map<string, ShaderProgram> = new Map()
   private singleImageGeometryUploaded = false
-  private multiBandConfig: MultiBandShaderConfig | null = null
+  private customShaderConfig: CustomShaderConfig | null = null
   private canUseLinearFloat: boolean = false
   private canUseLinearHalfFloat: boolean = false
 
   constructor(
     gl: WebGL2RenderingContext,
     fragmentShaderSource: string,
-    multiBandConfig?: MultiBandShaderConfig
+    customShaderConfig?: CustomShaderConfig
   ) {
     this.gl = ZarrRenderer.resolveGl(gl)
     this.canUseLinearFloat = !!this.gl.getExtension('OES_texture_float_linear')
@@ -127,23 +127,24 @@ export class ZarrRenderer {
       'OES_texture_half_float_linear'
     )
     this.fragmentShaderSource = fragmentShaderSource
-    this.multiBandConfig = multiBandConfig || null
-    this.getOrCreateProgram(undefined, multiBandConfig)
+    this.customShaderConfig = customShaderConfig || null
+    this.getOrCreateProgram(undefined, customShaderConfig)
   }
 
-  updateMultiBandConfig(config: MultiBandShaderConfig | null) {
-    if (config && this.multiBandConfig) {
+  updateMultiBandConfig(config: CustomShaderConfig | null) {
+    if (config && this.customShaderConfig) {
       const bandsChanged =
         JSON.stringify(config.bands) !==
-        JSON.stringify(this.multiBandConfig.bands)
-      const fragChanged = config.customFrag !== this.multiBandConfig.customFrag
+        JSON.stringify(this.customShaderConfig.bands)
+      const fragChanged =
+        config.customFrag !== this.customShaderConfig.customFrag
       if (bandsChanged || fragChanged) {
         this.shaderCache.clear()
       }
-    } else if (config !== this.multiBandConfig) {
+    } else if (config !== this.customShaderConfig) {
       this.shaderCache.clear()
     }
-    this.multiBandConfig = config
+    this.customShaderConfig = config
   }
 
   private static resolveGl(gl: WebGL2RenderingContext): WebGL2RenderingContext {
@@ -161,12 +162,12 @@ export class ZarrRenderer {
 
   private getOrCreateProgram(
     shaderData?: ShaderData,
-    multiBandConfig?: MultiBandShaderConfig
+    customShaderConfig?: CustomShaderConfig
   ): ShaderProgram {
-    const config = multiBandConfig || this.multiBandConfig
-    const isMultiBand = config && config.bands.length > 0
-    const variantName = isMultiBand
-      ? `multiband_${config.bands.join('_')}${shaderData?.variantName ?? ''}`
+    const config = customShaderConfig || this.customShaderConfig
+    const useCustomShader = config && config.bands.length > 0
+    const variantName = useCustomShader
+      ? `custom_${config.bands.join('_')}${shaderData?.variantName ?? ''}`
       : shaderData?.variantName ?? 'mercator'
 
     const cached = this.shaderCache.get(variantName)
@@ -178,7 +179,7 @@ export class ZarrRenderer {
     const vertexSource = createVertexShaderSource(shaderData)
 
     let fragmentSource: string
-    if (isMultiBand && config) {
+    if (useCustomShader && config) {
       fragmentSource = createFragmentShaderSource({
         bands: config.bands,
         customUniforms: config.customUniforms
@@ -212,7 +213,7 @@ export class ZarrRenderer {
     const bandTexLocs = new Map<string, WebGLUniformLocation>()
     const customUniformLocs = new Map<string, WebGLUniformLocation>()
 
-    if (isMultiBand && config) {
+    if (useCustomShader && config) {
       for (const bandName of config.bands) {
         const loc = this.gl.getUniformLocation(program, bandName)
         if (loc) {
@@ -271,9 +272,15 @@ export class ZarrRenderer {
       pixCoordLoc: this.gl.getAttribLocation(program, 'pix_coord_in'),
 
       // Conditional uniforms (single vs multi-band)
-      vminLoc: isMultiBand ? null : this.gl.getUniformLocation(program, 'vmin'),
-      vmaxLoc: isMultiBand ? null : this.gl.getUniformLocation(program, 'vmax'),
-      climLoc: isMultiBand ? this.gl.getUniformLocation(program, 'clim') : null,
+      vminLoc: useCustomShader
+        ? null
+        : this.gl.getUniformLocation(program, 'vmin'),
+      vmaxLoc: useCustomShader
+        ? null
+        : this.gl.getUniformLocation(program, 'vmax'),
+      climLoc: useCustomShader
+        ? this.gl.getUniformLocation(program, 'clim')
+        : null,
 
       noDataLoc: this.gl.getUniformLocation(program, 'nodata'),
       noDataMinLoc: this.gl.getUniformLocation(program, 'u_noDataMin'),
@@ -283,12 +290,16 @@ export class ZarrRenderer {
       scaleFactorLoc: this.gl.getUniformLocation(program, 'u_scaleFactor'),
       addOffsetLoc: this.gl.getUniformLocation(program, 'u_addOffset'),
 
-      cmapLoc: isMultiBand ? null : this.gl.getUniformLocation(program, 'cmap'),
+      cmapLoc: useCustomShader
+        ? null
+        : this.gl.getUniformLocation(program, 'cmap'),
       colormapLoc: this.gl.getUniformLocation(program, 'colormap'),
-      texLoc: isMultiBand ? null : this.gl.getUniformLocation(program, 'tex'),
+      texLoc: useCustomShader
+        ? null
+        : this.gl.getUniformLocation(program, 'tex'),
 
       isGlobe,
-      isMultiBand: !!isMultiBand,
+      useCustomShader: !!useCustomShader,
       bandTexLocs,
       customUniformLocs,
     }
@@ -315,10 +326,13 @@ export class ZarrRenderer {
       singleImage,
       shaderData,
       projectionData,
-      multiBandConfig,
+      customShaderConfig,
     } = params
 
-    const shaderProgram = this.getOrCreateProgram(shaderData, multiBandConfig)
+    const shaderProgram = this.getOrCreateProgram(
+      shaderData,
+      customShaderConfig
+    )
 
     const gl = this.gl
     gl.useProgram(shaderProgram.program)
@@ -339,7 +353,7 @@ export class ZarrRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 
-    if (shaderProgram.isMultiBand) {
+    if (shaderProgram.useCustomShader) {
       if (shaderProgram.climLoc) {
         gl.uniform2f(shaderProgram.climLoc, uniforms.vmin, uniforms.vmax)
       }
@@ -377,9 +391,9 @@ export class ZarrRenderer {
     gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
     gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)
 
-    if (multiBandConfig?.customUniforms) {
+    if (customShaderConfig?.customUniforms) {
       for (const [name, value] of Object.entries(
-        multiBandConfig.customUniforms
+        customShaderConfig.customUniforms
       )) {
         const loc = shaderProgram.customUniformLocs.get(name)
         if (loc) {
@@ -438,7 +452,7 @@ export class ZarrRenderer {
         tileSize,
         vertexArr,
         pixCoordArr,
-        multiBandConfig
+        customShaderConfig
       )
     } else if (singleImage) {
       this.renderSingleImage(
@@ -551,7 +565,7 @@ export class ZarrRenderer {
     tileSize: number,
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
-    multiBandConfig?: MultiBandShaderConfig
+    customShaderConfig?: CustomShaderConfig
   ) {
     const gl = this.gl
 
@@ -612,10 +626,10 @@ export class ZarrRenderer {
           tileToRender.geometryUploaded = true
         }
 
-        if (shaderProgram.isMultiBand && multiBandConfig) {
+        if (shaderProgram.useCustomShader && customShaderConfig) {
           let textureUnit = 2
           let missingBandData = false
-          for (const bandName of multiBandConfig.bands) {
+          for (const bandName of customShaderConfig.bands) {
             const bandData = tileToRender.bandData.get(bandName)
             if (!bandData) {
               missingBandData = true

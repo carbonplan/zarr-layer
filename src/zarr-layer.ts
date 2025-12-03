@@ -17,7 +17,7 @@ import {
   type ShaderData,
 } from './maplibre-shaders'
 import { ColormapState } from './zarr-colormap'
-import { ZarrRenderer, type MultiBandShaderConfig } from './zarr-renderer'
+import { ZarrRenderer, type CustomShaderConfig } from './zarr-renderer'
 import type {
   ColorMapName,
   CRS,
@@ -130,7 +130,7 @@ export class ZarrLayer {
   private customFrag: string | undefined
   private customUniforms: Record<string, number> = {}
   private bandNames: string[] = []
-  private multiBandConfig: MultiBandShaderConfig | null = null
+  private customShaderConfig: CustomShaderConfig | null = null
 
   private isGlobeProjection(shaderData?: ShaderData): boolean {
     if (shaderData?.vertexShaderPrelude) return true
@@ -181,7 +181,7 @@ export class ZarrLayer {
 
     this.bandNames = getBands(variable, selector)
     if (this.bandNames.length > 1 || customFrag) {
-      this.multiBandConfig = {
+      this.customShaderConfig = {
         bands: this.bandNames,
         customFrag: customFrag,
         customUniforms: this.customUniforms,
@@ -212,10 +212,15 @@ export class ZarrLayer {
   }
 
   setUniforms(uniforms: Record<string, number>) {
-    this.customUniforms = { ...this.customUniforms, ...uniforms }
-    if (this.multiBandConfig) {
-      this.multiBandConfig.customUniforms = this.customUniforms
+    if (!this.customShaderConfig) {
+      console.warn(
+        '[ZarrLayer] setUniforms() called but layer was not created with customFrag. ' +
+          'Uniforms will not be applied. Recreate the layer with customFrag and uniforms options.'
+      )
+      return
     }
+    this.customUniforms = { ...this.customUniforms, ...uniforms }
+    this.customShaderConfig.customUniforms = this.customUniforms
     this.invalidate()
   }
 
@@ -250,13 +255,13 @@ export class ZarrLayer {
 
     this.bandNames = getBands(this.variable, selector)
     if (this.bandNames.length > 1 || this.customFrag) {
-      this.multiBandConfig = {
+      this.customShaderConfig = {
         bands: this.bandNames,
         customFrag: this.customFrag,
         customUniforms: this.customUniforms,
       }
     } else {
-      this.multiBandConfig = null
+      this.customShaderConfig = null
     }
 
     if (this.dataManager) {
@@ -533,7 +538,7 @@ export class ZarrLayer {
       singleImage: renderData.singleImage,
       shaderData,
       projectionData,
-      multiBandConfig: this.multiBandConfig || undefined,
+      customShaderConfig: this.customShaderConfig || undefined,
     })
   }
 

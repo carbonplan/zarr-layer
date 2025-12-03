@@ -55,7 +55,7 @@ const CF_MAPPINGS: { [key in keyof DimensionNamesProps]: string[] } = {
     'pressure',
     'geopotential_height',
   ],
-}
+} as const
 
 /**
  * Identify the indices of common dimensions (lat, lon, time, elevation)
