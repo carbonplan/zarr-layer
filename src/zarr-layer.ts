@@ -5,31 +5,19 @@
  * Implements CustomLayerInterface for direct WebGL rendering.
  */
 
-import * as zarr from 'zarrita'
 import {
   calculateNearestIndex,
   loadDimensionValues,
   getBands,
 } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
-import { Tiles } from './tiles'
-import { mustCreateBuffer, mustCreateTexture } from './webgl-utils'
 import {
   maplibreFragmentShaderSource,
   type ProjectionData,
   type ShaderData,
 } from './maplibre-shaders'
-import {
-  boundsToMercatorNorm,
-  getTilesAtZoom,
-  type MercatorBounds,
-  tileToKey,
-  type TileTuple,
-  zoomToLevel,
-} from './maplibre-utils'
 import { ColormapState } from './zarr-colormap'
 import { ZarrRenderer, type MultiBandShaderConfig } from './zarr-renderer'
-import { TileRenderCache } from './zarr-tile-cache'
 import type {
   ColorMapName,
   CRS,
@@ -40,10 +28,11 @@ import type {
   ZarrLevelMetadata,
   ZarrSelectorsProps,
 } from './types'
+import { DataManager } from './data-manager'
+import { TiledDataManager } from './tiled-data-manager'
+import { SingleImageDataManager } from './single-image-data-manager'
 
 const DEFAULT_TILE_SIZE = 128
-const MAX_CACHED_TILES = 64
-const TILE_SUBDIVISIONS = 16
 
 export class ZarrLayer {
   type: 'custom' = 'custom'
@@ -63,18 +52,9 @@ export class ZarrLayer {
   private opacity: number
   private minRenderZoom: number
 
-  private tileCache: TileRenderCache | null = null
-  private tilesManager: Tiles | null = null
   private maxZoom: number = 4
   private tileSize: number = DEFAULT_TILE_SIZE
   private isMultiscale: boolean = true
-  private singleImageData: Float32Array | null = null
-  private singleImageTexture: WebGLTexture | null = null
-  private singleImageVertexBuffer: WebGLBuffer | null = null
-  private singleImagePixCoordBuffer: WebGLBuffer | null = null
-  private singleImageWidth: number = 0
-  private singleImageHeight: number = 0
-  private mercatorBounds: MercatorBounds | null = null
   private fillValue: number = 0
   private useFillValue: boolean = false
   private noDataMin: number = -9999
@@ -85,6 +65,8 @@ export class ZarrLayer {
   private gl: WebGL2RenderingContext | undefined
   private map: any
   private renderer: ZarrRenderer | null = null
+  private dataManager: DataManager | null = null
+
   private applyWorldCopiesSetting() {
     if (
       !this.map ||
@@ -135,12 +117,6 @@ export class ZarrLayer {
     throw new Error('MapLibre did not provide a valid WebGL2 context')
   }
 
-  private vertexArr: Float32Array = new Float32Array()
-  private pixCoordArr: Float32Array = new Float32Array()
-  private singleImagePixCoordArr: Float32Array = new Float32Array()
-  private currentSubdivisions: number = 0
-
-  private zarrArray: zarr.Array<any> | null = null
   private zarrStore: ZarrStore | null = null
   private levelInfos: string[] = []
   private levelMetadata: Map<number, ZarrLevelMetadata> = new Map()
@@ -156,60 +132,10 @@ export class ZarrLayer {
   private bandNames: string[] = []
   private multiBandConfig: MultiBandShaderConfig | null = null
 
-  private static createSubdividedQuad(subdivisions: number): {
-    vertexArr: Float32Array
-    texCoordArr: Float32Array
-  } {
-    const vertices: number[] = []
-    const texCoords: number[] = []
-    const step = 2 / subdivisions
-    const texStep = 1 / subdivisions
-
-    const pushVertex = (col: number, row: number) => {
-      const x = -1 + col * step
-      const y = 1 - row * step
-      const u = col * texStep
-      const v = row * texStep
-      vertices.push(x, y)
-      texCoords.push(u, v)
-    }
-
-    for (let row = 0; row < subdivisions; row++) {
-      for (let col = 0; col <= subdivisions; col++) {
-        pushVertex(col, row)
-        pushVertex(col, row + 1)
-      }
-      if (row < subdivisions - 1) {
-        // Degenerate vertices to connect strips
-        pushVertex(subdivisions, row + 1)
-        pushVertex(0, row + 1)
-      }
-    }
-
-    return {
-      vertexArr: new Float32Array(vertices),
-      texCoordArr: new Float32Array(texCoords),
-    }
-  }
-
   private isGlobeProjection(shaderData?: ShaderData): boolean {
     if (shaderData?.vertexShaderPrelude) return true
     const projection = this.map?.getProjection ? this.map.getProjection() : null
     return projection?.type === 'globe' || projection?.name === 'globe'
-  }
-
-  private updateGeometryForProjection(isGlobe: boolean) {
-    const targetSubdivisions = isGlobe ? TILE_SUBDIVISIONS : 1
-    if (this.currentSubdivisions === targetSubdivisions) return
-
-    const subdivided = ZarrLayer.createSubdividedQuad(targetSubdivisions)
-    this.vertexArr = subdivided.vertexArr
-    this.pixCoordArr = subdivided.texCoordArr
-    this.singleImagePixCoordArr = this.pixCoordArr
-
-    this.currentSubdivisions = targetSubdivisions
-    this.tileCache?.markGeometryDirty()
-    this.renderer?.resetSingleImageGeometry()
   }
 
   constructor({
@@ -264,8 +190,6 @@ export class ZarrLayer {
 
     if (noDataMin !== undefined) this.noDataMin = noDataMin
     if (noDataMax !== undefined) this.noDataMax = noDataMax
-
-    this.updateGeometryForProjection(false)
   }
 
   setOpacity(opacity: number) {
@@ -297,17 +221,25 @@ export class ZarrLayer {
 
   async setVariable(variable: string) {
     this.variable = variable
-    this.clearAllTiles()
-    await this.prepareTiles()
-    this.getVisibleTiles()
-    await this.prefetchTileData()
-    this.invalidate()
-  }
 
-  private clearAllTiles() {
-    if (this.tileCache) {
-      this.tileCache.clear()
+    // We need to re-initialize potentially?
+    // ZarrStore.variable is immutable? No, it's public.
+    // But data manager needs replacement or update.
+
+    // Simplest is to re-initialize everything if variable changes significantly.
+    // Or we update zarrStore variable and re-init manager.
+
+    if (this.zarrStore) {
+      // Since ZarrStore handles multiple variables, we might just need to update manager.
+      // But ZarrStore constructor took 'variable'.
+      // Let's check ZarrStore implementation.
+      // It has 'variable' property and uses it in getChunk/getArray.
+      this.zarrStore.variable = variable
     }
+
+    // Re-create manager for new variable
+    await this.initializeManager()
+    this.invalidate()
   }
 
   async setSelector(selector: Record<string, number | number[]>) {
@@ -327,39 +259,10 @@ export class ZarrLayer {
       this.multiBandConfig = null
     }
 
-    this.tilesManager?.updateSelector(this.selectors)
-    this.tilesManager?.updateBandNames(this.bandNames)
-    if (!this.isMultiscale) {
-      this.singleImageData = null
-      await this.prefetchTileData()
-    } else {
-      this.reextractTileSlices()
+    if (this.dataManager) {
+      await this.dataManager.setSelector(selector)
     }
     this.invalidate()
-  }
-
-  private async reextractTileSlices() {
-    if (!this.tilesManager) return
-
-    const currentHash = this.getSelectorHash()
-    const visibleTiles = this.getVisibleTiles()
-
-    await this.tilesManager.reextractTileSlices(visibleTiles, currentHash)
-
-    for (const tileTuple of visibleTiles) {
-      const tileKey = tileToKey(tileTuple)
-      const tile = this.tileCache?.get(tileKey)
-      const cache = this.tilesManager.getTile(tileTuple)
-      if (!tile || !cache) continue
-      tile.data = cache.data
-      tile.textureUploaded = false
-      tile.bandTexturesUploaded.clear()
-      tile.channels = cache.channels
-      tile.selectorHash = cache.selectorHash
-      tile.bandData = cache.bandData
-    }
-
-    await this.prefetchTileData()
   }
 
   async onAdd(map: any, gl: WebGL2RenderingContext) {
@@ -367,10 +270,7 @@ export class ZarrLayer {
     const resolvedGl = this.resolveGl(map, gl)
     this.gl = resolvedGl
     this.invalidate = () => map.triggerRepaint()
-    this.tileCache = new TileRenderCache(
-      resolvedGl as WebGL2RenderingContext,
-      MAX_CACHED_TILES
-    )
+
     this.colormap.upload(resolvedGl as WebGL2RenderingContext)
     this.renderer = new ZarrRenderer(
       resolvedGl as WebGL2RenderingContext,
@@ -383,21 +283,58 @@ export class ZarrLayer {
     this.projectionChangeHandler = () => {
       const isGlobe = this.isGlobeProjection()
       this.applyWorldCopiesSetting()
-      this.updateGeometryForProjection(isGlobe)
+      this.dataManager?.onProjectionChange(isGlobe)
+      this.renderer?.resetSingleImageGeometry()
     }
     if (typeof map.on === 'function' && this.projectionChangeHandler) {
       map.on('projectionchange', this.projectionChangeHandler)
       map.on('style.load', this.projectionChangeHandler)
     }
     this.applyWorldCopiesSetting()
-    this.updateGeometryForProjection(this.isGlobeProjection())
 
     await this.initialize()
-    await this.prepareTiles()
+    await this.initializeManager()
 
-    this.prefetchTileData().then(() => {
-      this.invalidate()
-    })
+    // Ensure correct initial projection state
+    const isGlobe = this.isGlobeProjection()
+    this.dataManager?.onProjectionChange(isGlobe)
+
+    // Trigger initial update
+    this.dataManager?.update(this.map, this.gl!)
+    this.invalidate()
+  }
+
+  private async initializeManager() {
+    if (!this.zarrStore || !this.gl) return
+
+    // Dispose old manager if exists
+    if (this.dataManager) {
+      this.dataManager.dispose(this.gl)
+    }
+
+    if (this.isMultiscale) {
+      this.dataManager = new TiledDataManager(
+        this.zarrStore,
+        this.variable,
+        this.selector,
+        this.minRenderZoom,
+        this.invalidate
+      )
+    } else {
+      this.dataManager = new SingleImageDataManager(
+        this.zarrStore,
+        this.variable,
+        this.selector,
+        this.invalidate
+      )
+    }
+
+    await this.dataManager.initialize()
+
+    // Initial update if map is ready
+    if (this.map && this.gl) {
+      this.dataManager.update(this.map, this.gl)
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -426,29 +363,11 @@ export class ZarrLayer {
         this.useFillValue = true
       }
 
-      if (this.levelInfos.length > 0) {
-        this.zarrArray = await this.zarrStore.getLevelArray(this.levelInfos[0])
-      } else {
-        this.zarrArray = await this.zarrStore.getArray()
-      }
+      this.isMultiscale = this.levelInfos.length > 0
 
-      for (let i = 0; i < this.levelInfos.length; i++) {
-        const levelArr = await this.zarrStore.getLevelArray(this.levelInfos[i])
-        const width = levelArr.shape[this.dimIndices.lon?.index ?? 1]
-        const height = levelArr.shape[this.dimIndices.lat?.index ?? 0]
-        this.levelMetadata.set(i, { width, height })
-      }
-
+      // Load initial dimension values for UI if needed (kept from original)
+      // But we mostly delegate to manager now for data loading.
       await this.loadInitialDimensionValues()
-
-      this.tilesManager = new Tiles({
-        store: this.zarrStore,
-        selectors: this.selectors,
-        fillValue: this.fillValue,
-        dimIndices: this.dimIndices,
-        maxCachedTiles: MAX_CACHED_TILES,
-        bandNames: this.bandNames,
-      })
     } catch (err) {
       console.error('Failed to initialize Zarr layer:', err)
       throw err
@@ -491,34 +410,6 @@ export class ZarrLayer {
     }
   }
 
-  async prefetchTileData() {
-    if (!this.isMultiscale) {
-      await this.fetchSingleImageData()
-      return
-    }
-
-    const tiles = this.getVisibleTiles()
-    const fetchPromises = tiles.map((tiletuple) =>
-      this.fetchTileData(tiletuple)
-    )
-    await Promise.all(fetchPromises)
-  }
-
-  getVisibleTiles(): TileTuple[] {
-    const mapZoom = this.map.getZoom()
-    if (mapZoom < this.minRenderZoom) {
-      return []
-    }
-    const pyramidLevel = zoomToLevel(mapZoom, this.maxZoom)
-
-    const bounds = this.map.getBounds()?.toArray()
-    if (!bounds) {
-      return []
-    }
-    const tiles = getTilesAtZoom(pyramidLevel, bounds)
-    return tiles
-  }
-
   private getWorldOffsets(): number[] {
     const bounds = this.map.getBounds()
     if (!bounds) return [0]
@@ -545,126 +436,18 @@ export class ZarrLayer {
     return worldOffsets.length > 0 ? worldOffsets : [0]
   }
 
-  async prepareTiles() {
-    if (typeof this.gl === 'undefined') {
-      throw new Error('Cannot prepareTiles with no GL context set')
-    }
-
-    if (this.levelInfos.length === 0) {
-      this.isMultiscale = false
-      await this.prepareSingleImage()
-      return
-    }
-
-    this.isMultiscale = true
-    this.maxZoom = this.levelInfos.length - 1
-  }
-
   private getSelectorHash(): string {
     return JSON.stringify(this.selector)
-  }
-
-  private async prepareSingleImage(): Promise<void> {
-    if (!this.gl || !this.zarrArray || !this.xyLimits) {
-      console.warn(
-        'Cannot prepare single image: missing GL context, zarrArray, or xyLimits'
-      )
-      return
-    }
-
-    const gl = this.gl
-
-    this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs)
-
-    this.singleImageTexture = mustCreateTexture(gl)
-    this.singleImageVertexBuffer = mustCreateBuffer(gl)
-    this.singleImagePixCoordBuffer = mustCreateBuffer(gl)
-
-    this.singleImageWidth = this.zarrArray.shape[this.dimIndices.lon.index]
-    this.singleImageHeight = this.zarrArray.shape[this.dimIndices.lat.index]
-  }
-
-  private async fetchSingleImageData(): Promise<Float32Array | null> {
-    if (!this.zarrArray || this.singleImageData || this.isRemoved) {
-      return this.singleImageData
-    }
-
-    try {
-      const sliceArgs: any[] = new Array(this.zarrArray.shape.length).fill(0)
-
-      for (const dimName of Object.keys(this.dimIndices)) {
-        const dimInfo = this.dimIndices[dimName]
-        if (dimName === 'lon') {
-          sliceArgs[dimInfo.index] = zarr.slice(0, this.singleImageWidth)
-        } else if (dimName === 'lat') {
-          sliceArgs[dimInfo.index] = zarr.slice(0, this.singleImageHeight)
-        } else {
-          const dimSelection = this.selectors[dimName] || this.selector[dimName]
-          if (dimSelection !== undefined) {
-            sliceArgs[dimInfo.index] =
-              typeof dimSelection === 'object'
-                ? (dimSelection.selected as number)
-                : dimSelection
-          } else {
-            sliceArgs[dimInfo.index] = 0
-          }
-        }
-      }
-
-      const data = await zarr.get(this.zarrArray, sliceArgs)
-      if (this.isRemoved) return null
-      this.singleImageData = new Float32Array(
-        (data.data as Float32Array).buffer
-      )
-      this.invalidate()
-      return this.singleImageData
-    } catch (err) {
-      console.error('Error fetching single image data:', err)
-      return null
-    }
-  }
-
-  private async fetchTileData(
-    tileTuple: TileTuple
-  ): Promise<Float32Array | null> {
-    if (this.isRemoved || !this.tilesManager || !this.gl || !this.tileCache)
-      return null
-
-    const tileKey = tileToKey(tileTuple)
-    const tile = this.tileCache.upsert(tileKey)
-    const currentHash = this.getSelectorHash()
-
-    if (tile.data && tile.selectorHash === currentHash) {
-      return tile.data
-    }
-
-    const cache = await this.tilesManager.fetchTile(tileTuple, currentHash)
-    if (!cache || this.isRemoved) {
-      return null
-    }
-
-    tile.data = cache.data
-    tile.textureUploaded = false
-    tile.bandTexturesUploaded.clear()
-    tile.selectorHash = cache.selectorHash
-    tile.channels = cache.channels
-    tile.bandData = cache.bandData
-    this.invalidate()
-
-    return tile.data
   }
 
   prerender(
     _gl: WebGL2RenderingContext,
     _params: number[] | Float32Array | Float64Array | any
   ) {
-    if (this.isRemoved || !this.gl || !this.tileCache) return
+    if (this.isRemoved || !this.gl || !this.dataManager) return
 
-    if (this.isMultiscale) {
-      this.prefetchTileData()
-    } else if (!this.singleImageData) {
-      this.prefetchTileData()
-    }
+    // Update data manager (prefetch tiles etc)
+    this.dataManager.update(this.map, this.gl)
   }
 
   render(
@@ -680,7 +463,8 @@ export class ZarrLayer {
           defaultProjectionData?: ProjectionData
         }
   ) {
-    if (this.isRemoved || !this.renderer || !this.gl || !this.tileCache) return
+    if (this.isRemoved || !this.renderer || !this.gl || !this.dataManager)
+      return
 
     const paramsObj =
       params && typeof params === 'object' && !Array.isArray(params)
@@ -688,8 +472,6 @@ export class ZarrLayer {
         : null
 
     const shaderData = paramsObj?.shaderData
-    const isGlobe = this.isGlobeProjection(shaderData)
-    this.updateGeometryForProjection(isGlobe)
     let projectionData: ProjectionData | undefined
     if (paramsObj?.defaultProjectionData) {
       projectionData = {
@@ -735,31 +517,20 @@ export class ZarrLayer {
       offset: this.offset,
     }
 
-    const visibleTiles = this.isMultiscale ? this.getVisibleTiles() : []
+    const renderData = this.dataManager.getRenderData()
 
     this.renderer.render({
       matrix,
       colormapTexture,
       uniforms,
       worldOffsets,
-      isMultiscale: this.isMultiscale,
-      visibleTiles,
-      tileCache: this.tileCache,
-      tileSize: this.tileSize,
-      vertexArr: this.vertexArr,
-      pixCoordArr: this.pixCoordArr,
-      singleImage: this.isMultiscale
-        ? undefined
-        : {
-            data: this.singleImageData,
-            width: this.singleImageWidth,
-            height: this.singleImageHeight,
-            bounds: this.mercatorBounds,
-            texture: this.singleImageTexture,
-            vertexBuffer: this.singleImageVertexBuffer,
-            pixCoordBuffer: this.singleImagePixCoordBuffer,
-            pixCoordArr: this.singleImagePixCoordArr,
-          },
+      isMultiscale: renderData.isMultiscale,
+      visibleTiles: renderData.visibleTiles || [],
+      tileCache: renderData.tileCache,
+      tileSize: renderData.tileSize || this.tileSize,
+      vertexArr: renderData.vertexArr || new Float32Array(),
+      pixCoordArr: renderData.pixCoordArr || new Float32Array(),
+      singleImage: renderData.singleImage,
       shaderData,
       projectionData,
       multiBandConfig: this.multiBandConfig || undefined,
@@ -774,27 +545,13 @@ export class ZarrLayer {
 
     this.colormap.dispose(gl)
 
-    this.tileCache?.clear()
-    this.tileCache = null
-
-    if (this.singleImageTexture) {
-      gl.deleteTexture(this.singleImageTexture)
-      this.singleImageTexture = null
-    }
-    if (this.singleImageVertexBuffer) {
-      gl.deleteBuffer(this.singleImageVertexBuffer)
-      this.singleImageVertexBuffer = null
-    }
-    if (this.singleImagePixCoordBuffer) {
-      gl.deleteBuffer(this.singleImagePixCoordBuffer)
-      this.singleImagePixCoordBuffer = null
-    }
+    this.dataManager?.dispose(gl)
+    this.dataManager = null
 
     if (this.zarrStore) {
       this.zarrStore.cleanup()
       this.zarrStore = null
     }
-    this.singleImageData = null
 
     if (
       this.map &&
