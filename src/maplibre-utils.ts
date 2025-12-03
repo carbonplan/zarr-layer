@@ -25,10 +25,15 @@ export function lon2tile(lon: number, zoom: number): number {
  * @returns Tile Y coordinate.
  */
 export function lat2tile(lat: number, zoom: number): number {
+  const clamped = Math.max(
+    -MERCATOR_LAT_LIMIT,
+    Math.min(MERCATOR_LAT_LIMIT, lat)
+  )
   return Math.floor(
     ((1 -
       Math.log(
-        Math.tan((lat * Math.PI) / 180) + 1 / Math.cos((lat * Math.PI) / 180)
+        Math.tan((clamped * Math.PI) / 180) +
+          1 / Math.cos((clamped * Math.PI) / 180)
       ) /
         Math.PI) /
       2) *
@@ -49,10 +54,12 @@ export function getTilesAtZoom(
   bounds: [[number, number], [number, number]]
 ): TileTuple[] {
   const [[west, south], [east, north]] = bounds
+  const clampedSouth = Math.max(-MERCATOR_LAT_LIMIT, south)
+  const clampedNorth = Math.min(MERCATOR_LAT_LIMIT, north)
   let nwX = lon2tile(west, zoom)
   let seX = lon2tile(east, zoom)
-  const nwY = lat2tile(north, zoom)
-  const seY = lat2tile(south, zoom)
+  const nwY = lat2tile(clampedNorth, zoom)
+  const seY = lat2tile(clampedSouth, zoom)
 
   const maxTiles = Math.pow(2, zoom)
   const tiles: TileTuple[] = []
@@ -84,15 +91,6 @@ export function getTilesAtZoom(
  */
 export function tileToKey(tile: TileTuple): string {
   return tile.join(',')
-}
-
-/**
- * Converts cache key to tile tuple.
- * @param key - String key "z,x,y".
- * @returns Tile tuple [zoom, x, y].
- */
-export function keyToTile(key: string): TileTuple {
-  return key.split(',').map((d) => parseInt(d)) as TileTuple
 }
 
 /**
@@ -210,22 +208,4 @@ export function boundsToMercatorNorm(
     x1: lonToMercatorNorm(xyLimits.xMax),
     y1: latToMercatorNorm(yMin),
   }
-}
-
-/**
- * Computes scale and shift parameters for positioning an arbitrary bounds region in mercator coordinates.
- * Used in vertex shader to position non-tiled data correctly on the map.
- * Maps vertices from [-1, 1] clip space to the mercator bounds.
- * @param bounds - Normalized mercator bounds { x0, y0, x1, y1 }.
- * @returns [scale, shiftX, shiftY] for vertex shader uniforms.
- */
-export function boundsToScale(
-  bounds: MercatorBounds
-): [number, number, number] {
-  const scaleX = (bounds.x1 - bounds.x0) / 2
-  const scaleY = (bounds.y1 - bounds.y0) / 2
-  const scale = Math.max(scaleX, scaleY)
-  const shiftX = (bounds.x0 + bounds.x1) / 2
-  const shiftY = (bounds.y0 + bounds.y1) / 2
-  return [scale, shiftX, shiftY]
 }

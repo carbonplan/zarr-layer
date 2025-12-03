@@ -10,7 +10,11 @@ import { calculateNearestIndex, loadDimensionValues } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
 import { Tiles } from './tiles'
 import { mustCreateBuffer, mustCreateTexture } from './webgl-utils'
-import { maplibreFragmentShaderSource } from './maplibre-shaders'
+import {
+  maplibreFragmentShaderSource,
+  type ProjectionData,
+  type ShaderData,
+} from './maplibre-shaders'
 import {
   boundsToMercatorNorm,
   getTilesAtZoom,
@@ -35,24 +39,8 @@ import type {
 
 const DEFAULT_TILE_SIZE = 128
 const MAX_CACHED_TILES = 64
+const TILE_SUBDIVISIONS = 16
 
-/**
- * MapLibre/MapBox custom layer for rendering Zarr datasets.
- * Implements the CustomLayerInterface specification.
- *
- * @example
- * ```ts
- * const layer = new ZarrLayer({
- *   id: 'my-zarr-layer',
- *   source: 'https://example.com/data.zarr',
- *   variable: 'temperature',
- *   vmin: 0,
- *   vmax: 40,
- *   colormap: 'viridis'
- * });
- * map.addLayer(layer);
- * ```
- */
 export class ZarrLayer {
   type: 'custom' = 'custom'
   renderingMode: '2d' = '2d'
@@ -93,6 +81,32 @@ export class ZarrLayer {
   private gl: WebGL2RenderingContext | undefined
   private map: any
   private renderer: ZarrRenderer | null = null
+  private applyWorldCopiesSetting() {
+    if (
+      !this.map ||
+      typeof this.map.getProjection !== 'function' ||
+      typeof this.map.setRenderWorldCopies !== 'function'
+    ) {
+      return
+    }
+    const projection = this.map.getProjection()
+    const isGlobe = projection?.type === 'globe' || projection?.name === 'globe'
+    const target = isGlobe
+      ? false
+      : this.initialRenderWorldCopies !== undefined
+      ? this.initialRenderWorldCopies
+      : true
+
+    const current =
+      typeof this.map.getRenderWorldCopies === 'function'
+        ? this.map.getRenderWorldCopies()
+        : undefined
+    if (current !== target) {
+      this.map.setRenderWorldCopies(target)
+    }
+  }
+  private initialRenderWorldCopies: boolean | undefined
+  private projectionChangeHandler: (() => void) | null = null
   private resolveGl(map: any, gl: any): WebGL2RenderingContext {
     const isWebGL2 =
       gl &&
@@ -117,9 +131,10 @@ export class ZarrLayer {
     throw new Error('MapLibre did not provide a valid WebGL2 context')
   }
 
-  private vertexArr: Float32Array
-  private pixCoordArr: Float32Array
+  private vertexArr: Float32Array = new Float32Array()
+  private pixCoordArr: Float32Array = new Float32Array()
   private singleImagePixCoordArr: Float32Array = new Float32Array()
+  private currentSubdivisions: number = 0
 
   private zarrArray: zarr.Array<any> | null = null
   private zarrStore: ZarrStore | null = null
@@ -132,6 +147,71 @@ export class ZarrLayer {
   private selectors: { [key: string]: ZarrSelectorsProps } = {}
   private isRemoved: boolean = false
   private fragmentShaderSource: string = maplibreFragmentShaderSource
+
+  private static createSubdividedQuad(
+    subdivisions: number,
+    flipY: boolean
+  ): { vertexArr: Float32Array; texCoordArr: Float32Array } {
+    const vertices: number[] = []
+    const texCoords: number[] = []
+    const step = 2 / subdivisions
+    const texStep = 1 / subdivisions
+
+    const pushVertex = (col: number, row: number) => {
+      const x = -1 + col * step
+      const y = 1 - row * step
+      const u = col * texStep
+      const vBase = row * texStep
+      const v = flipY ? 1 - vBase : vBase
+      vertices.push(x, y)
+      texCoords.push(u, v)
+    }
+
+    for (let row = 0; row < subdivisions; row++) {
+      for (let col = 0; col <= subdivisions; col++) {
+        pushVertex(col, row)
+        pushVertex(col, row + 1)
+      }
+      if (row < subdivisions - 1) {
+        // Degenerate vertices to connect strips
+        pushVertex(subdivisions, row + 1)
+        pushVertex(0, row + 1)
+      }
+    }
+
+    return {
+      vertexArr: new Float32Array(vertices),
+      texCoordArr: new Float32Array(texCoords),
+    }
+  }
+
+  private isGlobeProjection(shaderData?: ShaderData): boolean {
+    if (shaderData?.vertexShaderPrelude) return true
+    const projection = this.map?.getProjection ? this.map.getProjection() : null
+    return projection?.type === 'globe' || projection?.name === 'globe'
+  }
+
+  private updateGeometryForProjection(isGlobe: boolean) {
+    const targetSubdivisions = isGlobe ? TILE_SUBDIVISIONS : 1
+    if (this.currentSubdivisions === targetSubdivisions) return
+
+    const subdivided = ZarrLayer.createSubdividedQuad(
+      targetSubdivisions,
+      false
+    )
+    this.vertexArr = subdivided.vertexArr
+    this.pixCoordArr = subdivided.texCoordArr
+
+    const subdividedSingle = ZarrLayer.createSubdividedQuad(
+      targetSubdivisions,
+      true
+    )
+    this.singleImagePixCoordArr = subdividedSingle.texCoordArr
+
+    this.currentSubdivisions = targetSubdivisions
+    this.tileCache?.markGeometryDirty()
+    this.renderer?.resetSingleImageGeometry()
+  }
 
   constructor({
     id,
@@ -172,44 +252,8 @@ export class ZarrLayer {
     if (noDataMin !== undefined) this.noDataMin = noDataMin
     if (noDataMax !== undefined) this.noDataMax = noDataMax
 
-    // Vertices in clip space [-1, 1] representing a tile quad
-    // Order: top-left, bottom-left, top-right, bottom-right (triangle strip)
-    this.vertexArr = new Float32Array([
-      -1.0,
-      1.0, // top-left
-      -1.0,
-      -1.0, // bottom-left
-      1.0,
-      1.0, // top-right
-      1.0,
-      -1.0, // bottom-right
-    ])
-
-    // Texture coordinates for sampling the tile texture
-    // For multiscale tiles, Y increases downward (north to south)
-    this.pixCoordArr = new Float32Array([
-      0.0,
-      0.0, // top-left
-      0.0,
-      1.0, // bottom-left
-      1.0,
-      0.0, // top-right
-      1.0,
-      1.0, // bottom-right
-    ])
-
-    // Texture coordinates for single image (EPSG:4326 data)
-    // Latitude often increases upward in data, so Y is flipped
-    this.singleImagePixCoordArr = new Float32Array([
-      0.0,
-      1.0, // top-left (sample from bottom of texture)
-      0.0,
-      0.0, // bottom-left (sample from top of texture)
-      1.0,
-      1.0, // top-right
-      1.0,
-      0.0, // bottom-right
-    ])
+    // Default to unsubdivided geometry; globe mode will enable finer grids.
+    this.updateGeometryForProjection(false)
   }
 
   setOpacity(opacity: number) {
@@ -295,6 +339,21 @@ export class ZarrLayer {
       resolvedGl as WebGL2RenderingContext,
       this.fragmentShaderSource
     )
+
+    if (typeof map.getRenderWorldCopies === 'function') {
+      this.initialRenderWorldCopies = map.getRenderWorldCopies()
+    }
+    this.projectionChangeHandler = () => {
+      const isGlobe = this.isGlobeProjection()
+      this.applyWorldCopiesSetting()
+      this.updateGeometryForProjection(isGlobe)
+    }
+    if (typeof map.on === 'function' && this.projectionChangeHandler) {
+      map.on('projectionchange', this.projectionChangeHandler)
+      map.on('style.load', this.projectionChangeHandler)
+    }
+    this.applyWorldCopiesSetting()
+    this.updateGeometryForProjection(this.isGlobeProjection())
 
     await this.initialize()
     await this.prepareTiles()
@@ -426,6 +485,15 @@ export class ZarrLayer {
     const bounds = this.map.getBounds()
     if (!bounds) return [0]
 
+    const projection = this.map.getProjection ? this.map.getProjection() : null
+    const isGlobe = projection?.name === 'globe' || projection?.type === 'globe'
+    // Honor MapLibre's world copy setting, but always avoid duplicates on globe
+    const renderWorldCopies =
+      typeof this.map.getRenderWorldCopies === 'function'
+        ? this.map.getRenderWorldCopies()
+        : true
+    if (isGlobe || !renderWorldCopies) return [0]
+
     const west = bounds.getWest()
     const east = bounds.getEast()
 
@@ -544,8 +612,71 @@ export class ZarrLayer {
     return tile.data
   }
 
-  prerender(_gl: WebGL2RenderingContext, matrix: number[]) {
+  prerender(
+    _gl: WebGL2RenderingContext,
+    _params: number[] | Float32Array | Float64Array | any
+  ) {
+    if (this.isRemoved || !this.gl || !this.tileCache) return
+
+    if (this.isMultiscale) {
+      this.prefetchTileData()
+    } else if (!this.singleImageData) {
+      this.prefetchTileData()
+    }
+  }
+
+  render(
+    _gl: WebGL2RenderingContext,
+    params:
+      | number[]
+      | Float32Array
+      | Float64Array
+      | {
+          modelViewProjectionMatrix?: Float64Array | Float32Array | number[]
+          projectionMatrix?: Float64Array | Float32Array | number[]
+          shaderData?: ShaderData
+          defaultProjectionData?: ProjectionData
+        }
+  ) {
     if (this.isRemoved || !this.renderer || !this.gl || !this.tileCache) return
+
+    const paramsObj =
+      params && typeof params === 'object' && !Array.isArray(params)
+        ? (params as any)
+        : null
+
+    const shaderData = paramsObj?.shaderData
+    const isGlobe = this.isGlobeProjection(shaderData)
+    this.updateGeometryForProjection(isGlobe)
+    let projectionData: ProjectionData | undefined
+    if (paramsObj?.defaultProjectionData) {
+      projectionData = {
+        mainMatrix: paramsObj.defaultProjectionData.mainMatrix,
+        fallbackMatrix: paramsObj.defaultProjectionData.fallbackMatrix,
+        tileMercatorCoords: paramsObj.defaultProjectionData.tileMercatorCoords,
+        clippingPlane: paramsObj.defaultProjectionData.clippingPlane,
+        projectionTransition:
+          paramsObj.defaultProjectionData.projectionTransition,
+      }
+    }
+    let matrix: number[] | Float32Array | Float64Array | null = null
+    if (projectionData?.mainMatrix && projectionData.mainMatrix.length) {
+      matrix = projectionData.mainMatrix
+    } else if (
+      Array.isArray(params) ||
+      params instanceof Float32Array ||
+      params instanceof Float64Array
+    ) {
+      matrix = params as number[] | Float32Array | Float64Array
+    } else if (paramsObj?.modelViewProjectionMatrix) {
+      matrix = paramsObj.modelViewProjectionMatrix
+    } else if (paramsObj?.projectionMatrix) {
+      matrix = paramsObj.projectionMatrix
+    }
+
+    if (!matrix) {
+      return
+    }
 
     const worldOffsets = this.getWorldOffsets()
     const colormapTexture = this.colormap.ensureTexture(this.gl)
@@ -563,13 +694,8 @@ export class ZarrLayer {
     }
 
     const visibleTiles = this.isMultiscale ? this.getVisibleTiles() : []
-    if (this.isMultiscale) {
-      this.prefetchTileData()
-    } else if (!this.singleImageData) {
-      this.prefetchTileData()
-    }
 
-    this.renderer.prerender({
+    this.renderer.render({
       matrix,
       colormapTexture,
       uniforms,
@@ -592,12 +718,9 @@ export class ZarrLayer {
             pixCoordBuffer: this.singleImagePixCoordBuffer,
             pixCoordArr: this.singleImagePixCoordArr,
           },
+      shaderData,
+      projectionData,
     })
-  }
-
-  render(gl: WebGL2RenderingContext, _matrix: number[]) {
-    if (this.isRemoved || !this.renderer) return
-    this.renderer.present()
   }
 
   onRemove(_map: any, gl: WebGL2RenderingContext) {
@@ -629,5 +752,21 @@ export class ZarrLayer {
       this.zarrStore = null
     }
     this.singleImageData = null
+
+    if (
+      this.map &&
+      this.projectionChangeHandler &&
+      typeof this.map.off === 'function'
+    ) {
+      this.map.off('projectionchange', this.projectionChangeHandler)
+      this.map.off('style.load', this.projectionChangeHandler)
+    }
+    if (
+      this.map &&
+      typeof this.map.setRenderWorldCopies === 'function' &&
+      this.initialRenderWorldCopies !== undefined
+    ) {
+      this.map.setRenderWorldCopies(this.initialRenderWorldCopies)
+    }
   }
 }

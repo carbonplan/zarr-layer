@@ -6,6 +6,7 @@ export interface TileRenderData {
   tileTexture: WebGLTexture
   vertexBuffer: WebGLBuffer
   pixCoordBuffer: WebGLBuffer
+  geometryUploaded?: boolean
   lastUsed: number
 }
 
@@ -30,6 +31,7 @@ export class TileRenderCache {
         tileTexture: mustCreateTexture(gl),
         vertexBuffer: mustCreateBuffer(gl),
         pixCoordBuffer: mustCreateBuffer(gl),
+        geometryUploaded: false,
         lastUsed: Date.now(),
       }
       this.tiles.set(tileKey, tile)
@@ -68,6 +70,12 @@ export class TileRenderCache {
         this.gl.deleteBuffer(tile.pixCoordBuffer)
       }
       this.tiles.delete(oldestKey)
+    }
+  }
+
+  markGeometryDirty() {
+    for (const tile of this.tiles.values()) {
+      tile.geometryUploaded = false
     }
   }
 }

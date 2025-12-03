@@ -5,8 +5,52 @@
  * Adapted from zarr-gl to work with zarr-cesium's colormap and nodata handling.
  */
 
+export interface ShaderData {
+  vertexShaderPrelude: string
+  define: string
+  variantName: string
+}
+
+export interface ProjectionData {
+  mainMatrix: Float32Array | Float64Array | number[]
+  fallbackMatrix: Float32Array | Float64Array | number[]
+  tileMercatorCoords: [number, number, number, number]
+  clippingPlane: [number, number, number, number]
+  projectionTransition: number
+}
+
+export function createVertexShaderSource(shaderData?: ShaderData): string {
+  if (shaderData && shaderData.vertexShaderPrelude) {
+    return `#version 300 es
+${shaderData.vertexShaderPrelude}
+${shaderData.define}
+
+uniform float scale;
+uniform float scale_x;
+uniform float scale_y;
+uniform float shift_x;
+uniform float shift_y;
+uniform float u_worldXOffset;
+
+in vec2 pix_coord_in;
+in vec2 vertex;
+
+out vec2 pix_coord;
+
+void main() {
+  float sx = scale_x > 0.0 ? scale_x : scale;
+  float sy = scale_y > 0.0 ? scale_y : scale;
+  vec2 a = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);
+  gl_Position = projectTile(a);
+  pix_coord = pix_coord_in;
+}
+`
+  }
+  return maplibreVertexShaderSource
+}
+
 /**
- * Vertex shader for tile rendering.
+ * Vertex shader for tile rendering (mercator fallback).
  * Transforms tile vertices using scale, shift, and projection matrix uniforms.
  * Vertices are in [-1, 1] and represent a full tile quad.
  * Scale and shift position the tile in mercator [0, 1] space.
@@ -55,6 +99,8 @@ uniform bool u_useFillValue;
 uniform float u_fillValue;
 uniform float u_scaleFactor;
 uniform float u_addOffset;
+uniform vec2 u_texScale;
+uniform vec2 u_texOffset;
 
 uniform sampler2D tex;
 uniform sampler2D cmap;
@@ -63,7 +109,8 @@ in vec2 pix_coord;
 out vec4 color;
 
 void main() {
-  float raw = texture(tex, pix_coord).r;
+  vec2 sample_coord = pix_coord * u_texScale + u_texOffset;
+  float raw = texture(tex, sample_coord).r;
   float value = raw * u_scaleFactor + u_addOffset;
   
   bool isNaN = (value != value);

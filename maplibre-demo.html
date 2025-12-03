@@ -1,588 +1,573 @@
 <!DOCTYPE html>
 <html>
-  <head>
+
+<head>
     <meta charset="utf-8" />
     <title>Zarr-Cesium MapLibre Demo</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <script src="https://unpkg.com/maplibre-gl@4.0.0/dist/maplibre-gl.js"></script>
-    <link
-      href="https://unpkg.com/maplibre-gl@4.0.0/dist/maplibre-gl.css"
-      rel="stylesheet"
-    />
+    <script src="https://unpkg.com/maplibre-gl@5.13.0/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@5.13.0/dist/maplibre-gl.css" rel="stylesheet" />
     <style>
-      body {
-        margin: 0;
-        padding: 0;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-          Oxygen, Ubuntu, Cantarell, sans-serif;
-      }
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                Oxygen, Ubuntu, Cantarell, sans-serif;
+        }
 
-      #map {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        width: 100%;
-      }
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
+        }
 
-      .controls {
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        background: white;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-        max-width: 300px;
-        z-index: 1;
-      }
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            max-width: 300px;
+            z-index: 1;
+        }
 
-      .controls h3 {
-        margin: 0 0 10px 0;
-        font-size: 16px;
-        color: #333;
-      }
+        .controls h3 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            color: #333;
+        }
 
-      .control-group {
-        margin-bottom: 12px;
-      }
+        .control-group {
+            margin-bottom: 12px;
+        }
 
-      .control-group label {
-        display: block;
-        font-size: 12px;
-        color: #666;
-        margin-bottom: 4px;
-        font-weight: 500;
-      }
+        .control-group label {
+            display: block;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
 
-      .control-group input[type='range'] {
-        width: 100%;
-      }
+        .control-group input[type='range'] {
+            width: 100%;
+        }
 
-      .control-group select {
-        width: 100%;
-        padding: 6px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 12px;
-      }
+        .control-group select {
+            width: 100%;
+            padding: 6px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+        }
 
-      .value-display {
-        display: inline-block;
-        float: right;
-        color: #333;
-        font-weight: 600;
-      }
+        .value-display {
+            display: inline-block;
+            float: right;
+            color: #333;
+            font-weight: 600;
+        }
 
-      .info {
-        position: absolute;
-        bottom: 10px;
-        left: 10px;
-        background: rgba(255, 255, 255, 0.95);
-        padding: 10px;
-        border-radius: 4px;
-        font-size: 11px;
-        color: #666;
-        max-width: 300px;
-        z-index: 1;
-      }
+        .info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #666;
+            max-width: 300px;
+            z-index: 1;
+        }
 
-      .loading {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: white;
-        padding: 20px 40px;
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        font-size: 14px;
-        z-index: 1000;
-      }
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px 40px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            font-size: 14px;
+            z-index: 1000;
+        }
     </style>
-  </head>
+</head>
 
-  <body>
+<body>
     <div id="map"></div>
 
     <div class="controls">
-      <h3>Zarr Layer Controls</h3>
+        <h3>Zarr Layer Controls</h3>
 
-      <div class="control-group">
-        <label>
-          Opacity: <span class="value-display" id="opacity-value">0.7</span>
-        </label>
-        <input
-          type="range"
-          id="opacity"
-          min="0"
-          max="1"
-          step="0.1"
-          value="0.7"
-        />
-      </div>
+        <div class="control-group">
+            <label>
+                Opacity: <span class="value-display" id="opacity-value">0.7</span>
+            </label>
+            <input type="range" id="opacity" min="0" max="1" step="0.1" value="0.7" />
+        </div>
 
-      <div class="control-group">
-        <label>
-          Min Value: <span class="value-display" id="vmin-value">271</span>
-        </label>
-        <input
-          type="range"
-          id="vmin"
-          min="260"
-          max="290"
-          step="1"
-          value="271"
-        />
-      </div>
+        <div class="control-group">
+            <label>
+                Min Value: <span class="value-display" id="vmin-value">271</span>
+            </label>
+            <input type="range" id="vmin" min="260" max="290" step="1" value="271" />
+        </div>
 
-      <div class="control-group">
-        <label>
-          Max Value: <span class="value-display" id="vmax-value">305</span>
-        </label>
-        <input
-          type="range"
-          id="vmax"
-          min="280"
-          max="320"
-          step="1"
-          value="305"
-        />
-      </div>
+        <div class="control-group">
+            <label>
+                Max Value: <span class="value-display" id="vmax-value">305</span>
+            </label>
+            <input type="range" id="vmax" min="280" max="320" step="1" value="305" />
+        </div>
 
-      <div class="control-group">
-        <label>Colormap:</label>
-        <select id="colormap">
-          <option value="turbo">Turbo</option>
-          <option value="viridis">Viridis</option>
-          <option value="plasma">Plasma</option>
-          <option value="inferno" selected>Inferno</option>
-          <option value="magma">Magma</option>
-          <option value="hot">Hot</option>
-          <option value="jet">Jet</option>
-          <option value="rainbow">Rainbow</option>
-          <option value="coolwarm">Coolwarm</option>
-          <option value="RdYlBu">RdYlBu</option>
-          <option value="Spectral">Spectral</option>
-        </select>
-      </div>
+        <div class="control-group">
+            <label>Colormap:</label>
+            <select id="colormap">
+                <option value="turbo">Turbo</option>
+                <option value="viridis">Viridis</option>
+                <option value="plasma">Plasma</option>
+                <option value="inferno" selected>Inferno</option>
+                <option value="magma">Magma</option>
+                <option value="hot">Hot</option>
+                <option value="jet">Jet</option>
+                <option value="rainbow">Rainbow</option>
+                <option value="coolwarm">Coolwarm</option>
+                <option value="RdYlBu">RdYlBu</option>
+                <option value="Spectral">Spectral</option>
+            </select>
+        </div>
 
-      <div class="control-group">
-        <label>
-          Time Index: <span class="value-display" id="time-value">0</span>
-        </label>
-        <input type="range" id="time" min="0" max="10" step="1" value="0" />
-      </div>
+        <div class="control-group">
+            <label>
+                Time Index: <span class="value-display" id="time-value">0</span>
+            </label>
+            <input type="range" id="time" min="0" max="10" step="1" value="0" />
+        </div>
 
-      <div class="control-group">
-        <label>Dataset:</label>
-        <select id="dataset">
-          <option value="salinity_v2">Salinity (v2 pyramid)</option>
-          <option value="temperature_v3">Temperature (v3 pyramid)</option>
-          <option value="pressure_v3">Hurricane Florence Pressure (v3)</option>
-          <option value="wind_risk">Wind Risk (2011)</option>
-          <option value="carbonplan_4d">CarbonPlan Climate 4D</option>
-        </select>
-      </div>
+        <div class="control-group">
+            <label>Dataset:</label>
+            <select id="dataset">
+                <option value="salinity_v2">Salinity (v2 pyramid)</option>
+                <option value="temperature_v3">Temperature (v3 pyramid)</option>
+                <option value="pressure_v3">Hurricane Florence Pressure (v3)</option>
+                <option value="wind_risk">Wind Risk (2011)</option>
+                <option value="carbonplan_4d">CarbonPlan Climate 4D</option>
+            </select>
+        </div>
 
-      <div class="control-group" id="band-group" style="display: none">
-        <label>Band:</label>
-        <select id="band">
-          <option value="0">tavg (Temperature Avg)</option>
-          <option value="1">prec (Precipitation)</option>
-        </select>
-      </div>
+        <div class="control-group" id="band-group" style="display: none">
+            <label>Band:</label>
+            <select id="band">
+                <option value="0">tavg (Temperature Avg)</option>
+                <option value="1">prec (Precipitation)</option>
+            </select>
+        </div>
 
-      <div class="control-group" id="month-group" style="display: none">
-        <label>
-          Month: <span class="value-display" id="month-value">1</span>
-        </label>
-        <input type="range" id="month" min="0" max="11" step="1" value="0" />
-      </div>
+        <div class="control-group" id="month-group" style="display: none">
+            <label>
+                Month: <span class="value-display" id="month-value">1</span>
+            </label>
+            <input type="range" id="month" min="0" max="11" step="1" value="0" />
+        </div>
+
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="globe-projection" checked />
+                Globe Projection
+            </label>
+        </div>
     </div>
 
     <div class="info">
-      <strong>Dataset:</strong>
-      <span id="dataset-info">NEMO NPD-EORCA1 Salinity</span><br />
-      <strong>Source:</strong>
-      <span id="source-info">Zarr v2 pyramid format</span><br />
-      <strong>Variable:</strong> <span id="variable-info">sos_abs</span><br />
-      <strong>Note:</strong> This demo requires building zarr-cesium locally and
-      serving it.
+        <strong>Dataset:</strong>
+        <span id="dataset-info">NEMO NPD-EORCA1 Salinity</span><br />
+        <strong>Source:</strong>
+        <span id="source-info">Zarr v2 pyramid format</span><br />
+        <strong>Variable:</strong> <span id="variable-info">sos_abs</span><br />
     </div>
 
     <div class="loading" id="loading">Loading Zarr layer...</div>
 
     <script type="module">
-      // Note: This assumes zarr-cesium is built and available
-      // In production, you would import from: import { ZarrMapboxLayer } from 'zarr-cesium';
-      // For local testing, you need to build the project first: npm run build
+        import { ZarrLayer } from './dist/index.mjs'
 
-      // Import from the MapLibre-specific build (no Cesium dependencies)
-      import { ZarrLayer } from './dist/index.mjs'
-
-      // Initialize MapLibre map
-      const map = new maplibregl.Map({
-        container: 'map',
-        style: {
-          version: 8,
-          sources: {
-            osm: {
-              type: 'raster',
-              tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-              tileSize: 256,
-              attribution:
-                '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        // Initialize MapLibre map
+        const map = new maplibregl.Map({
+            container: 'map',
+            style: {
+                version: 8,
+                'projection': {
+                    'type': 'globe'
+                },
+                sources: {
+                    osm: {
+                        type: 'raster',
+                        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                        tileSize: 256,
+                        attribution:
+                            '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                    },
+                },
+                layers: [
+                    {
+                        id: 'osm',
+                        type: 'raster',
+                        source: 'osm',
+                        minzoom: 0,
+                        maxzoom: 19,
+                    },
+                ],
             },
-          },
-          layers: [
-            {
-              id: 'osm',
-              type: 'raster',
-              source: 'osm',
-              minzoom: 0,
-              maxzoom: 19,
-            },
-          ],
-        },
-        center: [0, 20],
-        zoom: 2,
-      })
-
-      let zarrLayer = null
-
-      // Add navigation controls
-      map.addControl(new maplibregl.NavigationControl())
-
-      // Dataset configurations
-      const datasets = {
-        salinity_v2: {
-          source:
-            'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/nemotest101/pyramid2/T1d/sos_abs.zarr',
-          variable: 'sos_abs',
-          vmin: 30,
-          vmax: 37,
-          colormap: 'inferno',
-          zarrVersion: 2,
-          info: 'NEMO NPD-EORCA1 Salinity',
-          sourceInfo: 'Zarr v2 pyramid format (EPSG:3857)',
-        },
-        temperature_v3: {
-          source:
-            'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/noc-npd-era5-demo/npd-eorca1-era5v1/gn/T1y/tos_con',
-          variable: 'tos_con',
-          vmin: 0,
-          vmax: 27,
-          colormap: 'hot',
-          zarrVersion: 3,
-          info: 'NEMO NPD-EORCA1 Temperature',
-          sourceInfo: 'Zarr v3 pyramid format (EPSG:3857)',
-        },
-        pressure_v3: {
-          source:
-            'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/hurricanes/era5/florence',
-          variable: 'surface_pressure',
-          vmin: 75000,
-          vmax: 104000,
-          colormap: 'jet',
-          zarrVersion: 3,
-          info: 'Hurricane Florence Surface Pressure',
-          sourceInfo: 'Zarr v3 format (EPSG:4326)',
-          noDataMin: 0,
-          noDataMax: 999999,
-        },
-        wind_risk: {
-          source:
-            'https://carbonplan-ocr.s3.amazonaws.com/output/fire-risk/pyramid/production/v0.13.2/pyramid.zarr',
-          variable: 'wind_risk_2011',
-          vmin: 0,
-          vmax: 20,
-          colormap: 'turbo',
-          zarrVersion: 2,
-          info: 'Wind Risk (2011)',
-          sourceInfo: 'CarbonPlan Fire Risk Pyramid (Zarr v2)',
-          noDataMin: -1,
-          noDataMax: 1e10,
-          center: [-98, 39],
-          zoom: 4,
-        },
-        carbonplan_4d: {
-          source:
-            'https://carbonplan-maps.s3.us-west-2.amazonaws.com/v2/demo/4d/tavg-prec-month',
-          variable: 'climate',
-          vmin: -20,
-          vmax: 30,
-          colormap: 'coolwarm',
-          zarrVersion: 2,
-          info: 'CarbonPlan Climate Demo (4D)',
-          sourceInfo: 'Zarr v2 pyramid - temp avg & precipitation by month',
-          has4D: true,
-          bandSelector: 'band',
-          monthSelector: 'month',
-          dimensionNames: {
-            lat: 'y',
-            lon: 'x',
-          },
-        },
-      }
-
-      let currentDataset = 'salinity_v2'
-
-      function toggle4DControls(show) {
-        document.getElementById('band-group').style.display = show
-          ? 'block'
-          : 'none'
-        document.getElementById('month-group').style.display = show
-          ? 'block'
-          : 'none'
-        document.getElementById('time').parentElement.style.display = show
-          ? 'none'
-          : 'block'
-      }
-
-      function getMonthName(index) {
-        const months = [
-          'Jan',
-          'Feb',
-          'Mar',
-          'Apr',
-          'May',
-          'Jun',
-          'Jul',
-          'Aug',
-          'Sep',
-          'Oct',
-          'Nov',
-          'Dec',
-        ]
-        return months[index] || index + 1
-      }
-
-      map.on('load', async () => {
-        try {
-          // Create the Zarr layer with initial dataset
-          const config = datasets[currentDataset]
-          const selector = config.has4D ? { band: 0, month: 0 } : { time: 0 }
-
-          zarrLayer = new ZarrLayer({
-            id: 'zarr-layer',
-            source: config.source,
-            variable: config.variable,
-            vmin: config.vmin,
-            vmax: config.vmax,
-            colormap: config.colormap,
-            opacity: 0.7,
-            selector: selector,
-            zarrVersion: config.zarrVersion,
-            minRenderZoom: config.minRenderZoom ?? 0,
-            noDataMin: config.noDataMin,
-            noDataMax: config.noDataMax,
-            dimensionNames: config.dimensionNames,
-          })
-          // Add layer to map
-          map.addLayer(zarrLayer)
-
-          // Show/hide 4D controls
-          toggle4DControls(config.has4D)
-
-          // Hide loading indicator
-          document.getElementById('loading').style.display = 'none'
-
-          console.log('Zarr layer added successfully!')
-        } catch (error) {
-          console.error('Error loading Zarr layer:', error)
-          document.getElementById('loading').textContent =
-            'Error loading layer: ' + error.message
-          document.getElementById('loading').style.color = 'red'
-        }
-      })
-
-      // Control handlers
-      document.getElementById('opacity').addEventListener('input', (e) => {
-        const value = parseFloat(e.target.value)
-        document.getElementById('opacity-value').textContent = value.toFixed(1)
-        if (zarrLayer) {
-          zarrLayer.setOpacity(value)
-        }
-      })
-
-      function updateRangeControls(config) {
-        const vminInput = document.getElementById('vmin')
-        const vmaxInput = document.getElementById('vmax')
-
-        // Update ranges based on dataset
-        const range = config.vmax - config.vmin
-        vminInput.min = Math.floor(config.vmin - range * 0.5)
-        vminInput.max = Math.ceil(config.vmax)
-        vmaxInput.min = Math.floor(config.vmin)
-        vmaxInput.max = Math.ceil(config.vmax + range * 0.5)
-
-        vminInput.value = config.vmin
-        vmaxInput.value = config.vmax
-        document.getElementById('vmin-value').textContent = config.vmin
-        document.getElementById('vmax-value').textContent = config.vmax
-
-        // Update colormap selector
-        document.getElementById('colormap').value = config.colormap
-
-        // Update info display
-        document.getElementById('dataset-info').textContent = config.info
-        document.getElementById('source-info').textContent = config.sourceInfo
-        document.getElementById('variable-info').textContent = config.variable
-      }
-
-      document.getElementById('vmin').addEventListener('input', (e) => {
-        const vmin = parseFloat(e.target.value)
-        const vmax = parseFloat(document.getElementById('vmax').value)
-        document.getElementById('vmin-value').textContent = vmin
-        if (zarrLayer && vmin < vmax) {
-          zarrLayer.setVminVmax(vmin, vmax)
-        }
-      })
-
-      document.getElementById('vmax').addEventListener('input', (e) => {
-        const vmin = parseFloat(document.getElementById('vmin').value)
-        const vmax = parseFloat(e.target.value)
-        document.getElementById('vmax-value').textContent = vmax
-        if (zarrLayer && vmax > vmin) {
-          zarrLayer.setVminVmax(vmin, vmax)
-        }
-      })
-
-      document.getElementById('colormap').addEventListener('change', (e) => {
-        const colormap = e.target.value
-        if (zarrLayer) {
-          zarrLayer.setColormap(colormap)
-        }
-      })
-
-      document.getElementById('time').addEventListener('input', async (e) => {
-        const timeIndex = parseInt(e.target.value)
-        document.getElementById('time-value').textContent = timeIndex
-        if (zarrLayer) {
-          await zarrLayer.setSelector({ time: timeIndex })
-        }
-      })
-
-      document.getElementById('band').addEventListener('change', async (e) => {
-        const bandIndex = parseInt(e.target.value)
-        const config = datasets[currentDataset]
-        if (zarrLayer && config.has4D) {
-          const monthIndex = parseInt(document.getElementById('month').value)
-          await zarrLayer.setSelector({ band: bandIndex, month: monthIndex })
-
-          // Update vmin/vmax based on band
-          if (bandIndex === 0) {
-            // Temperature: -20 to 30°C
-            zarrLayer.setVminVmax(-20, 30)
-            document.getElementById('vmin').value = -20
-            document.getElementById('vmax').value = 30
-            document.getElementById('vmin-value').textContent = '-20'
-            document.getElementById('vmax-value').textContent = '30'
-            zarrLayer.setColormap('coolwarm')
-            document.getElementById('colormap').value = 'coolwarm'
-          } else {
-            // Precipitation: 0 to 500mm
-            zarrLayer.setVminVmax(0, 500)
-            document.getElementById('vmin').value = 0
-            document.getElementById('vmax').value = 500
-            document.getElementById('vmin-value').textContent = '0'
-            document.getElementById('vmax-value').textContent = '500'
-            zarrLayer.setColormap('viridis')
-            document.getElementById('colormap').value = 'viridis'
-          }
-        }
-      })
-
-      document.getElementById('month').addEventListener('input', async (e) => {
-        const monthIndex = parseInt(e.target.value)
-        document.getElementById('month-value').textContent =
-          getMonthName(monthIndex)
-        if (zarrLayer && datasets[currentDataset].has4D) {
-          const bandIndex = parseInt(document.getElementById('band').value)
-          await zarrLayer.setSelector({ band: bandIndex, month: monthIndex })
-        }
-      })
-
-      document
-        .getElementById('dataset')
-        .addEventListener('change', async (e) => {
-          const datasetKey = e.target.value
-          currentDataset = datasetKey
-          const config = datasets[datasetKey]
-
-          // Show loading
-          document.getElementById('loading').style.display = 'block'
-
-          try {
-            // Remove old layer
-            if (zarrLayer && map.getLayer('zarr-layer')) {
-              map.removeLayer('zarr-layer')
-            }
-
-            // Determine selector based on dataset type
-            const selector = config.has4D
-              ? {
-                  band: parseInt(document.getElementById('band').value) || 0,
-                  month: parseInt(document.getElementById('month').value) || 0,
-                }
-              : { time: 0 }
-
-            // Create new layer
-            zarrLayer = new ZarrLayer({
-              id: 'zarr-layer',
-              source: config.source,
-              variable: config.variable,
-              vmin: config.vmin,
-              vmax: config.vmax,
-              colormap: config.colormap,
-              opacity: parseFloat(document.getElementById('opacity').value),
-              selector: selector,
-              zarrVersion: config.zarrVersion,
-              minRenderZoom: config.minRenderZoom ?? 0,
-              noDataMin: config.noDataMin,
-              noDataMax: config.noDataMax,
-              dimensionNames: config.dimensionNames,
-            })
-
-            map.addLayer(zarrLayer)
-
-            if (config.center) {
-              map.flyTo({ center: config.center, zoom: config.zoom || 4 })
-            }
-
-            // Update controls
-            updateRangeControls(config)
-            toggle4DControls(config.has4D)
-
-            if (!config.has4D) {
-              document.getElementById('time').value = 0
-              document.getElementById('time-value').textContent = '0'
-            } else {
-              document.getElementById('band').value = '0'
-              document.getElementById('month').value = '0'
-              document.getElementById('month-value').textContent =
-                getMonthName(0)
-            }
-
-            // Hide loading
-            document.getElementById('loading').style.display = 'none'
-
-            console.log('Switched to dataset:', datasetKey)
-          } catch (error) {
-            console.error('Error switching dataset:', error)
-            document.getElementById('loading').textContent =
-              'Error loading dataset: ' + error.message
-            document.getElementById('loading').style.color = 'red'
-          }
+            center: [0, 20],
+            zoom: 2,
         })
 
-      // Initialize range controls
-      updateRangeControls(datasets[currentDataset])
+        let zarrLayer = null
 
-      // Error handling
-      map.on('error', (e) => {
-        console.error('Map error:', e)
-      })
+        // Add navigation controls
+        map.addControl(new maplibregl.NavigationControl())
+
+        // Dataset configurations
+        const datasets = {
+            salinity_v2: {
+                source:
+                    'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/nemotest101/pyramid2/T1d/sos_abs.zarr',
+                variable: 'sos_abs',
+                vmin: 30,
+                vmax: 37,
+                colormap: 'inferno',
+                zarrVersion: 2,
+                info: 'NEMO NPD-EORCA1 Salinity',
+                sourceInfo: 'Zarr v2 pyramid format (EPSG:3857)',
+            },
+            temperature_v3: {
+                source:
+                    'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/noc-npd-era5-demo/npd-eorca1-era5v1/gn/T1y/tos_con',
+                variable: 'tos_con',
+                vmin: 0,
+                vmax: 27,
+                colormap: 'hot',
+                zarrVersion: 3,
+                info: 'NEMO NPD-EORCA1 Temperature',
+                sourceInfo: 'Zarr v3 pyramid format (EPSG:3857)',
+            },
+            pressure_v3: {
+                source:
+                    'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/hurricanes/era5/florence',
+                variable: 'surface_pressure',
+                vmin: 75000,
+                vmax: 104000,
+                colormap: 'jet',
+                zarrVersion: 3,
+                info: 'Hurricane Florence Surface Pressure',
+                sourceInfo: 'Zarr v3 format (EPSG:4326)',
+                noDataMin: 0,
+                noDataMax: 999999,
+            },
+            wind_risk: {
+                source:
+                    'https://carbonplan-ocr.s3.amazonaws.com/output/fire-risk/pyramid/production/v0.13.2/pyramid.zarr',
+                variable: 'wind_risk_2011',
+                vmin: 0,
+                vmax: 20,
+                colormap: 'turbo',
+                zarrVersion: 2,
+                info: 'Wind Risk (2011)',
+                sourceInfo: 'CarbonPlan Fire Risk Pyramid (Zarr v2)',
+                noDataMin: -1,
+                noDataMax: 1e10,
+                center: [-98, 39],
+                zoom: 4,
+            },
+            carbonplan_4d: {
+                source:
+                    'https://carbonplan-maps.s3.us-west-2.amazonaws.com/v2/demo/4d/tavg-prec-month',
+                variable: 'climate',
+                vmin: -20,
+                vmax: 30,
+                colormap: 'coolwarm',
+                zarrVersion: 2,
+                info: 'CarbonPlan Climate Demo (4D)',
+                sourceInfo: 'Zarr v2 pyramid - temp avg & precipitation by month',
+                has4D: true,
+                bandSelector: 'band',
+                monthSelector: 'month',
+                dimensionNames: {
+                    lat: 'y',
+                    lon: 'x',
+                },
+            },
+        }
+
+        let currentDataset = 'salinity_v2'
+
+        function toggle4DControls(show) {
+            document.getElementById('band-group').style.display = show
+                ? 'block'
+                : 'none'
+            document.getElementById('month-group').style.display = show
+                ? 'block'
+                : 'none'
+            document.getElementById('time').parentElement.style.display = show
+                ? 'none'
+                : 'block'
+        }
+
+        function getMonthName(index) {
+            const months = [
+                'Jan',
+                'Feb',
+                'Mar',
+                'Apr',
+                'May',
+                'Jun',
+                'Jul',
+                'Aug',
+                'Sep',
+                'Oct',
+                'Nov',
+                'Dec',
+            ]
+            return months[index] || index + 1
+        }
+
+        map.on('load', async () => {
+            try {
+                // Create the Zarr layer with initial dataset
+                const config = datasets[currentDataset]
+                const selector = config.has4D ? { band: 0, month: 0 } : { time: 0 }
+
+                zarrLayer = new ZarrLayer({
+                    id: 'zarr-layer',
+                    source: config.source,
+                    variable: config.variable,
+                    vmin: config.vmin,
+                    vmax: config.vmax,
+                    colormap: config.colormap,
+                    opacity: 0.7,
+                    selector: selector,
+                    zarrVersion: config.zarrVersion,
+                    minRenderZoom: config.minRenderZoom ?? 0,
+                    noDataMin: config.noDataMin,
+                    noDataMax: config.noDataMax,
+                    dimensionNames: config.dimensionNames,
+                })
+                // Add layer to map
+                map.addLayer(zarrLayer)
+
+                // Show/hide 4D controls
+                toggle4DControls(config.has4D)
+
+                // Hide loading indicator
+                document.getElementById('loading').style.display = 'none'
+
+            } catch (error) {
+                console.error('Error loading Zarr layer:', error)
+                document.getElementById('loading').textContent =
+                    'Error loading layer: ' + error.message
+                document.getElementById('loading').style.color = 'red'
+            }
+        })
+
+        // Control handlers
+        document.getElementById('opacity').addEventListener('input', (e) => {
+            const value = parseFloat(e.target.value)
+            document.getElementById('opacity-value').textContent = value.toFixed(1)
+            if (zarrLayer) {
+                zarrLayer.setOpacity(value)
+            }
+        })
+
+        function updateRangeControls(config) {
+            const vminInput = document.getElementById('vmin')
+            const vmaxInput = document.getElementById('vmax')
+
+            // Update ranges based on dataset
+            const range = config.vmax - config.vmin
+            vminInput.min = Math.floor(config.vmin - range * 0.5)
+            vminInput.max = Math.ceil(config.vmax)
+            vmaxInput.min = Math.floor(config.vmin)
+            vmaxInput.max = Math.ceil(config.vmax + range * 0.5)
+
+            vminInput.value = config.vmin
+            vmaxInput.value = config.vmax
+            document.getElementById('vmin-value').textContent = config.vmin
+            document.getElementById('vmax-value').textContent = config.vmax
+
+            // Update colormap selector
+            document.getElementById('colormap').value = config.colormap
+
+            // Update info display
+            document.getElementById('dataset-info').textContent = config.info
+            document.getElementById('source-info').textContent = config.sourceInfo
+            document.getElementById('variable-info').textContent = config.variable
+        }
+
+        document.getElementById('vmin').addEventListener('input', (e) => {
+            const vmin = parseFloat(e.target.value)
+            const vmax = parseFloat(document.getElementById('vmax').value)
+            document.getElementById('vmin-value').textContent = vmin
+            if (zarrLayer && vmin < vmax) {
+                zarrLayer.setVminVmax(vmin, vmax)
+            }
+        })
+
+        document.getElementById('vmax').addEventListener('input', (e) => {
+            const vmin = parseFloat(document.getElementById('vmin').value)
+            const vmax = parseFloat(e.target.value)
+            document.getElementById('vmax-value').textContent = vmax
+            if (zarrLayer && vmax > vmin) {
+                zarrLayer.setVminVmax(vmin, vmax)
+            }
+        })
+
+        document.getElementById('colormap').addEventListener('change', (e) => {
+            const colormap = e.target.value
+            if (zarrLayer) {
+                zarrLayer.setColormap(colormap)
+            }
+        })
+
+        document.getElementById('time').addEventListener('input', async (e) => {
+            const timeIndex = parseInt(e.target.value)
+            document.getElementById('time-value').textContent = timeIndex
+            if (zarrLayer) {
+                await zarrLayer.setSelector({ time: timeIndex })
+            }
+        })
+
+        document.getElementById('band').addEventListener('change', async (e) => {
+            const bandIndex = parseInt(e.target.value)
+            const config = datasets[currentDataset]
+            if (zarrLayer && config.has4D) {
+                const monthIndex = parseInt(document.getElementById('month').value)
+                await zarrLayer.setSelector({ band: bandIndex, month: monthIndex })
+
+                // Update vmin/vmax based on band
+                if (bandIndex === 0) {
+                    // Temperature: -20 to 30°C
+                    zarrLayer.setVminVmax(-20, 30)
+                    document.getElementById('vmin').value = -20
+                    document.getElementById('vmax').value = 30
+                    document.getElementById('vmin-value').textContent = '-20'
+                    document.getElementById('vmax-value').textContent = '30'
+                    zarrLayer.setColormap('coolwarm')
+                    document.getElementById('colormap').value = 'coolwarm'
+                } else {
+                    // Precipitation: 0 to 500mm
+                    zarrLayer.setVminVmax(0, 500)
+                    document.getElementById('vmin').value = 0
+                    document.getElementById('vmax').value = 500
+                    document.getElementById('vmin-value').textContent = '0'
+                    document.getElementById('vmax-value').textContent = '500'
+                    zarrLayer.setColormap('viridis')
+                    document.getElementById('colormap').value = 'viridis'
+                }
+            }
+        })
+
+        document.getElementById('month').addEventListener('input', async (e) => {
+            const monthIndex = parseInt(e.target.value)
+            document.getElementById('month-value').textContent =
+                getMonthName(monthIndex)
+            if (zarrLayer && datasets[currentDataset].has4D) {
+                const bandIndex = parseInt(document.getElementById('band').value)
+                await zarrLayer.setSelector({ band: bandIndex, month: monthIndex })
+            }
+        })
+
+        document.getElementById('globe-projection').addEventListener('change', (e) => {
+            const isGlobe = e.target.checked
+            map.setProjection(isGlobe ? { type: 'globe' } : { type: 'mercator' })
+        })
+
+        document
+            .getElementById('dataset')
+            .addEventListener('change', async (e) => {
+                const datasetKey = e.target.value
+                currentDataset = datasetKey
+                const config = datasets[datasetKey]
+
+                // Show loading
+                document.getElementById('loading').style.display = 'block'
+
+                try {
+                    // Remove old layer
+                    if (zarrLayer && map.getLayer('zarr-layer')) {
+                        map.removeLayer('zarr-layer')
+                    }
+
+                    // Determine selector based on dataset type
+                    const selector = config.has4D
+                        ? {
+                            band: parseInt(document.getElementById('band').value) || 0,
+                            month: parseInt(document.getElementById('month').value) || 0,
+                        }
+                        : { time: 0 }
+
+                    // Create new layer
+                    zarrLayer = new ZarrLayer({
+                        id: 'zarr-layer',
+                        source: config.source,
+                        variable: config.variable,
+                        vmin: config.vmin,
+                        vmax: config.vmax,
+                        colormap: config.colormap,
+                        opacity: parseFloat(document.getElementById('opacity').value),
+                        selector: selector,
+                        zarrVersion: config.zarrVersion,
+                        minRenderZoom: config.minRenderZoom ?? 0,
+                        noDataMin: config.noDataMin,
+                        noDataMax: config.noDataMax,
+                        dimensionNames: config.dimensionNames,
+                    })
+
+                    map.addLayer(zarrLayer)
+
+                    if (config.center) {
+                        map.flyTo({ center: config.center, zoom: config.zoom || 4 })
+                    }
+
+                    // Update controls
+                    updateRangeControls(config)
+                    toggle4DControls(config.has4D)
+
+                    if (!config.has4D) {
+                        document.getElementById('time').value = 0
+                        document.getElementById('time-value').textContent = '0'
+                    } else {
+                        document.getElementById('band').value = '0'
+                        document.getElementById('month').value = '0'
+                        document.getElementById('month-value').textContent =
+                            getMonthName(0)
+                    }
+
+                    // Hide loading
+                    document.getElementById('loading').style.display = 'none'
+
+                    console.log('Switched to dataset:', datasetKey)
+                } catch (error) {
+                    console.error('Error switching dataset:', error)
+                    document.getElementById('loading').textContent =
+                        'Error loading dataset: ' + error.message
+                    document.getElementById('loading').style.color = 'red'
+                }
+            })
+
+        // Initialize range controls
+        updateRangeControls(datasets[currentDataset])
+
+        // Error handling
+        map.on('error', (e) => {
+            console.error('Map error:', e)
+        })
     </script>
-  </body>
+</body>
+
 </html>

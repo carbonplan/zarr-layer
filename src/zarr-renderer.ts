@@ -2,13 +2,12 @@ import {
   createProgram,
   createShader,
   mustCreateBuffer,
-  mustCreateFramebuffer,
   mustGetUniformLocation,
 } from './webgl-utils'
 import {
-  maplibreVertexShaderSource,
-  renderFragmentShaderSource,
-  renderVertexShaderSource,
+  createVertexShaderSource,
+  type ProjectionData,
+  type ShaderData,
 } from './maplibre-shaders'
 import { tileToKey, tileToScale, type TileTuple } from './maplibre-utils'
 import type { MercatorBounds } from './maplibre-utils'
@@ -26,6 +25,15 @@ interface RendererUniforms {
   offset: number
 }
 
+function toFloat32Array(
+  arr: number[] | Float32Array | Float64Array
+): Float32Array {
+  if (arr instanceof Float32Array) {
+    return arr
+  }
+  return new Float32Array(arr)
+}
+
 interface SingleImageParams {
   data: Float32Array | null
   width: number
@@ -37,8 +45,8 @@ interface SingleImageParams {
   pixCoordArr: Float32Array
 }
 
-interface PrerenderParams {
-  matrix: number[]
+interface RenderParams {
+  matrix: number[] | Float32Array | Float64Array
   colormapTexture: WebGLTexture
   uniforms: RendererUniforms
   worldOffsets: number[]
@@ -49,151 +57,53 @@ interface PrerenderParams {
   vertexArr: Float32Array
   pixCoordArr: Float32Array
   singleImage?: SingleImageParams
+  shaderData?: ShaderData
+  projectionData?: ProjectionData
+}
+
+interface ShaderProgram {
+  program: WebGLProgram
+  scaleLoc: WebGLUniformLocation
+  scaleXLoc: WebGLUniformLocation
+  scaleYLoc: WebGLUniformLocation
+  shiftXLoc: WebGLUniformLocation
+  shiftYLoc: WebGLUniformLocation
+  worldXOffsetLoc: WebGLUniformLocation
+  matrixLoc: WebGLUniformLocation | null
+  projMatrixLoc: WebGLUniformLocation | null
+  fallbackMatrixLoc: WebGLUniformLocation | null
+  tileMercatorCoordsLoc: WebGLUniformLocation | null
+  clippingPlaneLoc: WebGLUniformLocation | null
+  projectionTransitionLoc: WebGLUniformLocation | null
+  vminLoc: WebGLUniformLocation
+  vmaxLoc: WebGLUniformLocation
+  opacityLoc: WebGLUniformLocation
+  noDataLoc: WebGLUniformLocation
+  noDataMinLoc: WebGLUniformLocation
+  noDataMaxLoc: WebGLUniformLocation
+  useFillValueLoc: WebGLUniformLocation
+  fillValueLoc: WebGLUniformLocation
+  scaleFactorLoc: WebGLUniformLocation
+  addOffsetLoc: WebGLUniformLocation
+  cmapLoc: WebGLUniformLocation
+  texLoc: WebGLUniformLocation
+  texScaleLoc: WebGLUniformLocation
+  texOffsetLoc: WebGLUniformLocation
+  vertexLoc: number
+  pixCoordLoc: number
+  isGlobe: boolean
 }
 
 export class ZarrRenderer {
   private gl: WebGL2RenderingContext
-  private program: WebGLProgram
-  private renderProgram: WebGLProgram
-  private frameBuffers: {
-    current: {
-      framebuffer: WebGLFramebuffer
-      texture: WebGLTexture
-    } | null
-    next: {
-      framebuffer: WebGLFramebuffer
-      texture: WebGLTexture
-    } | null
-  } = { current: null, next: null }
-  private canvasWidth: number
-  private canvasHeight: number
-
-  private scaleLoc: WebGLUniformLocation
-  private scaleXLoc: WebGLUniformLocation
-  private scaleYLoc: WebGLUniformLocation
-  private shiftXLoc: WebGLUniformLocation
-  private shiftYLoc: WebGLUniformLocation
-  private worldXOffsetLoc: WebGLUniformLocation
-  private matrixLoc: WebGLUniformLocation
-  private vminLoc: WebGLUniformLocation
-  private vmaxLoc: WebGLUniformLocation
-  private opacityLoc: WebGLUniformLocation
-  private noDataLoc: WebGLUniformLocation
-  private noDataMinLoc: WebGLUniformLocation
-  private noDataMaxLoc: WebGLUniformLocation
-  private useFillValueLoc: WebGLUniformLocation
-  private fillValueLoc: WebGLUniformLocation
-  private scaleFactorLoc: WebGLUniformLocation
-  private addOffsetLoc: WebGLUniformLocation
-  private cmapLoc: WebGLUniformLocation
-  private texLoc: WebGLUniformLocation
-  private vertexLoc: number
-  private pixCoordLoc: number
-
-  private renderVertexLoc: number
-  private renderTexLoc: WebGLUniformLocation
-  private quadBuffer: WebGLBuffer
+  private fragmentShaderSource: string
+  private shaderCache: Map<string, ShaderProgram> = new Map()
+  private singleImageGeometryUploaded = false
 
   constructor(gl: WebGL2RenderingContext, fragmentShaderSource: string) {
     this.gl = ZarrRenderer.resolveGl(gl)
-
-    const vertexShader = createShader(
-      this.gl,
-      this.gl.VERTEX_SHADER,
-      maplibreVertexShaderSource
-    )
-    const fragmentShader = createShader(
-      this.gl,
-      this.gl.FRAGMENT_SHADER,
-      fragmentShaderSource
-    )
-    if (!vertexShader || !fragmentShader) {
-      throw new Error('Failed to create shaders')
-    }
-    const program = createProgram(this.gl, vertexShader, fragmentShader)
-    if (!program) {
-      throw new Error('Failed to create program')
-    }
-    this.program = program
-
-    this.scaleLoc = mustGetUniformLocation(this.gl, program, 'scale')
-    this.scaleXLoc = mustGetUniformLocation(this.gl, program, 'scale_x')
-    this.scaleYLoc = mustGetUniformLocation(this.gl, program, 'scale_y')
-    this.shiftXLoc = mustGetUniformLocation(this.gl, program, 'shift_x')
-    this.shiftYLoc = mustGetUniformLocation(this.gl, program, 'shift_y')
-    this.worldXOffsetLoc = mustGetUniformLocation(
-      this.gl,
-      program,
-      'u_worldXOffset'
-    )
-    this.matrixLoc = mustGetUniformLocation(this.gl, program, 'matrix')
-    this.vminLoc = mustGetUniformLocation(this.gl, program, 'vmin')
-    this.vmaxLoc = mustGetUniformLocation(this.gl, program, 'vmax')
-    this.opacityLoc = mustGetUniformLocation(this.gl, program, 'opacity')
-    this.noDataLoc = mustGetUniformLocation(this.gl, program, 'nodata')
-    this.noDataMinLoc = mustGetUniformLocation(this.gl, program, 'u_noDataMin')
-    this.noDataMaxLoc = mustGetUniformLocation(this.gl, program, 'u_noDataMax')
-    this.useFillValueLoc = mustGetUniformLocation(
-      this.gl,
-      program,
-      'u_useFillValue'
-    )
-    this.fillValueLoc = mustGetUniformLocation(this.gl, program, 'u_fillValue')
-    this.scaleFactorLoc = mustGetUniformLocation(
-      this.gl,
-      program,
-      'u_scaleFactor'
-    )
-    this.addOffsetLoc = mustGetUniformLocation(this.gl, program, 'u_addOffset')
-    this.cmapLoc = mustGetUniformLocation(this.gl, program, 'cmap')
-    this.texLoc = mustGetUniformLocation(this.gl, program, 'tex')
-
-    this.vertexLoc = this.gl.getAttribLocation(program, 'vertex')
-    this.pixCoordLoc = this.gl.getAttribLocation(program, 'pix_coord_in')
-
-    this.canvasWidth = this.gl.canvas.width
-    this.canvasHeight = this.gl.canvas.height
-    this.frameBuffers.current = mustCreateFramebuffer(
-      this.gl,
-      this.canvasWidth,
-      this.canvasHeight
-    )
-    this.frameBuffers.next = mustCreateFramebuffer(
-      this.gl,
-      this.canvasWidth,
-      this.canvasHeight
-    )
-
-    const renderVertShader = createShader(
-      this.gl,
-      this.gl.VERTEX_SHADER,
-      renderVertexShaderSource
-    )
-    const renderFragShader = createShader(
-      this.gl,
-      this.gl.FRAGMENT_SHADER,
-      renderFragmentShaderSource
-    )
-    if (!renderVertShader || !renderFragShader) {
-      throw new Error('Failed to create render shaders')
-    }
-    const renderProgram = createProgram(
-      this.gl,
-      renderVertShader,
-      renderFragShader
-    )
-    if (!renderProgram) {
-      throw new Error('Failed to create render program')
-    }
-    this.renderProgram = renderProgram
-    this.renderVertexLoc = this.gl.getAttribLocation(renderProgram, 'vertex')
-    this.renderTexLoc = mustGetUniformLocation(this.gl, renderProgram, 'tex')
-    this.quadBuffer = mustCreateBuffer(this.gl)
-
-    this.gl.deleteShader(vertexShader)
-    this.gl.deleteShader(fragmentShader)
-    this.gl.deleteShader(renderVertShader)
-    this.gl.deleteShader(renderFragShader)
+    this.fragmentShaderSource = fragmentShaderSource
+    this.getOrCreateProgram(undefined)
   }
 
   private static resolveGl(gl: WebGL2RenderingContext): WebGL2RenderingContext {
@@ -207,7 +117,100 @@ export class ZarrRenderer {
     throw new Error('Invalid WebGL2 context: missing required WebGL2 methods')
   }
 
-  prerender(params: PrerenderParams) {
+  private getOrCreateProgram(shaderData?: ShaderData): ShaderProgram {
+    const variantName = shaderData?.variantName ?? 'mercator'
+
+    const cached = this.shaderCache.get(variantName)
+    if (cached) {
+      return cached
+    }
+
+    const isGlobe = shaderData && shaderData.vertexShaderPrelude ? true : false
+    const vertexSource = createVertexShaderSource(shaderData)
+
+    const vertexShader = createShader(
+      this.gl,
+      this.gl.VERTEX_SHADER,
+      vertexSource
+    )
+    const fragmentShader = createShader(
+      this.gl,
+      this.gl.FRAGMENT_SHADER,
+      this.fragmentShaderSource
+    )
+    if (!vertexShader || !fragmentShader) {
+      throw new Error(`Failed to create shaders for variant: ${variantName}`)
+    }
+
+    const program = createProgram(this.gl, vertexShader, fragmentShader)
+    if (!program) {
+      throw new Error(`Failed to create program for variant: ${variantName}`)
+    }
+
+    const shaderProgram: ShaderProgram = {
+      program,
+      scaleLoc: mustGetUniformLocation(this.gl, program, 'scale'),
+      scaleXLoc: mustGetUniformLocation(this.gl, program, 'scale_x'),
+      scaleYLoc: mustGetUniformLocation(this.gl, program, 'scale_y'),
+      shiftXLoc: mustGetUniformLocation(this.gl, program, 'shift_x'),
+      shiftYLoc: mustGetUniformLocation(this.gl, program, 'shift_y'),
+      worldXOffsetLoc: mustGetUniformLocation(
+        this.gl,
+        program,
+        'u_worldXOffset'
+      ),
+      matrixLoc: isGlobe
+        ? null
+        : mustGetUniformLocation(this.gl, program, 'matrix'),
+      projMatrixLoc: isGlobe
+        ? this.gl.getUniformLocation(program, 'u_projection_matrix')
+        : null,
+      fallbackMatrixLoc: isGlobe
+        ? this.gl.getUniformLocation(program, 'u_projection_fallback_matrix')
+        : null,
+      tileMercatorCoordsLoc: isGlobe
+        ? this.gl.getUniformLocation(
+            program,
+            'u_projection_tile_mercator_coords'
+          )
+        : null,
+      clippingPlaneLoc: isGlobe
+        ? this.gl.getUniformLocation(program, 'u_projection_clipping_plane')
+        : null,
+      projectionTransitionLoc: isGlobe
+        ? this.gl.getUniformLocation(program, 'u_projection_transition')
+        : null,
+      vminLoc: mustGetUniformLocation(this.gl, program, 'vmin'),
+      vmaxLoc: mustGetUniformLocation(this.gl, program, 'vmax'),
+      opacityLoc: mustGetUniformLocation(this.gl, program, 'opacity'),
+      noDataLoc: mustGetUniformLocation(this.gl, program, 'nodata'),
+      noDataMinLoc: mustGetUniformLocation(this.gl, program, 'u_noDataMin'),
+      noDataMaxLoc: mustGetUniformLocation(this.gl, program, 'u_noDataMax'),
+      useFillValueLoc: mustGetUniformLocation(
+        this.gl,
+        program,
+        'u_useFillValue'
+      ),
+      fillValueLoc: mustGetUniformLocation(this.gl, program, 'u_fillValue'),
+      scaleFactorLoc: mustGetUniformLocation(this.gl, program, 'u_scaleFactor'),
+      addOffsetLoc: mustGetUniformLocation(this.gl, program, 'u_addOffset'),
+      cmapLoc: mustGetUniformLocation(this.gl, program, 'cmap'),
+      texLoc: mustGetUniformLocation(this.gl, program, 'tex'),
+      texScaleLoc: mustGetUniformLocation(this.gl, program, 'u_texScale'),
+      texOffsetLoc: mustGetUniformLocation(this.gl, program, 'u_texOffset'),
+      vertexLoc: this.gl.getAttribLocation(program, 'vertex'),
+      pixCoordLoc: this.gl.getAttribLocation(program, 'pix_coord_in'),
+      isGlobe,
+    }
+
+    this.gl.deleteShader(vertexShader)
+    this.gl.deleteShader(fragmentShader)
+
+    this.shaderCache.set(variantName, shaderProgram)
+    return shaderProgram
+  }
+
+  render(params: RenderParams) {
     const {
       matrix,
       colormapTexture,
@@ -220,43 +223,83 @@ export class ZarrRenderer {
       vertexArr,
       pixCoordArr,
       singleImage,
+      shaderData,
+      projectionData,
     } = params
 
-    this.resizeIfNeeded()
+    const shaderProgram = this.getOrCreateProgram(shaderData)
 
     const gl = this.gl
-    gl.useProgram(this.program)
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffers.next!.framebuffer)
-    gl.viewport(0, 0, this.canvasWidth, this.canvasHeight)
-    gl.clearColor(0, 0, 0, 0)
-    gl.clear(gl.COLOR_BUFFER_BIT)
+    gl.useProgram(shaderProgram.program)
 
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
     gl.activeTexture(gl.TEXTURE1)
     gl.bindTexture(gl.TEXTURE_2D, colormapTexture)
-    gl.uniform1i(this.cmapLoc, 1)
+    gl.uniform1i(shaderProgram.cmapLoc, 1)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 
-    gl.uniform1f(this.vminLoc, uniforms.vmin)
-    gl.uniform1f(this.vmaxLoc, uniforms.vmax)
-    gl.uniform1f(this.opacityLoc, uniforms.opacity)
-    gl.uniform1f(this.noDataLoc, uniforms.fillValue)
-    gl.uniform1f(this.noDataMinLoc, uniforms.noDataMin)
-    gl.uniform1f(this.noDataMaxLoc, uniforms.noDataMax)
-    gl.uniform1i(this.useFillValueLoc, uniforms.useFillValue ? 1 : 0)
-    gl.uniform1f(this.fillValueLoc, uniforms.fillValue)
-    gl.uniform1f(this.scaleFactorLoc, uniforms.scaleFactor)
-    gl.uniform1f(this.addOffsetLoc, uniforms.offset)
-    gl.uniformMatrix4fv(this.matrixLoc, false, matrix)
+    gl.uniform1f(shaderProgram.vminLoc, uniforms.vmin)
+    gl.uniform1f(shaderProgram.vmaxLoc, uniforms.vmax)
+    gl.uniform1f(shaderProgram.opacityLoc, uniforms.opacity)
+    gl.uniform1f(shaderProgram.noDataLoc, uniforms.fillValue)
+    gl.uniform1f(shaderProgram.noDataMinLoc, uniforms.noDataMin)
+    gl.uniform1f(shaderProgram.noDataMaxLoc, uniforms.noDataMax)
+    gl.uniform1i(shaderProgram.useFillValueLoc, uniforms.useFillValue ? 1 : 0)
+    gl.uniform1f(shaderProgram.fillValueLoc, uniforms.fillValue)
+    gl.uniform1f(shaderProgram.scaleFactorLoc, uniforms.scaleFactor)
+    gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset)
+    gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
+    gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)
+
+    if (shaderProgram.isGlobe && projectionData) {
+      if (shaderProgram.projMatrixLoc) {
+        gl.uniformMatrix4fv(
+          shaderProgram.projMatrixLoc,
+          false,
+          toFloat32Array(projectionData.mainMatrix)
+        )
+      }
+      if (shaderProgram.fallbackMatrixLoc) {
+        gl.uniformMatrix4fv(
+          shaderProgram.fallbackMatrixLoc,
+          false,
+          toFloat32Array(projectionData.fallbackMatrix)
+        )
+      }
+      if (shaderProgram.tileMercatorCoordsLoc) {
+        gl.uniform4f(
+          shaderProgram.tileMercatorCoordsLoc,
+          ...projectionData.tileMercatorCoords
+        )
+      }
+      if (shaderProgram.clippingPlaneLoc) {
+        gl.uniform4f(
+          shaderProgram.clippingPlaneLoc,
+          ...projectionData.clippingPlane
+        )
+      }
+      if (shaderProgram.projectionTransitionLoc) {
+        gl.uniform1f(
+          shaderProgram.projectionTransitionLoc,
+          projectionData.projectionTransition
+        )
+      }
+    } else if (shaderProgram.matrixLoc) {
+      gl.uniformMatrix4fv(
+        shaderProgram.matrixLoc,
+        false,
+        toFloat32Array(matrix)
+      )
+    }
 
     if (isMultiscale) {
       this.renderTiles(
+        shaderProgram,
         visibleTiles,
         worldOffsets,
         tileCache,
@@ -265,91 +308,29 @@ export class ZarrRenderer {
         pixCoordArr
       )
     } else if (singleImage) {
-      this.renderSingleImage(worldOffsets, singleImage, vertexArr)
+      this.renderSingleImage(
+        shaderProgram,
+        worldOffsets,
+        singleImage,
+        vertexArr
+      )
     }
-
-    const temp = this.frameBuffers.current
-    this.frameBuffers.current = this.frameBuffers.next
-    this.frameBuffers.next = temp
-  }
-
-  present() {
-    if (!this.frameBuffers.current) return
-
-    const gl = this.gl
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null)
-    gl.viewport(0, 0, this.canvasWidth, this.canvasHeight)
-
-    gl.useProgram(this.renderProgram)
-
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, this.frameBuffers.current.texture)
-    gl.uniform1i(this.renderTexLoc, 0)
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer)
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, -1, 1, 1, -1, 1, 1]),
-      gl.STATIC_DRAW
-    )
-    gl.enableVertexAttribArray(this.renderVertexLoc)
-    gl.vertexAttribPointer(this.renderVertexLoc, 2, gl.FLOAT, false, 0, 0)
-
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }
 
   dispose() {
     const gl = this.gl
-    if (this.program) {
-      gl.deleteProgram(this.program)
+    for (const [, shader] of this.shaderCache) {
+      gl.deleteProgram(shader.program)
     }
-    if (this.renderProgram) {
-      gl.deleteProgram(this.renderProgram)
-    }
-    if (this.frameBuffers.current) {
-      gl.deleteFramebuffer(this.frameBuffers.current.framebuffer)
-      gl.deleteTexture(this.frameBuffers.current.texture)
-      this.frameBuffers.current = null
-    }
-    if (this.frameBuffers.next) {
-      gl.deleteFramebuffer(this.frameBuffers.next.framebuffer)
-      gl.deleteTexture(this.frameBuffers.next.texture)
-      this.frameBuffers.next = null
-    }
-    gl.deleteBuffer(this.quadBuffer)
+    this.shaderCache.clear()
   }
 
-  private resizeIfNeeded() {
-    const gl = this.gl
-    if (
-      gl.canvas.width === this.canvasWidth &&
-      gl.canvas.height === this.canvasHeight
-    ) {
-      return
-    }
-    if (this.frameBuffers.current) {
-      gl.deleteFramebuffer(this.frameBuffers.current.framebuffer)
-      gl.deleteTexture(this.frameBuffers.current.texture)
-    }
-    if (this.frameBuffers.next) {
-      gl.deleteFramebuffer(this.frameBuffers.next.framebuffer)
-      gl.deleteTexture(this.frameBuffers.next.texture)
-    }
-    this.canvasWidth = gl.canvas.width
-    this.canvasHeight = gl.canvas.height
-    this.frameBuffers.current = mustCreateFramebuffer(
-      gl,
-      this.canvasWidth,
-      this.canvasHeight
-    )
-    this.frameBuffers.next = mustCreateFramebuffer(
-      gl,
-      this.canvasWidth,
-      this.canvasHeight
-    )
+  resetSingleImageGeometry() {
+    this.singleImageGeometryUploaded = false
   }
 
   private renderSingleImage(
+    shaderProgram: ShaderProgram,
     worldOffsets: number[],
     params: SingleImageParams,
     vertexArr: Float32Array
@@ -376,20 +357,27 @@ export class ZarrRenderer {
     const shiftX = (bounds.x0 + bounds.x1) / 2
     const shiftY = (bounds.y0 + bounds.y1) / 2
 
-    gl.uniform1f(this.scaleLoc, 0)
-    gl.uniform1f(this.scaleXLoc, scaleX)
-    gl.uniform1f(this.scaleYLoc, scaleY)
-    gl.uniform1f(this.shiftXLoc, shiftX)
-    gl.uniform1f(this.shiftYLoc, shiftY)
+    gl.uniform1f(shaderProgram.scaleLoc, 0)
+    gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
+    gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
+    gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+    gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+    gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
+    gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)
 
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW)
+    if (!this.singleImageGeometryUploaded) {
+      gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW)
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW)
+    if (!this.singleImageGeometryUploaded) {
+      gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW)
+      this.singleImageGeometryUploaded = true
+    }
 
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.uniform1i(this.texLoc, 0)
+    gl.uniform1i(shaderProgram.texLoc, 0)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -407,20 +395,23 @@ export class ZarrRenderer {
     )
 
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer)
-    gl.enableVertexAttribArray(this.vertexLoc)
-    gl.vertexAttribPointer(this.vertexLoc, 2, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(shaderProgram.vertexLoc)
+    gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0)
 
     gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer)
-    gl.enableVertexAttribArray(this.pixCoordLoc)
-    gl.vertexAttribPointer(this.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
+    gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+
+    const vertexCount = vertexArr.length / 2
 
     for (const worldOffset of worldOffsets) {
-      gl.uniform1f(this.worldXOffsetLoc, worldOffset)
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+      gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount)
     }
   }
 
   private renderTiles(
+    shaderProgram: ShaderProgram,
     visibleTiles: TileTuple[],
     worldOffsets: number[],
     tileCache: TileRenderCache,
@@ -430,11 +421,13 @@ export class ZarrRenderer {
   ) {
     const gl = this.gl
 
-    gl.uniform1f(this.scaleXLoc, 0)
-    gl.uniform1f(this.scaleYLoc, 0)
+    gl.uniform1f(shaderProgram.scaleXLoc, 0)
+    gl.uniform1f(shaderProgram.scaleYLoc, 0)
+
+    const vertexCount = vertexArr.length / 2
 
     for (const worldOffset of worldOffsets) {
-      gl.uniform1f(this.worldXOffsetLoc, worldOffset)
+      gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
 
       for (const tileTuple of visibleTiles) {
         const [z, x, y] = tileTuple
@@ -442,7 +435,8 @@ export class ZarrRenderer {
         const tile = tileCache.get(tileKey)
 
         let tileToRender: TileRenderData | null = null
-        let texCoords = pixCoordArr
+        let texScale: [number, number] = [1, 1]
+        let texOffset: [number, number] = [0, 0]
 
         if (tile && tile.data) {
           tileToRender = tile
@@ -450,25 +444,37 @@ export class ZarrRenderer {
           const parent = this.findBestParentTile(z, x, y, tileCache)
           if (parent) {
             tileToRender = parent.tile
-            texCoords = this.getOverzoomTexCoords(z, x, y, parent.ancestorZ)
+            const levelDiff = z - parent.ancestorZ
+            const divisor = Math.pow(2, levelDiff)
+            const localX = x % divisor
+            const localY = y % divisor
+            texScale = [1 / divisor, 1 / divisor]
+            texOffset = [localX / divisor, localY / divisor]
           }
         }
 
         if (!tileToRender || !tileToRender.data) continue
 
         const [scale, shiftX, shiftY] = tileToScale(tileTuple)
-        gl.uniform1f(this.scaleLoc, scale)
-        gl.uniform1f(this.shiftXLoc, shiftX)
-        gl.uniform1f(this.shiftYLoc, shiftY)
+        gl.uniform1f(shaderProgram.scaleLoc, scale)
+        gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+        gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+        gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
+        gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer)
-        gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW)
+        if (!tileToRender.geometryUploaded) {
+          gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW)
+        }
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.pixCoordBuffer)
-        gl.bufferData(gl.ARRAY_BUFFER, texCoords, gl.STATIC_DRAW)
+        if (!tileToRender.geometryUploaded) {
+          gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW)
+          tileToRender.geometryUploaded = true
+        }
 
         gl.activeTexture(gl.TEXTURE0)
         gl.bindTexture(gl.TEXTURE_2D, tileToRender.tileTexture)
-        gl.uniform1i(this.texLoc, 0)
+        gl.uniform1i(shaderProgram.texLoc, 0)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -486,14 +492,28 @@ export class ZarrRenderer {
         )
 
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer)
-        gl.enableVertexAttribArray(this.vertexLoc)
-        gl.vertexAttribPointer(this.vertexLoc, 2, gl.FLOAT, false, 0, 0)
+        gl.enableVertexAttribArray(shaderProgram.vertexLoc)
+        gl.vertexAttribPointer(
+          shaderProgram.vertexLoc,
+          2,
+          gl.FLOAT,
+          false,
+          0,
+          0
+        )
 
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.pixCoordBuffer)
-        gl.enableVertexAttribArray(this.pixCoordLoc)
-        gl.vertexAttribPointer(this.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+        gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
+        gl.vertexAttribPointer(
+          shaderProgram.pixCoordLoc,
+          2,
+          gl.FLOAT,
+          false,
+          0,
+          0
+        )
 
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount)
       }
     }
   }
@@ -524,34 +544,5 @@ export class ZarrRenderer {
       ancestorY = Math.floor(ancestorY / 2)
     }
     return null
-  }
-
-  private getOverzoomTexCoords(
-    targetZ: number,
-    targetX: number,
-    targetY: number,
-    ancestorZ: number
-  ): Float32Array {
-    const levelDiff = targetZ - ancestorZ
-    const divisor = Math.pow(2, levelDiff)
-
-    const localX = targetX % divisor
-    const localY = targetY % divisor
-
-    const texX0 = localX / divisor
-    const texX1 = (localX + 1) / divisor
-    const texY0 = localY / divisor
-    const texY1 = (localY + 1) / divisor
-
-    return new Float32Array([
-      texX0,
-      texY0,
-      texX0,
-      texY1,
-      texX1,
-      texY0,
-      texX1,
-      texY1,
-    ])
   }
 }
