@@ -35,8 +35,8 @@ import { SingleImageDataManager } from './single-image-data-manager'
 const DEFAULT_TILE_SIZE = 128
 
 export class ZarrLayer {
-  type: 'custom' = 'custom'
-  renderingMode: '2d' = '2d'
+  readonly type: 'custom' = 'custom'
+  readonly renderingMode: '2d' | '3d'
 
   id: string
   private url: string
@@ -155,6 +155,7 @@ export class ZarrLayer {
     customFragmentSource,
     customFrag,
     uniforms,
+    renderingMode = '2d',
   }: MaplibreLayerOptions) {
     this.id = id
     this.url = source
@@ -162,6 +163,7 @@ export class ZarrLayer {
     this.zarrVersion = zarrVersion ?? null
     this.dimensionNames = dimensionNames
     this.selector = selector
+    this.renderingMode = renderingMode
     for (const [dimName, value] of Object.entries(selector)) {
       this.selectors[dimName] = { selected: value, type: 'index' }
     }
@@ -227,18 +229,7 @@ export class ZarrLayer {
   async setVariable(variable: string) {
     this.variable = variable
 
-    // We need to re-initialize potentially?
-    // ZarrStore.variable is immutable? No, it's public.
-    // But data manager needs replacement or update.
-
-    // Simplest is to re-initialize everything if variable changes significantly.
-    // Or we update zarrStore variable and re-init manager.
-
     if (this.zarrStore) {
-      // Since ZarrStore handles multiple variables, we might just need to update manager.
-      // But ZarrStore constructor took 'variable'.
-      // Let's check ZarrStore implementation.
-      // It has 'variable' property and uses it in getChunk/getArray.
       this.zarrStore.variable = variable
     }
 
@@ -445,29 +436,14 @@ export class ZarrLayer {
     return JSON.stringify(this.selector)
   }
 
-  prerender(
-    _gl: WebGL2RenderingContext,
-    _params: number[] | Float32Array | Float64Array | any
-  ) {
+  prerender(_gl: WebGL2RenderingContext | WebGLRenderingContext, _params: any) {
     if (this.isRemoved || !this.gl || !this.dataManager) return
 
     // Update data manager (prefetch tiles etc)
     this.dataManager.update(this.map, this.gl)
   }
 
-  render(
-    _gl: WebGL2RenderingContext,
-    params:
-      | number[]
-      | Float32Array
-      | Float64Array
-      | {
-          modelViewProjectionMatrix?: Float64Array | Float32Array | number[]
-          projectionMatrix?: Float64Array | Float32Array | number[]
-          shaderData?: ShaderData
-          defaultProjectionData?: ProjectionData
-        }
-  ) {
+  render(_gl: WebGL2RenderingContext | WebGLRenderingContext, params: any) {
     if (this.isRemoved || !this.renderer || !this.gl || !this.dataManager)
       return
 

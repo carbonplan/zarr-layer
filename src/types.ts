@@ -58,6 +58,7 @@ export interface MaplibreLayerOptions {
   customFragmentSource?: string
   customFrag?: string
   uniforms?: Record<string, number>
+  renderingMode?: '2d' | '3d'
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'
