@@ -8,7 +8,9 @@ export interface TileRenderData {
   tileTexture: WebGLTexture
   bandTextures: Map<string, WebGLTexture>
   bandTexturesUploaded: Set<string>
+  bandTexturesConfigured: Set<string>
   textureUploaded: boolean
+  textureConfigured: boolean
   vertexBuffer: WebGLBuffer
   pixCoordBuffer: WebGLBuffer
   geometryUploaded?: boolean
@@ -38,7 +40,9 @@ export class TileRenderCache {
         tileTexture: mustCreateTexture(gl),
         bandTextures: new Map(),
         bandTexturesUploaded: new Set(),
+        bandTexturesConfigured: new Set(),
         textureUploaded: false,
+        textureConfigured: false,
         vertexBuffer: mustCreateBuffer(gl),
         pixCoordBuffer: mustCreateBuffer(gl),
         geometryUploaded: false,

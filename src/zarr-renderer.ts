@@ -423,10 +423,6 @@ export class ZarrRenderer {
     if (shaderProgram.colormapLoc) {
       gl.uniform1i(shaderProgram.colormapLoc, 1)
     }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 
     if (shaderProgram.climLoc) {
       gl.uniform2f(shaderProgram.climLoc, uniforms.clim[0], uniforms.clim[1])
@@ -592,6 +588,17 @@ export class ZarrRenderer {
     gl.uniform1f(shaderProgram.scaleXLoc, 0)
     gl.uniform1f(shaderProgram.scaleYLoc, 0)
 
+    if (shaderProgram.useCustomShader && customShaderConfig) {
+      let textureUnit = 2
+      for (const bandName of customShaderConfig.bands) {
+        const loc = shaderProgram.bandTexLocs.get(bandName)
+        if (loc) {
+          gl.uniform1i(loc, textureUnit)
+        }
+        textureUnit++
+      }
+    }
+
     const vertexCount = vertexArr.length / 2
 
     for (const worldOffset of worldOffsets) {
@@ -674,10 +681,21 @@ export class ZarrRenderer {
 
             gl.activeTexture(gl.TEXTURE0 + textureUnit)
             gl.bindTexture(gl.TEXTURE_2D, bandTex)
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+            if (!tileToRender.bandTexturesConfigured.has(bandName)) {
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+              gl.texParameteri(
+                gl.TEXTURE_2D,
+                gl.TEXTURE_WRAP_S,
+                gl.CLAMP_TO_EDGE
+              )
+              gl.texParameteri(
+                gl.TEXTURE_2D,
+                gl.TEXTURE_WRAP_T,
+                gl.CLAMP_TO_EDGE
+              )
+              tileToRender.bandTexturesConfigured.add(bandName)
+            }
             if (!tileToRender.bandTexturesUploaded.has(bandName)) {
               gl.texImage2D(
                 gl.TEXTURE_2D,
@@ -693,10 +711,6 @@ export class ZarrRenderer {
               tileToRender.bandTexturesUploaded.add(bandName)
             }
 
-            const loc = shaderProgram.bandTexLocs.get(bandName)
-            if (loc) {
-              gl.uniform1i(loc, textureUnit)
-            }
             textureUnit++
           }
           if (missingBandData) {
@@ -708,10 +722,13 @@ export class ZarrRenderer {
           if (shaderProgram.texLoc) {
             gl.uniform1i(shaderProgram.texLoc, 0)
           }
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+          if (!tileToRender.textureConfigured) {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+            tileToRender.textureConfigured = true
+          }
           const channels = tileToRender.channels ?? 1
           const format =
             channels === 2

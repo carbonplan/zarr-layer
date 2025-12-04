@@ -112,7 +112,7 @@ void main() {
   }
   
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(cmap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(cmap, vec2(rescaled, 0.5));
   color = vec4(c.rgb, opacity);
   color.rgb *= color.a;
 }
@@ -244,7 +244,7 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
   }
   
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
 `
@@ -255,7 +255,7 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
   
   float value = ${bands[0]};
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
 `

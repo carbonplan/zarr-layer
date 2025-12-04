@@ -4994,7 +4994,7 @@ void main() {
   }
   
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(cmap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(cmap, vec2(rescaled, 0.5));
   color = vec4(c.rgb, opacity);
   color.rgb *= color.a;
 }
@@ -5080,7 +5080,7 @@ ${processedFragBody.replace(/gl_FragColor/g, "fragColor")}` : bands.length === 1
   }
   
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
 ` : `
@@ -5090,7 +5090,7 @@ ${processedFragBody.replace(/gl_FragColor/g, "fragColor")}` : bands.length === 1
   
   float value = ${bands[0]};
   float rescaled = (value - clim.x) / (clim.y - clim.x);
-  vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
+  vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
 `}
@@ -25245,10 +25245,6 @@ var ZarrRenderer = class _ZarrRenderer {
     if (shaderProgram.colormapLoc) {
       gl.uniform1i(shaderProgram.colormapLoc, 1);
     }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (shaderProgram.climLoc) {
       gl.uniform2f(shaderProgram.climLoc, uniforms.clim[0], uniforms.clim[1]);
     }
@@ -25379,6 +25375,16 @@ var ZarrRenderer = class _ZarrRenderer {
     const gl = this.gl;
     gl.uniform1f(shaderProgram.scaleXLoc, 0);
     gl.uniform1f(shaderProgram.scaleYLoc, 0);
+    if (shaderProgram.useCustomShader && customShaderConfig) {
+      let textureUnit = 2;
+      for (const bandName of customShaderConfig.bands) {
+        const loc = shaderProgram.bandTexLocs.get(bandName);
+        if (loc) {
+          gl.uniform1i(loc, textureUnit);
+        }
+        textureUnit++;
+      }
+    }
     const vertexCount = vertexArr.length / 2;
     for (const worldOffset of worldOffsets) {
       gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset);
@@ -25451,10 +25457,21 @@ var ZarrRenderer = class _ZarrRenderer {
             }
             gl.activeTexture(gl.TEXTURE0 + textureUnit);
             gl.bindTexture(gl.TEXTURE_2D, bandTex);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            if (!tileToRender.bandTexturesConfigured.has(bandName)) {
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+              gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+              gl.texParameteri(
+                gl.TEXTURE_2D,
+                gl.TEXTURE_WRAP_S,
+                gl.CLAMP_TO_EDGE
+              );
+              gl.texParameteri(
+                gl.TEXTURE_2D,
+                gl.TEXTURE_WRAP_T,
+                gl.CLAMP_TO_EDGE
+              );
+              tileToRender.bandTexturesConfigured.add(bandName);
+            }
             if (!tileToRender.bandTexturesUploaded.has(bandName)) {
               gl.texImage2D(
                 gl.TEXTURE_2D,
@@ -25469,10 +25486,6 @@ var ZarrRenderer = class _ZarrRenderer {
               );
               tileToRender.bandTexturesUploaded.add(bandName);
             }
-            const loc = shaderProgram.bandTexLocs.get(bandName);
-            if (loc) {
-              gl.uniform1i(loc, textureUnit);
-            }
             textureUnit++;
           }
           if (missingBandData) {
@@ -25484,10 +25497,13 @@ var ZarrRenderer = class _ZarrRenderer {
           if (shaderProgram.texLoc) {
             gl.uniform1i(shaderProgram.texLoc, 0);
           }
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          if (!tileToRender.textureConfigured) {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            tileToRender.textureConfigured = true;
+          }
           const channels = tileToRender.channels ?? 1;
           const format = channels === 2 ? gl.RG : channels === 3 ? gl.RGB : channels >= 4 ? gl.RGBA : gl.RED;
           const internalFormat = channels === 2 ? gl.RG32F : channels === 3 ? gl.RGB32F : channels >= 4 ? gl.RGBA32F : gl.R32F;
@@ -25626,7 +25642,9 @@ var TileRenderCache = class {
         tileTexture: mustCreateTexture(gl),
         bandTextures: /* @__PURE__ */ new Map(),
         bandTexturesUploaded: /* @__PURE__ */ new Set(),
+        bandTexturesConfigured: /* @__PURE__ */ new Set(),
         textureUploaded: false,
+        textureConfigured: false,
         vertexBuffer: mustCreateBuffer(gl),
         pixCoordBuffer: mustCreateBuffer(gl),
         geometryUploaded: false,
