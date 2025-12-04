@@ -20,6 +20,7 @@ interface TilesOptions {
   selectors: Record<string, any>
   fillValue: number
   dimIndices: DimIndicesProps
+  coordinates: Record<string, (string | number)[]>
   maxCachedTiles?: number
   bandNames?: string[]
 }
@@ -29,6 +30,7 @@ export class Tiles {
   private selectors: Record<string, any>
   private fillValue: number
   private dimIndices: DimIndicesProps
+  private coordinates: Record<string, (string | number)[]>
   private maxCachedTiles: number
   private tiles: Map<string, TileDataCache> = new Map()
   private accessOrder: string[] = []
@@ -39,6 +41,7 @@ export class Tiles {
     selectors,
     fillValue,
     dimIndices,
+    coordinates,
     maxCachedTiles = 64,
     bandNames = [],
   }: TilesOptions) {
@@ -46,6 +49,7 @@ export class Tiles {
     this.selectors = selectors
     this.fillValue = fillValue
     this.dimIndices = dimIndices
+    this.coordinates = coordinates
     this.maxCachedTiles = maxCachedTiles
     this.bandNames = bandNames
   }
@@ -77,7 +81,7 @@ export class Tiles {
     return true
   }
 
-  private normalizeSelection(dimSelection: any): number[] {
+  private normalizeSelection(dimSelection: any, dimName?: string): number[] {
     if (dimSelection === undefined) return [0]
 
     let items: any[]
@@ -94,11 +98,18 @@ export class Tiles {
       items = [dimSelection]
     }
 
-    return items.map((v, idx) => {
-      // Unwrap per-item { selected: ... } if present
+    const coords = dimName ? this.coordinates[dimName] : undefined
+
+    return items.map((v) => {
       const val =
         typeof v === 'object' && v !== null && 'selected' in v ? v.selected : v
-      return typeof val === 'string' ? idx : Number(val) || 0
+
+      if (coords) {
+        const idx = coords.indexOf(val)
+        if (idx >= 0) return idx
+      }
+
+      return typeof val === 'number' ? val : 0
     })
   }
 
@@ -136,7 +147,7 @@ export class Tiles {
           this.selectors[dimName] ??
           this.selectors[this.dimIndices[dimKey]?.name]
 
-        const selectionValues = this.normalizeSelection(dimSelection)
+        const selectionValues = this.normalizeSelection(dimSelection, dimName)
 
         const normalized = selectionValues.map((v) =>
           Math.max(0, Math.min(v, levelArray.shape[i] - 1))
@@ -221,7 +232,7 @@ export class Tiles {
           this.selectors[dimName] ??
           this.selectors[this.dimIndices[dimKey]?.name]
 
-        const selectedValues = this.normalizeSelection(dimSelection)
+        const selectedValues = this.normalizeSelection(dimSelection, dimName)
 
         const chunkOffset = chunkIndices[i] * chunkSizes[i]
         const withinChunk = selectedValues.map((v) => {

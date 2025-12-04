@@ -8,12 +8,11 @@ import {
   TileTuple,
   zoomToLevel,
 } from './maplibre-utils'
-import { ShaderData } from './maplibre-shaders'
 import { getBands } from './zarr-utils'
 
 const DEFAULT_TILE_SIZE = 128
 const MAX_CACHED_TILES = 64
-const TILE_SUBDIVISIONS = 16
+const TILE_SUBDIVISIONS = 32
 
 export class TiledDataManager implements DataManager {
   isMultiscale: true = true
@@ -63,6 +62,7 @@ export class TiledDataManager implements DataManager {
       selectors: this.selectors,
       fillValue: desc.fill_value ?? 0,
       dimIndices: desc.dimIndices,
+      coordinates: desc.coordinates,
       maxCachedTiles: MAX_CACHED_TILES,
       bandNames,
     })

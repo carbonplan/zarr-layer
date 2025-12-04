@@ -330,6 +330,7 @@ export class ZarrLayer {
         version: this.zarrVersion,
         variable: this.variable,
         dimensionNames: this.dimensionNames,
+        coordinateKeys: Object.keys(this.selector),
       })
 
       await this.zarrStore.initialized

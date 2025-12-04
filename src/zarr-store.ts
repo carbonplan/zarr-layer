@@ -100,6 +100,7 @@ interface ZarrStoreOptions {
   version?: 2 | 3 | null
   variable: string
   dimensionNames?: DimensionNamesProps
+  coordinateKeys?: string[]
 }
 
 interface StoreDescription {
@@ -117,6 +118,7 @@ interface StoreDescription {
   xyLimits: XYLimitsProps | null
   scaleFactor: number
   addOffset: number
+  coordinates: Record<string, (string | number)[]>
 }
 
 export class ZarrStore {
@@ -130,6 +132,7 @@ export class ZarrStore {
   version: 2 | 3 | null
   variable: string
   dimensionNames: DimensionNamesProps
+  coordinateKeys: string[]
 
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
   arrayMetadata: ZarrV3ArrayMetadata | null = null
@@ -146,6 +149,7 @@ export class ZarrStore {
   xyLimits: XYLimitsProps | null = null
   scaleFactor: number = 1
   addOffset: number = 0
+  coordinates: Record<string, (string | number)[]> = {}
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -161,6 +165,7 @@ export class ZarrStore {
     version = null,
     variable,
     dimensionNames = {},
+    coordinateKeys = [],
   }: ZarrStoreOptions) {
     if (!source) {
       throw new Error('source is a required parameter')
@@ -172,6 +177,7 @@ export class ZarrStore {
     this.version = version
     this.variable = variable
     this.dimensionNames = dimensionNames
+    this.coordinateKeys = coordinateKeys
 
     this.initialized = this._initialize()
   }
@@ -206,8 +212,28 @@ export class ZarrStore {
     }
 
     await this._loadXYLimits()
+    await this._loadCoordinates()
 
     return this
+  }
+
+  private async _loadCoordinates(): Promise<void> {
+    if (!this.coordinateKeys.length || !this.levels.length) return
+
+    await Promise.all(
+      this.coordinateKeys.map(async (key) => {
+        try {
+          const coordPath = `${this.levels[0]}/${key}`
+          const coordArray = await this._getArray(coordPath)
+          const chunk = await coordArray.getChunk([0])
+          this.coordinates[key] = Array.from(
+            chunk.data as ArrayLike<number | string>
+          )
+        } catch (err) {
+          console.warn(`Failed to load coordinate array for '${key}':`, err)
+        }
+      })
+    )
   }
 
   cleanup() {
@@ -232,6 +258,7 @@ export class ZarrStore {
       xyLimits: this.xyLimits,
       scaleFactor: this.scaleFactor,
       addOffset: this.addOffset,
+      coordinates: this.coordinates,
     }
   }
 
@@ -452,10 +479,7 @@ export class ZarrStore {
         this.shape
 
     this.fill_value = arrayMetadata.fill_value
-    if (
-      this.fill_value === null &&
-      arrayMetadata.attributes
-    ) {
+    if (this.fill_value === null && arrayMetadata.attributes) {
       if (arrayMetadata.attributes._FillValue !== undefined) {
         this.fill_value = arrayMetadata.attributes._FillValue
       } else if (arrayMetadata.attributes.missing_value !== undefined) {
