@@ -47,13 +47,7 @@ const mapLibreTheme = {
 
 export const combinedBandsCustomFrag = `
   uniform float u_precipWeight;
-
-  if (tavg > 1e20 || prec > 1e20) {
-    discard;
-  }
-  
   float combined = tavg + prec * u_precipWeight;
-  
   float norm = (combined - clim.x) / (clim.y - clim.x);
   float cla = clamp(norm, 0.0, 1.0);
   vec4 c = texture(colormap, vec2(cla, 0.5));
@@ -87,7 +81,10 @@ export interface MapInstance {
 }
 
 export interface MapConfig {
-  createMap: (container: HTMLDivElement, globeProjection: boolean) => MapInstance
+  createMap: (
+    container: HTMLDivElement,
+    globeProjection: boolean,
+  ) => MapInstance
   setProjection: (map: MapInstance, globeProjection: boolean) => void
   getLayerBeforeId: (map: MapInstance) => string | undefined
   needsResize?: boolean
@@ -101,6 +98,7 @@ const mapLibreConfig: MapConfig = {
     return new maplibregl.Map({
       container,
       style: {
+        projection: globeProjection ? { type: 'globe' } : { type: 'mercator' },
         version: 8,
         glyphs:
           'https://carbonplan-maps.s3.us-west-2.amazonaws.com/basemaps/fonts/{fontstack}/{range}.pbf',
@@ -116,8 +114,7 @@ const mapLibreConfig: MapConfig = {
       },
       center: [0, 20],
       zoom: 2,
-      projection: globeProjection ? { type: 'globe' } : { type: 'mercator' },
-    }) as unknown as MapInstance
+    }) as MapInstance
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
     ;(map as maplibregl.Map).setProjection(
@@ -189,8 +186,7 @@ export const useMapLayer = (
         if (map.getLayer('zarr-layer')) {
           map.removeLayer('zarr-layer')
         }
-      } catch (e) {
-      }
+      } catch (e) {}
       zarrLayerRef.current = null
     }
 
@@ -220,8 +216,7 @@ export const useMapLayer = (
       let beforeId: string | undefined
       try {
         beforeId = mapConfig.getLayerBeforeId(map)
-      } catch (e) {
-      }
+      } catch (e) {}
       map.addLayer(layer, beforeId)
       zarrLayerRef.current = layer
 
@@ -241,8 +236,7 @@ export const useMapLayer = (
           if (map.getLayer('zarr-layer')) {
             map.removeLayer('zarr-layer')
           }
-        } catch (e) {
-        }
+        } catch (e) {}
         zarrLayerRef.current = null
       }
     }
@@ -295,7 +289,10 @@ export const MapComponentBase = ({
   useEffect(() => {
     if (!mapContainer.current) return
 
-    const newMap = mapConfig.createMap(mapContainer.current, props.globeProjection)
+    const newMap = mapConfig.createMap(
+      mapContainer.current,
+      props.globeProjection,
+    )
     mapInstanceRef.current = newMap
 
     newMap.on('load', () => {
@@ -341,4 +338,3 @@ export const MapComponentBase = ({
     />
   )
 }
-

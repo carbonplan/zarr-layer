@@ -2,7 +2,7 @@
 import { Filter, Select, Slider } from '@carbonplan/components'
 import { Box } from 'theme-ui'
 import { DATASETS, DatasetConfig } from '../lib/constants'
-import { MapProvider } from './map-shared'
+import { combinedBandsCustomFrag, MapProvider } from './map-shared'
 
 const colormaps = [
   'reds',
@@ -131,6 +131,14 @@ const Controls = ({
                 combined (custom frag w/ uniform)
               </option>
             </Select>
+            {band === 'combined' && (
+              <Box
+                as='code'
+                sx={{ fontSize: 0, color: 'secondary', whiteSpace: 'pre-wrap' }}
+              >
+                {combinedBandsCustomFrag}
+              </Box>
+            )}
           </Box>
 
           <Box>

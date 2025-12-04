@@ -229,10 +229,7 @@ export class ZarrRenderer {
           shaderProgram.globeToMercMatrixLoc,
           mapboxGlobe?.globeToMercatorMatrix
         )
-        setFloat(
-          shaderProgram.globeTransitionLoc,
-          mapboxGlobe?.transition ?? 0
-        )
+        setFloat(shaderProgram.globeTransitionLoc, mapboxGlobe?.transition ?? 0)
         break
       }
       default: {
@@ -371,12 +368,14 @@ export class ZarrRenderer {
       useCustomShader: !!useCustomShader,
       bandTexLocs,
       customUniformLocs,
-      globeToMercMatrixLoc: projectionMode === 'mapbox-globe'
-        ? this.gl.getUniformLocation(program, 'u_globe_to_merc')
-        : null,
-      globeTransitionLoc: projectionMode === 'mapbox-globe'
-        ? this.gl.getUniformLocation(program, 'u_globe_transition')
-        : null,
+      globeToMercMatrixLoc:
+        projectionMode === 'mapbox-globe'
+          ? this.gl.getUniformLocation(program, 'u_globe_to_merc')
+          : null,
+      globeTransitionLoc:
+        projectionMode === 'mapbox-globe'
+          ? this.gl.getUniformLocation(program, 'u_globe_transition')
+          : null,
     }
 
     this.gl.deleteShader(vertexShader)

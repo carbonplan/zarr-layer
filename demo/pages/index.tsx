@@ -25,31 +25,22 @@ export default function Home() {
 
   return (
     <>
-      <Box
-        sx={{
-          position: 'sticky',
-          top: 0,
-          height: '56px',
-          zIndex: 5000,
-          pointerEvents: 'none',
-        }}
-      >
-        <Container>
+      <Container>
+        <Box sx={{ position: 'relative', zIndex: 2000 }}>
           <Header
             menuItems={[
               <Dimmer key='dimmer' sx={{ mt: '-2px', color: 'primary' }} />,
             ]}
           />
-        </Container>
-      </Box>
+        </Box>
+      </Container>
 
       <Box
         sx={{
           position: 'absolute',
           top: 0,
           bottom: 0,
-          width: '100%',
-          overflowX: 'hidden',
+          width: '100vw',
         }}
       >
         <Sidebar
