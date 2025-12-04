@@ -16,8 +16,7 @@
     "dev": "tsup --watch",
     "clean": "rm -rf dist",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "prepare": "npm run build"
+    "format:check": "prettier --check ."
   },
   "peerDependencies": {
     "maplibre-gl": "*",
