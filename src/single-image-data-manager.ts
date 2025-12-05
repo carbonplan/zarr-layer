@@ -26,7 +26,7 @@ export class SingleImageDataManager implements DataManager {
   private vertexArr: Float32Array = new Float32Array()
   private pixCoordArr: Float32Array = new Float32Array()
   private currentSubdivisions: number = 0
-  private geometryUploaded: boolean = false
+  private geometryVersion: number = 0
 
   private mercatorBounds: MercatorBounds | null = null
   private zarrStore: ZarrStore
@@ -43,6 +43,7 @@ export class SingleImageDataManager implements DataManager {
   private isRemoved: boolean = false
   private loadingCallback: LoadingStateCallback | undefined
   private isLoadingData: boolean = false
+  private fetchRequestId: number = 0
 
   constructor(
     store: ZarrStore,
@@ -79,7 +80,7 @@ export class SingleImageDataManager implements DataManager {
     this.updateGeometryForProjection(false)
   }
 
-  update(_map: MapLike, gl: WebGL2RenderingContext): void {
+  update(map: MapLike, gl: WebGL2RenderingContext): void {
     if (!this.texture) {
       this.texture = mustCreateTexture(gl)
     }
@@ -89,6 +90,11 @@ export class SingleImageDataManager implements DataManager {
     if (!this.pixCoordBuffer) {
       this.pixCoordBuffer = mustCreateBuffer(gl)
     }
+
+    const projection = map.getProjection ? map.getProjection() : null
+    const isGlobe =
+      projection?.type === 'globe' || projection?.name === 'globe'
+    this.updateGeometryForProjection(isGlobe)
 
     if (!this.data && !this.isLoadingData) {
       this.fetchData().then(() => {
@@ -110,6 +116,8 @@ export class SingleImageDataManager implements DataManager {
     this.vertexArr = subdivided.vertexArr
     this.pixCoordArr = subdivided.texCoordArr
     this.currentSubdivisions = targetSubdivisions
+    this.geometryVersion += 1
+    this.invalidate()
 
     // We rely on ZarrLayer/Renderer to handle buffer update signalling via resetSingleImageGeometry()
     // But since SingleImageDataManager doesn't own the renderer, it just provides updated arrays.
@@ -160,14 +168,15 @@ export class SingleImageDataManager implements DataManager {
         data: this.data,
         width: this.width,
         height: this.height,
-        bounds: this.mercatorBounds,
-        texture: this.texture,
-        vertexBuffer: this.vertexBuffer,
-        pixCoordBuffer: this.pixCoordBuffer,
-        pixCoordArr: this.pixCoordArr,
-      },
-    }
+      bounds: this.mercatorBounds,
+      texture: this.texture,
+      vertexBuffer: this.vertexBuffer,
+      pixCoordBuffer: this.pixCoordBuffer,
+      pixCoordArr: this.pixCoordArr,
+      geometryVersion: this.geometryVersion,
+    },
   }
+}
 
   dispose(gl: WebGL2RenderingContext): void {
     this.isRemoved = true
@@ -202,7 +211,6 @@ export class SingleImageDataManager implements DataManager {
     >
   ): Promise<void> {
     this.selector = selector
-    this.data = null // Force refetch
     await this.fetchData()
     this.invalidate()
   }
@@ -210,6 +218,8 @@ export class SingleImageDataManager implements DataManager {
   private async fetchData(): Promise<void> {
     if (!this.zarrArray || this.isRemoved) return
 
+    const requestId = ++this.fetchRequestId
+    const selectorSnapshot = { ...this.selector }
     this.isLoadingData = true
     this.emitLoadingState()
 
@@ -225,7 +235,7 @@ export class SingleImageDataManager implements DataManager {
         } else if (dimName === 'lat') {
           sliceArgs[dimInfo.index] = zarr.slice(0, this.height)
         } else {
-          const dimSelection = this.selector[dimName] as
+          const dimSelection = selectorSnapshot[dimName] as
             | number
             | number[]
             | string
@@ -255,14 +265,17 @@ export class SingleImageDataManager implements DataManager {
       const data = (await zarr.get(this.zarrArray, sliceArgs)) as {
         data: ArrayLike<number>
       }
-      if (this.isRemoved) return
+      if (this.isRemoved || requestId !== this.fetchRequestId) return
 
       this.data = new Float32Array((data.data as Float32Array).buffer)
+      this.invalidate()
     } catch (err) {
       console.error('Error fetching single image data:', err)
     } finally {
-      this.isLoadingData = false
-      this.emitLoadingState()
+      if (requestId === this.fetchRequestId) {
+        this.isLoadingData = false
+        this.emitLoadingState()
+      }
     }
   }
 }

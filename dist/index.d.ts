@@ -78,6 +78,7 @@ declare class ZarrLayer {
     private clim;
     private opacity;
     private minRenderZoom;
+    private selectorHash;
     private tileSize;
     private isMultiscale;
     private fillValue;
@@ -116,6 +117,7 @@ declare class ZarrLayer {
     setVariable(variable: string): Promise<void>;
     setSelector(selector: Record<string, number | number[] | string | string[]>): Promise<void>;
     onAdd(map: MapLike, gl: WebGL2RenderingContext | null): Promise<void>;
+    private computeSelectorHash;
     private initializeManager;
     private initialize;
     private loadInitialDimensionValues;

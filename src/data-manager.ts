@@ -19,6 +19,7 @@ export interface RenderData {
     vertexBuffer: WebGLBuffer | null
     pixCoordBuffer: WebGLBuffer | null
     pixCoordArr: Float32Array
+    geometryVersion: number
   }
 }
 

@@ -49,6 +49,7 @@ export class ZarrLayer {
   private clim: [number, number]
   private opacity: number
   private minRenderZoom: number
+  private selectorHash: string = ''
 
   private tileSize: number = DEFAULT_TILE_SIZE
   private isMultiscale: boolean = true
@@ -158,6 +159,7 @@ export class ZarrLayer {
     this.zarrVersion = zarrVersion ?? null
     this.dimensionNames = dimensionNames
     this.selector = selector
+    this.selectorHash = this.computeSelectorHash(selector)
     this.renderingMode = renderingMode
     for (const [dimName, value] of Object.entries(selector)) {
       this.selectors[dimName] = { selected: value, type: 'index' }
@@ -256,6 +258,11 @@ export class ZarrLayer {
   async setSelector(
     selector: Record<string, number | number[] | string | string[]>
   ) {
+    const nextHash = this.computeSelectorHash(selector)
+    if (nextHash === this.selectorHash) {
+      return
+    }
+    this.selectorHash = nextHash
     this.selector = selector
     for (const [dimName, value] of Object.entries(selector)) {
       this.selectors[dimName] = { selected: value, type: 'index' }
@@ -322,6 +329,12 @@ export class ZarrLayer {
     }
 
     this.invalidate()
+  }
+
+  private computeSelectorHash(
+    selector: Record<string, number | number[] | string | string[]>
+  ): string {
+    return JSON.stringify(selector, Object.keys(selector).sort())
   }
 
   private async initializeManager() {

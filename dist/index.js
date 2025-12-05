@@ -5212,6 +5212,7 @@ var ZarrRenderer = class _ZarrRenderer {
   constructor(gl, fragmentShaderSource, customShaderConfig) {
     this.shaderCache = /* @__PURE__ */ new Map();
     this.singleImageGeometryUploaded = false;
+    this.singleImageGeometryVersion = null;
     this.customShaderConfig = null;
     this.canUseLinearFloat = false;
     this.canUseLinearHalfFloat = false;
@@ -5521,8 +5522,13 @@ var ZarrRenderer = class _ZarrRenderer {
       pixCoordBuffer,
       width,
       height,
-      pixCoordArr
+      pixCoordArr,
+      geometryVersion
     } = params;
+    if (this.singleImageGeometryVersion === null || this.singleImageGeometryVersion !== geometryVersion) {
+      this.singleImageGeometryUploaded = false;
+      this.singleImageGeometryVersion = geometryVersion;
+    }
     if (!data || !bounds || !texture || !vertexBuffer || !pixCoordBuffer) {
       return;
     }
@@ -6571,7 +6577,7 @@ var SingleImageDataManager = class _SingleImageDataManager {
     this.vertexArr = new Float32Array();
     this.pixCoordArr = new Float32Array();
     this.currentSubdivisions = 0;
-    this.geometryUploaded = false;
+    this.geometryVersion = 0;
     this.mercatorBounds = null;
     this.dimIndices = {};
     this.xyLimits = null;
@@ -6579,6 +6585,7 @@ var SingleImageDataManager = class _SingleImageDataManager {
     this.zarrArray = null;
     this.isRemoved = false;
     this.isLoadingData = false;
+    this.fetchRequestId = 0;
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -6599,7 +6606,7 @@ var SingleImageDataManager = class _SingleImageDataManager {
     }
     this.updateGeometryForProjection(false);
   }
-  update(_map, gl) {
+  update(map, gl) {
     if (!this.texture) {
       this.texture = mustCreateTexture(gl);
     }
@@ -6609,6 +6616,9 @@ var SingleImageDataManager = class _SingleImageDataManager {
     if (!this.pixCoordBuffer) {
       this.pixCoordBuffer = mustCreateBuffer(gl);
     }
+    const projection = map.getProjection ? map.getProjection() : null;
+    const isGlobe = projection?.type === "globe" || projection?.name === "globe";
+    this.updateGeometryForProjection(isGlobe);
     if (!this.data && !this.isLoadingData) {
       this.fetchData().then(() => {
         this.invalidate();
@@ -6625,6 +6635,8 @@ var SingleImageDataManager = class _SingleImageDataManager {
     this.vertexArr = subdivided.vertexArr;
     this.pixCoordArr = subdivided.texCoordArr;
     this.currentSubdivisions = targetSubdivisions;
+    this.geometryVersion += 1;
+    this.invalidate();
   }
   static createSubdividedQuad(subdivisions) {
     const vertices = [];
@@ -6667,7 +6679,8 @@ var SingleImageDataManager = class _SingleImageDataManager {
         texture: this.texture,
         vertexBuffer: this.vertexBuffer,
         pixCoordBuffer: this.pixCoordBuffer,
-        pixCoordArr: this.pixCoordArr
+        pixCoordArr: this.pixCoordArr,
+        geometryVersion: this.geometryVersion
       }
     };
   }
@@ -6696,12 +6709,13 @@ var SingleImageDataManager = class _SingleImageDataManager {
   }
   async setSelector(selector) {
     this.selector = selector;
-    this.data = null;
     await this.fetchData();
     this.invalidate();
   }
   async fetchData() {
     if (!this.zarrArray || this.isRemoved) return;
+    const requestId = ++this.fetchRequestId;
+    const selectorSnapshot = { ...this.selector };
     this.isLoadingData = true;
     this.emitLoadingState();
     try {
@@ -6715,7 +6729,7 @@ var SingleImageDataManager = class _SingleImageDataManager {
         } else if (dimName === "lat") {
           sliceArgs[dimInfo.index] = slice(0, this.height);
         } else {
-          const dimSelection = this.selector[dimName];
+          const dimSelection = selectorSnapshot[dimName];
           if (dimSelection !== void 0) {
             const selectionValue = typeof dimSelection === "object" && dimSelection !== null && !Array.isArray(dimSelection) && "selected" in dimSelection ? dimSelection.selected : dimSelection;
             const normalizedValue = Array.isArray(selectionValue) ? selectionValue.find((v) => typeof v === "number") ?? 0 : typeof selectionValue === "number" ? selectionValue : 0;
@@ -6726,13 +6740,16 @@ var SingleImageDataManager = class _SingleImageDataManager {
         }
       }
       const data = await get2(this.zarrArray, sliceArgs);
-      if (this.isRemoved) return;
+      if (this.isRemoved || requestId !== this.fetchRequestId) return;
       this.data = new Float32Array(data.data.buffer);
+      this.invalidate();
     } catch (err) {
       console.error("Error fetching single image data:", err);
     } finally {
-      this.isLoadingData = false;
-      this.emitLoadingState();
+      if (requestId === this.fetchRequestId) {
+        this.isLoadingData = false;
+        this.emitLoadingState();
+      }
     }
   }
 };
@@ -6760,6 +6777,7 @@ var ZarrLayer = class {
   }) {
     this.type = "custom";
     this.zarrVersion = null;
+    this.selectorHash = "";
     this.tileSize = DEFAULT_TILE_SIZE2;
     this.isMultiscale = true;
     this.fillValue = null;
@@ -6791,6 +6809,7 @@ var ZarrLayer = class {
     this.zarrVersion = zarrVersion ?? null;
     this.dimensionNames = dimensionNames;
     this.selector = selector;
+    this.selectorHash = this.computeSelectorHash(selector);
     this.renderingMode = renderingMode;
     for (const [dimName, value] of Object.entries(selector)) {
       this.selectors[dimName] = { selected: value, type: "index" };
@@ -6897,6 +6916,11 @@ var ZarrLayer = class {
     this.invalidate();
   }
   async setSelector(selector) {
+    const nextHash = this.computeSelectorHash(selector);
+    if (nextHash === this.selectorHash) {
+      return;
+    }
+    this.selectorHash = nextHash;
     this.selector = selector;
     for (const [dimName, value] of Object.entries(selector)) {
       this.selectors[dimName] = { selected: value, type: "index" };
@@ -6953,6 +6977,9 @@ var ZarrLayer = class {
       this.emitLoadingState();
     }
     this.invalidate();
+  }
+  computeSelectorHash(selector) {
+    return JSON.stringify(selector, Object.keys(selector).sort());
   }
   async initializeManager() {
     if (!this.zarrStore || !this.gl) return;

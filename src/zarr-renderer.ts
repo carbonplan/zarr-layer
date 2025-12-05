@@ -45,6 +45,7 @@ interface SingleImageParams {
   vertexBuffer: WebGLBuffer | null
   pixCoordBuffer: WebGLBuffer | null
   pixCoordArr: Float32Array
+  geometryVersion: number
 }
 
 interface MapboxGlobeParams {
@@ -117,6 +118,7 @@ export class ZarrRenderer {
   private fragmentShaderSource: string
   private shaderCache: Map<string, ShaderProgram> = new Map()
   private singleImageGeometryUploaded = false
+  private singleImageGeometryVersion: number | null = null
   private customShaderConfig: CustomShaderConfig | null = null
   private canUseLinearFloat: boolean = false
   private canUseLinearHalfFloat: boolean = false
@@ -523,7 +525,16 @@ export class ZarrRenderer {
       width,
       height,
       pixCoordArr,
+      geometryVersion,
     } = params
+
+    if (
+      this.singleImageGeometryVersion === null ||
+      this.singleImageGeometryVersion !== geometryVersion
+    ) {
+      this.singleImageGeometryUploaded = false
+      this.singleImageGeometryVersion = geometryVersion
+    }
 
     if (!data || !bounds || !texture || !vertexBuffer || !pixCoordBuffer) {
       return
