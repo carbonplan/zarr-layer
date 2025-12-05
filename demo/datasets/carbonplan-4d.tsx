@@ -3,6 +3,7 @@ import React from 'react'
 import { Select, Slider } from '@carbonplan/components'
 import { Box } from 'theme-ui'
 import { BuildLayerResult, DatasetControlsProps, DatasetModule } from './types'
+import { useAppStore } from '../lib/store'
 
 const ALL_MONTHS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
@@ -82,9 +83,19 @@ const Carbonplan4dControls = ({
   state,
   setState,
 }: DatasetControlsProps<Carbonplan4dState>) => {
+  const setColormap = useAppStore((state) => state.setColormap)
+  const setClim = useAppStore((state) => state.setClim)
+
   const handleBandChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const band = e.target.value as Carbonplan4dState['band']
     setState({ band })
+    if (band === 'prec' || band === 'prec_range_avg') {
+      setColormap('cool')
+      setClim([0, 300])
+    } else {
+      setColormap('warm')
+      setClim([-20, 30])
+    }
   }
 
   const isRangeAverage =
@@ -179,7 +190,7 @@ const carbonplan4dDataset: DatasetModule<Carbonplan4dState> = {
     'https://carbonplan-maps.s3.us-west-2.amazonaws.com/v2/demo/4d/tavg-prec-month',
   variable: 'climate',
   clim: [-20, 30],
-  colormap: 'redteal',
+  colormap: 'warm',
   zarrVersion: 2,
   info: 'CarbonPlan Climate Demo (4D)',
   sourceInfo: 'Zarr v2 pyramid - temp avg & precipitation by month',
