@@ -23,6 +23,7 @@
     "react-dom": "^18.3.1",
     "theme-ui": "0.15.5",
     "@carbonplan/zarr-layer": "file:../",
+    "zarrita": "^0.5.4",
     "zustand": "^5.0.9"
   },
   "devDependencies": {
