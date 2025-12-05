@@ -1,10 +1,14 @@
 import { DataManager, RenderData } from './data-manager'
-import type { MapLike, SelectorMap } from './types'
+import type { MapLike, SelectorMap, XYLimitsProps, CRS } from './types'
 import { ZarrStore } from './zarr-store'
 import { TileRenderCache } from './zarr-tile-cache'
 import { Tiles } from './tiles'
 import {
   getTilesAtZoom,
+  getTilesAtZoomEquirect,
+  latToMercatorNorm,
+  lonToMercatorNorm,
+  type MercatorBounds,
   tileToKey,
   TileTuple,
   zoomToLevel,
@@ -31,6 +35,9 @@ export class TiledDataManager implements DataManager {
   private zarrStore: ZarrStore
   private selectors: SelectorMap = {}
   private visibleTiles: TileTuple[] = []
+  private crs: CRS = 'EPSG:4326'
+  private xyLimits: XYLimitsProps | null = null
+  private tileBounds: Record<string, MercatorBounds> = {}
 
   constructor(
     store: ZarrStore,
@@ -55,6 +62,8 @@ export class TiledDataManager implements DataManager {
     const desc = this.zarrStore.describe()
     this.maxZoom = desc.levels.length - 1
     this.tileSize = desc.tileSize || DEFAULT_TILE_SIZE
+    this.crs = desc.crs
+    this.xyLimits = desc.xyLimits
 
     const bandNames = getBands(this.variable, this.selector)
 
@@ -82,6 +91,7 @@ export class TiledDataManager implements DataManager {
     this.updateGeometryForProjection(isGlobe)
 
     this.visibleTiles = this.getVisibleTiles(map)
+    this.tileBounds = this.computeTileBounds(this.visibleTiles)
     this.prefetchTileData(this.visibleTiles)
   }
 
@@ -97,6 +107,8 @@ export class TiledDataManager implements DataManager {
       tileSize: this.tileSize,
       vertexArr: this.vertexArr,
       pixCoordArr: this.pixCoordArr,
+      tileBounds:
+        Object.keys(this.tileBounds).length > 0 ? this.tileBounds : undefined,
       singleImage: undefined,
     }
   }
@@ -203,7 +215,45 @@ export class TiledDataManager implements DataManager {
     if (!bounds) {
       return []
     }
+    if (this.crs === 'EPSG:4326' && this.xyLimits) {
+      return getTilesAtZoomEquirect(pyramidLevel, bounds, this.xyLimits)
+    }
     return getTilesAtZoom(pyramidLevel, bounds)
+  }
+
+  private computeTileBounds(
+    tiles: TileTuple[]
+  ): Record<string, MercatorBounds> {
+    if (this.crs !== 'EPSG:4326' || !this.xyLimits) return {}
+
+    const bounds: Record<string, MercatorBounds> = {}
+    for (const tile of tiles) {
+      const [z, x, y] = tile
+      const tilesPerSide = Math.pow(2, z)
+      const lonSpan = (this.xyLimits.xMax - this.xyLimits.xMin) / tilesPerSide
+      const latSpan = (this.xyLimits.yMax - this.xyLimits.yMin) / tilesPerSide
+
+      const lonMin = this.xyLimits.xMin + x * lonSpan
+      const lonMax = lonMin + lonSpan
+      const latNorth = this.xyLimits.yMax - y * latSpan
+      const latSouth = latNorth - latSpan
+
+      const x0 = lonToMercatorNorm(lonMin)
+      const x1 = lonToMercatorNorm(lonMax)
+      const y0 = latToMercatorNorm(latNorth)
+      const y1 = latToMercatorNorm(latSouth)
+
+      bounds[tileToKey(tile)] = {
+        x0,
+        y0,
+        x1,
+        y1,
+        latMin: latSouth,
+        latMax: latNorth,
+      }
+    }
+
+    return bounds
   }
 
   private async prefetchTileData(tiles: TileTuple[]) {

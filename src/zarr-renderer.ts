@@ -65,6 +65,7 @@ interface RenderParams {
   tileSize: number
   vertexArr: Float32Array
   pixCoordArr: Float32Array
+  tileBounds?: Record<string, MercatorBounds>
   tileCache?: TileRenderCache
   singleImage?: SingleImageParams
   shaderData?: ShaderData
@@ -106,6 +107,9 @@ interface ShaderProgram {
   // Mapbox globe specific uniforms
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
+  isEquirectangularLoc: WebGLUniformLocation | null
+  latMinLoc: WebGLUniformLocation | null
+  latMaxLoc: WebGLUniformLocation | null
 }
 
 export class ZarrRenderer {
@@ -375,6 +379,12 @@ export class ZarrRenderer {
         projectionMode === 'mapbox-globe'
           ? this.gl.getUniformLocation(program, 'u_globe_transition')
           : null,
+      isEquirectangularLoc: this.gl.getUniformLocation(
+        program,
+        'u_isEquirectangular'
+      ),
+      latMinLoc: this.gl.getUniformLocation(program, 'u_latMin'),
+      latMaxLoc: this.gl.getUniformLocation(program, 'u_latMax'),
     }
 
     this.gl.deleteShader(vertexShader)
@@ -396,6 +406,7 @@ export class ZarrRenderer {
       tileSize,
       vertexArr,
       pixCoordArr,
+      tileBounds,
       singleImage,
       shaderData,
       projectionData,
@@ -472,6 +483,7 @@ export class ZarrRenderer {
         tileSize,
         vertexArr,
         pixCoordArr,
+        tileBounds,
         customShaderConfig
       )
     } else if (singleImage) {
@@ -585,12 +597,10 @@ export class ZarrRenderer {
     tileSize: number,
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
+    tileBounds?: Record<string, MercatorBounds>,
     customShaderConfig?: CustomShaderConfig
   ) {
     const gl = this.gl
-
-    gl.uniform1f(shaderProgram.scaleXLoc, 0)
-    gl.uniform1f(shaderProgram.scaleYLoc, 0)
 
     if (shaderProgram.useCustomShader && customShaderConfig) {
       let textureUnit = 2
@@ -612,6 +622,7 @@ export class ZarrRenderer {
         const [z, x, y] = tileTuple
         const tileKey = tileToKey(tileTuple)
         const tile = tileCache.get(tileKey)
+        const bounds = tileBounds?.[tileKey]
 
         let tileToRender: TileRenderData | null = null
         let renderTileKey = tileKey
@@ -640,10 +651,41 @@ export class ZarrRenderer {
 
         if (!tileToRender || !tileToRender.data) continue
 
-        const [scale, shiftX, shiftY] = tileToScale(tileTuple)
-        gl.uniform1f(shaderProgram.scaleLoc, scale)
-        gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
-        gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+        if (bounds) {
+          const scaleX = (bounds.x1 - bounds.x0) / 2
+          const scaleY = (bounds.y1 - bounds.y0) / 2
+          const shiftX = (bounds.x0 + bounds.x1) / 2
+          const shiftY = (bounds.y0 + bounds.y1) / 2
+          gl.uniform1f(shaderProgram.scaleLoc, 0)
+          gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
+          gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
+          gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+          gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+
+          if (shaderProgram.isEquirectangularLoc) {
+            gl.uniform1i(
+              shaderProgram.isEquirectangularLoc,
+              bounds.latMin !== undefined ? 1 : 0
+            )
+          }
+          if (shaderProgram.latMinLoc && bounds.latMin !== undefined) {
+            gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin)
+          }
+          if (shaderProgram.latMaxLoc && bounds.latMax !== undefined) {
+            gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax)
+          }
+        } else {
+          const [scale, shiftX, shiftY] = tileToScale(tileTuple)
+          gl.uniform1f(shaderProgram.scaleLoc, scale)
+          gl.uniform1f(shaderProgram.scaleXLoc, 0)
+          gl.uniform1f(shaderProgram.scaleYLoc, 0)
+          gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+          gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+
+          if (shaderProgram.isEquirectangularLoc) {
+            gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
+          }
+        }
         gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
         gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 

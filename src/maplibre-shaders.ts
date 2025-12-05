@@ -81,6 +81,41 @@ void main() {
 }
 `
 
+const FRAGMENT_SHADER_PRELUDE = `
+uniform bool u_isEquirectangular;
+uniform float u_latMin;
+uniform float u_latMax;
+uniform float scale_y;
+uniform float shift_y;
+
+#define PI 3.1415926535897932384626433832795
+
+float mercatorToLat(float y) {
+  return 2.0 * atan(exp((0.5 - y) * 2.0 * PI)) - PI / 2.0;
+}
+`
+
+const FRAGMENT_SHADER_REPROJECT = `
+  vec2 sample_coord = pix_coord;
+  if (u_isEquirectangular) {
+    float sy = scale_y;
+    // pix_coord.y is in [0, 1]. 0 is top.
+    // mercator Y: 0 (North) -> 1 (South).
+    // Top of tile: shift_y - sy. Bottom: shift_y + sy.
+    float mercY = (shift_y - sy) + pix_coord.y * 2.0 * sy;
+    
+    float latRad = mercatorToLat(mercY);
+    float latDeg = degrees(latRad);
+    
+    // Map latDeg to V [0, 1].
+    // V=0 should be latMax (North). V=1 should be latMin (South).
+    float v = (u_latMax - latDeg) / (u_latMax - u_latMin);
+    
+    sample_coord.y = v;
+  }
+  sample_coord = sample_coord * u_texScale + u_texOffset;
+`
+
 /**
  * Fragment shader for tile rendering with colormap and fillValue handling.
  * Mirrors carbonplan/maps approach with clim (vec2) and single fillValue.
@@ -99,11 +134,14 @@ uniform vec2 u_texOffset;
 uniform sampler2D tex;
 uniform sampler2D cmap;
 
+${FRAGMENT_SHADER_PRELUDE}
+
 in vec2 pix_coord;
 out vec4 color;
 
 void main() {
-  vec2 sample_coord = pix_coord * u_texScale + u_texOffset;
+  ${FRAGMENT_SHADER_REPROJECT}
+  
   float raw = texture(tex, sample_coord).r;
   float value = raw * u_scaleFactor + u_addOffset;
   
@@ -221,12 +259,13 @@ uniform sampler2D colormap;
 ${bandSamplers}
 ${customUniformDecls}
 ${extraUniformsDecl}
+${FRAGMENT_SHADER_PRELUDE}
 
 in vec2 pix_coord;
 out vec4 fragColor;
 
 void main() {
-  vec2 sample_coord = pix_coord * u_texScale + u_texOffset;
+  ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}
 ${bandAliases}
 ${

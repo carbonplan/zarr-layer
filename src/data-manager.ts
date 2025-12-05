@@ -6,6 +6,7 @@ export interface RenderData {
   isMultiscale: boolean
   vertexArr?: Float32Array
   pixCoordArr?: Float32Array
+  tileBounds?: Record<string, MercatorBounds>
   // Tiled specific
   visibleTiles?: TileTuple[]
   tileCache?: TileRenderCache

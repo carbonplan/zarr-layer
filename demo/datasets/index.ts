@@ -45,9 +45,20 @@ const DATASET_MODULE_LIST = createDatasetList(
     clim: [220, 320],
     colormap: 'fire',
     zarrVersion: 2,
-    info: 'ERA5 tasmax pyramid (EPSG:4326)',
-    sourceInfo:
-      'Zarr v2 pyramid - pyramids-v2-4326-True-128-1-0-0-f4-0-0-0-gzipL1-100',
+    info: 'tasmax v2 pyramid (EPSG:4326)',
+    sourceInfo: 'Zarr v2 pyramid (EPSG:4326)',
+    maxTime: 729,
+  }),
+  createTimeDatasetModule({
+    id: 'tasmax_pyramid_v3_4326',
+    source:
+      'https://carbonplan-benchmarks.s3.us-west-2.amazonaws.com/data/NEX-GDDP-CMIP6/ACCESS-CM2/historical/r1i1p1f1/tasmax/tasmax_day_ACCESS-CM2_historical_r1i1p1f1_gn/pyramids-v3-4326-True-128-1-0-0-f4-0-0-gzipL1-100',
+    variable: 'tasmax',
+    clim: [220, 320],
+    colormap: 'fire',
+    zarrVersion: 3,
+    info: 'tasmax v3 pyramid (EPSG:4326)',
+    sourceInfo: 'Zarr v3 pyramid (EPSG:4326)',
     maxTime: 729,
   }),
 )

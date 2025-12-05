@@ -4718,7 +4718,7 @@ var _ZarrStore = class _ZarrStore {
     const levels = datasets.map((dataset) => String(dataset.path));
     const maxZoom = levels.length - 1;
     const tileSize = datasets[0].pixels_per_tile || 128;
-    const crs = datasets[0].crs || "EPSG:3857";
+    const crs = datasets[0].crs === "EPSG:4326" ? "EPSG:4326" : "EPSG:3857";
     return { levels, maxZoom, tileSize, crs };
   }
   static clearCache() {
@@ -4782,6 +4782,39 @@ void main() {
   pix_coord = pix_coord_in;
 }
 `;
+var FRAGMENT_SHADER_PRELUDE = `
+uniform bool u_isEquirectangular;
+uniform float u_latMin;
+uniform float u_latMax;
+uniform float scale_y;
+uniform float shift_y;
+
+#define PI 3.1415926535897932384626433832795
+
+float mercatorToLat(float y) {
+  return 2.0 * atan(exp((0.5 - y) * 2.0 * PI)) - PI / 2.0;
+}
+`;
+var FRAGMENT_SHADER_REPROJECT = `
+  vec2 sample_coord = pix_coord;
+  if (u_isEquirectangular) {
+    float sy = scale_y;
+    // pix_coord.y is in [0, 1]. 0 is top.
+    // mercator Y: 0 (North) -> 1 (South).
+    // Top of tile: shift_y - sy. Bottom: shift_y + sy.
+    float mercY = (shift_y - sy) + pix_coord.y * 2.0 * sy;
+    
+    float latRad = mercatorToLat(mercY);
+    float latDeg = degrees(latRad);
+    
+    // Map latDeg to V [0, 1].
+    // V=0 should be latMax (North). V=1 should be latMin (South).
+    float v = (u_latMax - latDeg) / (u_latMax - u_latMin);
+    
+    sample_coord.y = v;
+  }
+  sample_coord = sample_coord * u_texScale + u_texOffset;
+`;
 var maplibreFragmentShaderSource = `#version 300 es
 precision highp float;
 
@@ -4796,11 +4829,14 @@ uniform vec2 u_texOffset;
 uniform sampler2D tex;
 uniform sampler2D cmap;
 
+${FRAGMENT_SHADER_PRELUDE}
+
 in vec2 pix_coord;
 out vec4 color;
 
 void main() {
-  vec2 sample_coord = pix_coord * u_texScale + u_texOffset;
+  ${FRAGMENT_SHADER_REPROJECT}
+  
   float raw = texture(tex, sample_coord).r;
   float value = raw * u_scaleFactor + u_addOffset;
   
@@ -4859,12 +4895,13 @@ uniform sampler2D colormap;
 ${bandSamplers}
 ${customUniformDecls}
 ${extraUniformsDecl}
+${FRAGMENT_SHADER_PRELUDE}
 
 in vec2 pix_coord;
 out vec4 fragColor;
 
 void main() {
-  vec2 sample_coord = pix_coord * u_texScale + u_texOffset;
+  ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}
 ${bandAliases}
 ${processedFragBody ? `
@@ -5033,6 +5070,7 @@ var ColormapState = class {
 };
 
 // src/maplibre-utils.ts
+var MERCATOR_LAT_LIMIT = 85.05112878;
 function lon2tile(lon, zoom) {
   return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
 }
@@ -5074,6 +5112,39 @@ function getTilesAtZoom(zoom, bounds) {
   }
   return tiles;
 }
+function getTilesAtZoomEquirect(zoom, bounds, xyLimits) {
+  const [[west, south], [east, north]] = bounds;
+  const xSpan = xyLimits.xMax - xyLimits.xMin || 360;
+  const ySpan = xyLimits.yMax - xyLimits.yMin || 180;
+  const maxTiles = Math.pow(2, zoom);
+  const lonToTile = (lon) => Math.floor((lon - xyLimits.xMin) / xSpan * maxTiles);
+  const latToTile = (lat) => {
+    const clamped = Math.max(Math.min(lat, xyLimits.yMax), xyLimits.yMin);
+    const norm = (xyLimits.yMax - clamped) / ySpan;
+    return Math.floor(norm * maxTiles);
+  };
+  let nwX = lonToTile(west);
+  let seX = lonToTile(east);
+  const nwY = latToTile(north);
+  const seY = latToTile(south);
+  const tiles = [];
+  const seenTiles = /* @__PURE__ */ new Set();
+  if (nwX > seX) {
+    seX += maxTiles;
+  }
+  for (let x = nwX; x <= seX; x++) {
+    const wrappedX = (x % maxTiles + maxTiles) % maxTiles;
+    for (let y = nwY; y <= seY; y++) {
+      const clampedY = Math.max(0, Math.min(maxTiles - 1, y));
+      const key = `${zoom},${wrappedX},${clampedY}`;
+      if (!seenTiles.has(key)) {
+        seenTiles.add(key);
+        tiles.push([zoom, wrappedX, clampedY]);
+      }
+    }
+  }
+  return tiles;
+}
 function tileToKey(tile) {
   return tile.join(",");
 }
@@ -5088,7 +5159,6 @@ function zoomToLevel(zoom, maxZoom) {
   if (maxZoom) return Math.min(Math.max(0, Math.floor(zoom)), maxZoom);
   return Math.max(0, Math.floor(zoom));
 }
-var MERCATOR_LAT_LIMIT = 85.05112878;
 function lonToMercatorNorm(lon) {
   let normalizedLon = lon;
   if (lon > 180) {
@@ -5327,7 +5397,13 @@ var ZarrRenderer = class _ZarrRenderer {
       bandTexLocs,
       customUniformLocs,
       globeToMercMatrixLoc: projectionMode === "mapbox-globe" ? this.gl.getUniformLocation(program, "u_globe_to_merc") : null,
-      globeTransitionLoc: projectionMode === "mapbox-globe" ? this.gl.getUniformLocation(program, "u_globe_transition") : null
+      globeTransitionLoc: projectionMode === "mapbox-globe" ? this.gl.getUniformLocation(program, "u_globe_transition") : null,
+      isEquirectangularLoc: this.gl.getUniformLocation(
+        program,
+        "u_isEquirectangular"
+      ),
+      latMinLoc: this.gl.getUniformLocation(program, "u_latMin"),
+      latMaxLoc: this.gl.getUniformLocation(program, "u_latMax")
     };
     this.gl.deleteShader(vertexShader);
     this.gl.deleteShader(fragmentShader);
@@ -5346,6 +5422,7 @@ var ZarrRenderer = class _ZarrRenderer {
       tileSize,
       vertexArr,
       pixCoordArr,
+      tileBounds,
       singleImage,
       shaderData,
       projectionData,
@@ -5413,6 +5490,7 @@ var ZarrRenderer = class _ZarrRenderer {
         tileSize,
         vertexArr,
         pixCoordArr,
+        tileBounds,
         customShaderConfig
       );
     } else if (singleImage) {
@@ -5499,10 +5577,8 @@ var ZarrRenderer = class _ZarrRenderer {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
     }
   }
-  renderTiles(shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, customShaderConfig) {
+  renderTiles(shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, tileBounds, customShaderConfig) {
     const gl = this.gl;
-    gl.uniform1f(shaderProgram.scaleXLoc, 0);
-    gl.uniform1f(shaderProgram.scaleYLoc, 0);
     if (shaderProgram.useCustomShader && customShaderConfig) {
       let textureUnit = 2;
       for (const bandName of customShaderConfig.bands) {
@@ -5520,6 +5596,7 @@ var ZarrRenderer = class _ZarrRenderer {
         const [z, x, y] = tileTuple;
         const tileKey = tileToKey(tileTuple);
         const tile = tileCache.get(tileKey);
+        const bounds = tileBounds?.[tileKey];
         let tileToRender = null;
         let renderTileKey = tileKey;
         let texScale = [1, 1];
@@ -5544,10 +5621,39 @@ var ZarrRenderer = class _ZarrRenderer {
           }
         }
         if (!tileToRender || !tileToRender.data) continue;
-        const [scale, shiftX, shiftY] = tileToScale(tileTuple);
-        gl.uniform1f(shaderProgram.scaleLoc, scale);
-        gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
-        gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
+        if (bounds) {
+          const scaleX = (bounds.x1 - bounds.x0) / 2;
+          const scaleY = (bounds.y1 - bounds.y0) / 2;
+          const shiftX = (bounds.x0 + bounds.x1) / 2;
+          const shiftY = (bounds.y0 + bounds.y1) / 2;
+          gl.uniform1f(shaderProgram.scaleLoc, 0);
+          gl.uniform1f(shaderProgram.scaleXLoc, scaleX);
+          gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
+          gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
+          gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
+          if (shaderProgram.isEquirectangularLoc) {
+            gl.uniform1i(
+              shaderProgram.isEquirectangularLoc,
+              bounds.latMin !== void 0 ? 1 : 0
+            );
+          }
+          if (shaderProgram.latMinLoc && bounds.latMin !== void 0) {
+            gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin);
+          }
+          if (shaderProgram.latMaxLoc && bounds.latMax !== void 0) {
+            gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax);
+          }
+        } else {
+          const [scale, shiftX, shiftY] = tileToScale(tileTuple);
+          gl.uniform1f(shaderProgram.scaleLoc, scale);
+          gl.uniform1f(shaderProgram.scaleXLoc, 0);
+          gl.uniform1f(shaderProgram.scaleYLoc, 0);
+          gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
+          gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
+          if (shaderProgram.isEquirectangularLoc) {
+            gl.uniform1i(shaderProgram.isEquirectangularLoc, 0);
+          }
+        }
         gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
         gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer);
@@ -6205,6 +6311,9 @@ var TiledDataManager = class _TiledDataManager {
     this.tileSize = DEFAULT_TILE_SIZE;
     this.selectors = {};
     this.visibleTiles = [];
+    this.crs = "EPSG:4326";
+    this.xyLimits = null;
+    this.tileBounds = {};
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -6218,6 +6327,8 @@ var TiledDataManager = class _TiledDataManager {
     const desc = this.zarrStore.describe();
     this.maxZoom = desc.levels.length - 1;
     this.tileSize = desc.tileSize || DEFAULT_TILE_SIZE;
+    this.crs = desc.crs;
+    this.xyLimits = desc.xyLimits;
     const bandNames = getBands(this.variable, this.selector);
     this.tilesManager = new Tiles({
       store: this.zarrStore,
@@ -6238,6 +6349,7 @@ var TiledDataManager = class _TiledDataManager {
     const isGlobe = projection?.type === "globe" || projection?.name === "globe";
     this.updateGeometryForProjection(isGlobe);
     this.visibleTiles = this.getVisibleTiles(map);
+    this.tileBounds = this.computeTileBounds(this.visibleTiles);
     this.prefetchTileData(this.visibleTiles);
   }
   onProjectionChange(isGlobe) {
@@ -6251,6 +6363,7 @@ var TiledDataManager = class _TiledDataManager {
       tileSize: this.tileSize,
       vertexArr: this.vertexArr,
       pixCoordArr: this.pixCoordArr,
+      tileBounds: Object.keys(this.tileBounds).length > 0 ? this.tileBounds : void 0,
       singleImage: void 0
     };
   }
@@ -6336,7 +6449,37 @@ var TiledDataManager = class _TiledDataManager {
     if (!bounds) {
       return [];
     }
+    if (this.crs === "EPSG:4326" && this.xyLimits) {
+      return getTilesAtZoomEquirect(pyramidLevel, bounds, this.xyLimits);
+    }
     return getTilesAtZoom(pyramidLevel, bounds);
+  }
+  computeTileBounds(tiles) {
+    if (this.crs !== "EPSG:4326" || !this.xyLimits) return {};
+    const bounds = {};
+    for (const tile of tiles) {
+      const [z, x, y] = tile;
+      const tilesPerSide = Math.pow(2, z);
+      const lonSpan = (this.xyLimits.xMax - this.xyLimits.xMin) / tilesPerSide;
+      const latSpan = (this.xyLimits.yMax - this.xyLimits.yMin) / tilesPerSide;
+      const lonMin = this.xyLimits.xMin + x * lonSpan;
+      const lonMax = lonMin + lonSpan;
+      const latNorth = this.xyLimits.yMax - y * latSpan;
+      const latSouth = latNorth - latSpan;
+      const x0 = lonToMercatorNorm(lonMin);
+      const x1 = lonToMercatorNorm(lonMax);
+      const y0 = latToMercatorNorm(latNorth);
+      const y1 = latToMercatorNorm(latSouth);
+      bounds[tileToKey(tile)] = {
+        x0,
+        y0,
+        x1,
+        y1,
+        latMin: latSouth,
+        latMax: latNorth
+      };
+    }
+    return bounds;
   }
   async prefetchTileData(tiles) {
     const fetchPromises = tiles.map(
@@ -6397,8 +6540,8 @@ var SingleImageDataManager = class _SingleImageDataManager {
   async initialize() {
     const desc = this.zarrStore.describe();
     this.dimIndices = desc.dimIndices;
-    this.xyLimits = desc.xyLimits;
     this.crs = desc.crs;
+    this.xyLimits = desc.xyLimits;
     this.zarrArray = await this.zarrStore.getArray();
     this.width = this.zarrArray.shape[this.dimIndices.lon.index];
     this.height = this.zarrArray.shape[this.dimIndices.lat.index];
@@ -6880,6 +7023,7 @@ var ZarrLayer = class {
       tileSize: renderData.tileSize || this.tileSize,
       vertexArr: renderData.vertexArr || new Float32Array(),
       pixCoordArr: renderData.pixCoordArr || new Float32Array(),
+      tileBounds: renderData.tileBounds,
       singleImage: renderData.singleImage,
       shaderData,
       projectionData,

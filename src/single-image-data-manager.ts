@@ -60,8 +60,8 @@ export class SingleImageDataManager implements DataManager {
   async initialize(): Promise<void> {
     const desc = this.zarrStore.describe()
     this.dimIndices = desc.dimIndices
-    this.xyLimits = desc.xyLimits
     this.crs = desc.crs
+    this.xyLimits = desc.xyLimits
 
     this.zarrArray = await this.zarrStore.getArray()
     this.width = this.zarrArray.shape[this.dimIndices.lon.index]

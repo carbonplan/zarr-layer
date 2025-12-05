@@ -550,6 +550,7 @@ export class ZarrLayer {
       tileSize: renderData.tileSize || this.tileSize,
       vertexArr: renderData.vertexArr || new Float32Array(),
       pixCoordArr: renderData.pixCoordArr || new Float32Array(),
+      tileBounds: renderData.tileBounds,
       singleImage: renderData.singleImage,
       shaderData,
       projectionData,

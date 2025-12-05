@@ -6,6 +6,17 @@
  */
 
 export type TileTuple = [number, number, number]
+export const MERCATOR_LAT_LIMIT = 85.05112878
+export const MERCATOR_MAX = MERCATOR_LAT_LIMIT
+
+export interface MercatorBounds {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  latMin?: number
+  latMax?: number
+}
 
 /**
  * Converts longitude to tile X coordinate at given zoom level.
@@ -85,6 +96,58 @@ export function getTilesAtZoom(
 }
 
 /**
+ * Gets visible tiles for an equirectangular (EPSG:4326) pyramid.
+ * Uses linear latitude spacing instead of Web Mercator's nonlinear spacing.
+ * @param zoom - Zoom level.
+ * @param bounds - Geographic bounds [[west, south], [east, north]].
+ * @param xyLimits - Extent of the dataset in lon/lat (defaults to world).
+ */
+export function getTilesAtZoomEquirect(
+  zoom: number,
+  bounds: [[number, number], [number, number]],
+  xyLimits: { xMin: number; xMax: number; yMin: number; yMax: number }
+): TileTuple[] {
+  const [[west, south], [east, north]] = bounds
+  const xSpan = xyLimits.xMax - xyLimits.xMin || 360
+  const ySpan = xyLimits.yMax - xyLimits.yMin || 180
+  const maxTiles = Math.pow(2, zoom)
+
+  const lonToTile = (lon: number) =>
+    Math.floor(((lon - xyLimits.xMin) / xSpan) * maxTiles)
+  const latToTile = (lat: number) => {
+    const clamped = Math.max(Math.min(lat, xyLimits.yMax), xyLimits.yMin)
+    const norm = (xyLimits.yMax - clamped) / ySpan
+    return Math.floor(norm * maxTiles)
+  }
+
+  let nwX = lonToTile(west)
+  let seX = lonToTile(east)
+  const nwY = latToTile(north)
+  const seY = latToTile(south)
+
+  const tiles: TileTuple[] = []
+  const seenTiles = new Set<string>()
+
+  if (nwX > seX) {
+    seX += maxTiles
+  }
+
+  for (let x = nwX; x <= seX; x++) {
+    const wrappedX = ((x % maxTiles) + maxTiles) % maxTiles
+    for (let y = nwY; y <= seY; y++) {
+      const clampedY = Math.max(0, Math.min(maxTiles - 1, y))
+      const key = `${zoom},${wrappedX},${clampedY}`
+      if (!seenTiles.has(key)) {
+        seenTiles.add(key)
+        tiles.push([zoom, wrappedX, clampedY])
+      }
+    }
+  }
+
+  return tiles
+}
+
+/**
  * Converts tile tuple to cache key string.
  * @param tile - Tile tuple [zoom, x, y].
  * @returns String key "z,x,y".
@@ -127,8 +190,6 @@ export function zoomToLevel(zoom: number, maxZoom: number): number {
   return Math.max(0, Math.floor(zoom))
 }
 
-const MERCATOR_LAT_LIMIT = 85.05112878
-
 /**
  * Converts longitude in degrees to normalized Web Mercator X coordinate [0, 1].
  * Handles wraparound for longitudes outside -180 to 180 range.
@@ -166,13 +227,6 @@ export function latToMercatorNorm(lat: number): number {
         Math.PI) /
     2
   )
-}
-
-export interface MercatorBounds {
-  x0: number
-  y0: number
-  x1: number
-  y1: number
 }
 
 /**
