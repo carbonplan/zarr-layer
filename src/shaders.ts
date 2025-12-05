@@ -194,8 +194,7 @@ export function createFragmentShaderSource(
   const bandReads = bands
     .map(
       (name) =>
-        `  float ${name}_raw = texture(${name}, sample_coord).r;
-  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+        `  float ${name}_raw = texture(${name}, sample_coord).r;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
     )
     .join('\n')
 
@@ -274,6 +273,69 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
   fragColor.rgb *= fragColor.a;
 `
 }
+}
+`
+}
+
+/**
+ * Vertex shader used for Mapbox globe custom layers.
+ * Supports two modes:
+ * - Tile render mode (u_tile_render = 1): Simple clip space output for renderToTile
+ * - Globe render mode (u_tile_render = 0): Full ECEF calculations for regular render
+ */
+export function createMapboxGlobeVertexShaderSource(): string {
+  return `#version 300 es
+uniform float scale;
+uniform float scale_x;
+uniform float scale_y;
+uniform float shift_x;
+uniform float shift_y;
+uniform float u_worldXOffset;
+uniform mat4 matrix;
+uniform mat4 u_globe_to_merc;
+uniform float u_globe_transition;
+uniform int u_tile_render;
+
+in vec2 pix_coord_in;
+in vec2 vertex;
+
+out vec2 pix_coord;
+
+const float PI = 3.14159265358979323846;
+const float GLOBE_RADIUS = 1303.7972938088067;
+
+float mercatorYToLatRad(float y) {
+  float t = PI * (1.0 - 2.0 * y);
+  return atan(sinh(t));
+}
+
+void main() {
+  float sx = scale_x > 0.0 ? scale_x : scale;
+  float sy = scale_y > 0.0 ? scale_y : scale;
+
+  vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);
+
+  if (u_tile_render == 1) {
+    gl_Position = matrix * vec4(merc, 0.0, 1.0);
+  } else {
+    vec4 mercClip = matrix * vec4(merc, 0.0, 1.0);
+    mercClip /= mercClip.w;
+
+    float lon = (merc.x - 0.5) * 2.0 * PI;
+    float lat = mercatorYToLatRad(merc.y);
+    float cosLat = cos(lat);
+    vec3 ecef = vec3(
+      GLOBE_RADIUS * cosLat * sin(lon),
+      -GLOBE_RADIUS * sin(lat),
+      GLOBE_RADIUS * cosLat * cos(lon)
+    );
+
+    vec4 globeClip = matrix * (u_globe_to_merc * vec4(ecef, 1.0));
+    globeClip /= globeClip.w;
+
+    gl_Position = mix(globeClip, mercClip, clamp(u_globe_transition, 0.0, 1.0));
+  }
+  pix_coord = pix_coord_in;
 }
 `
 }

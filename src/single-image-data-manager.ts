@@ -1,7 +1,11 @@
 import * as zarr from 'zarrita'
 import { DataManager, RenderData } from './data-manager'
 import { ZarrStore } from './zarr-store'
-import { boundsToMercatorNorm, MercatorBounds } from './map-utils'
+import {
+  boundsToMercatorNorm,
+  MercatorBounds,
+  type XYLimits as MapXYLimits,
+} from './map-utils'
 import { mustCreateBuffer, mustCreateTexture } from './webgl-utils'
 import type {
   CRS,
@@ -92,8 +96,7 @@ export class SingleImageDataManager implements DataManager {
     }
 
     const projection = map.getProjection ? map.getProjection() : null
-    const isGlobe =
-      projection?.type === 'globe' || projection?.name === 'globe'
+    const isGlobe = projection?.type === 'globe' || projection?.name === 'globe'
     this.updateGeometryForProjection(isGlobe)
 
     if (!this.data && !this.isLoadingData) {
@@ -168,15 +171,15 @@ export class SingleImageDataManager implements DataManager {
         data: this.data,
         width: this.width,
         height: this.height,
-      bounds: this.mercatorBounds,
-      texture: this.texture,
-      vertexBuffer: this.vertexBuffer,
-      pixCoordBuffer: this.pixCoordBuffer,
-      pixCoordArr: this.pixCoordArr,
-      geometryVersion: this.geometryVersion,
-    },
+        bounds: this.mercatorBounds,
+        texture: this.texture,
+        vertexBuffer: this.vertexBuffer,
+        pixCoordBuffer: this.pixCoordBuffer,
+        pixCoordArr: this.pixCoordArr,
+        geometryVersion: this.geometryVersion,
+      },
+    }
   }
-}
 
   dispose(gl: WebGL2RenderingContext): void {
     this.isRemoved = true
@@ -193,6 +196,18 @@ export class SingleImageDataManager implements DataManager {
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
     this.loadingCallback = callback
+  }
+
+  getCRS(): CRS {
+    return this.crs ?? 'EPSG:4326'
+  }
+
+  getXYLimits(): MapXYLimits | null {
+    return this.xyLimits
+  }
+
+  getMaxZoom(): number {
+    return 0
   }
 
   private emitLoadingState(): void {

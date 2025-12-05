@@ -9,7 +9,6 @@
 
 export type TileTuple = [number, number, number]
 export const MERCATOR_LAT_LIMIT = 85.05112878
-export const MERCATOR_MAX = MERCATOR_LAT_LIMIT
 
 export interface MercatorBounds {
   x0: number
@@ -229,6 +228,98 @@ export function latToMercatorNorm(lat: number): number {
         Math.PI) /
     2
   )
+}
+
+export function mercatorNormToLat(mercY: number): number {
+  const t = Math.PI * (1 - 2 * mercY)
+  return (180 / Math.PI) * Math.atan(Math.sinh(t))
+}
+
+export function mercatorNormToLon(mercX: number): number {
+  return mercX * 360 - 180
+}
+
+export interface GeoBounds {
+  west: number
+  east: number
+  south: number
+  north: number
+}
+
+export function mercatorTileToGeoBounds(
+  z: number,
+  x: number,
+  y: number
+): GeoBounds {
+  const tilesPerSide = Math.pow(2, z)
+  const mercX0 = x / tilesPerSide
+  const mercX1 = (x + 1) / tilesPerSide
+  const mercY0 = y / tilesPerSide
+  const mercY1 = (y + 1) / tilesPerSide
+
+  return {
+    west: mercatorNormToLon(mercX0),
+    east: mercatorNormToLon(mercX1),
+    north: mercatorNormToLat(mercY0),
+    south: mercatorNormToLat(mercY1),
+  }
+}
+
+export interface XYLimits {
+  xMin: number
+  xMax: number
+  yMin: number
+  yMax: number
+}
+
+export function getOverlapping4326Tiles(
+  geoBounds: GeoBounds,
+  xyLimits: XYLimits,
+  pyramidLevel: number
+): TileTuple[] {
+  const tilesPerSide = Math.pow(2, pyramidLevel)
+  const xSpan = xyLimits.xMax - xyLimits.xMin || 360
+  const ySpan = xyLimits.yMax - xyLimits.yMin || 180
+
+  const lonToTileFloat = (lon: number) =>
+    ((lon - xyLimits.xMin) / xSpan) * tilesPerSide
+  const latToTileFloat = (lat: number) => {
+    const clamped = Math.max(Math.min(lat, xyLimits.yMax), xyLimits.yMin)
+    return ((xyLimits.yMax - clamped) / ySpan) * tilesPerSide
+  }
+
+  const xTileMin = Math.floor(lonToTileFloat(geoBounds.west))
+  const xTileMax = Math.floor(lonToTileFloat(geoBounds.east))
+  const yTileMin = Math.floor(latToTileFloat(geoBounds.north))
+  const yTileMax = Math.floor(latToTileFloat(geoBounds.south))
+
+  const tiles: TileTuple[] = []
+  for (let tx = xTileMin; tx <= xTileMax; tx++) {
+    const wrappedX = ((tx % tilesPerSide) + tilesPerSide) % tilesPerSide
+    for (let ty = yTileMin; ty <= yTileMax; ty++) {
+      const clampedY = Math.max(0, Math.min(tilesPerSide - 1, ty))
+      tiles.push([pyramidLevel, wrappedX, clampedY])
+    }
+  }
+  return tiles
+}
+
+export function get4326TileGeoBounds(
+  z: number,
+  x: number,
+  y: number,
+  xyLimits: XYLimits
+): GeoBounds {
+  const tilesPerSide = Math.pow(2, z)
+  const xSpan = xyLimits.xMax - xyLimits.xMin || 360
+  const ySpan = xyLimits.yMax - xyLimits.yMin || 180
+
+  const west = xyLimits.xMin + (x / tilesPerSide) * xSpan
+  const east = xyLimits.xMin + ((x + 1) / tilesPerSide) * xSpan
+  const north = xyLimits.yMax - (y / tilesPerSide) * ySpan
+  const south = xyLimits.yMax - ((y + 1) / tilesPerSide) * ySpan
+
+  return { west, east, south, north }
 }
 
 /**

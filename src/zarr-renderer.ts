@@ -6,6 +6,7 @@ import {
 import {
   createVertexShaderSource,
   createFragmentShaderSource,
+  createMapboxGlobeVertexShaderSource,
   type ProjectionData,
   type ShaderData,
 } from './shaders'
@@ -73,6 +74,19 @@ interface RenderParams {
   projectionData?: ProjectionData
   customShaderConfig?: CustomShaderConfig
   mapboxGlobe?: MapboxGlobeParams
+  mapboxTileRender?: boolean
+  tileTexOverrides?: Record<
+    string,
+    { texScale: [number, number]; texOffset: [number, number] }
+  >
+  tileOverride?: {
+    scaleX: number
+    scaleY: number
+    shiftX: number
+    shiftY: number
+    texScale: [number, number]
+    texOffset: [number, number]
+  }
 }
 
 interface ShaderProgram {
@@ -108,6 +122,7 @@ interface ShaderProgram {
   // Mapbox globe specific uniforms
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
+  tileRenderLoc?: WebGLUniformLocation | null
   isEquirectangularLoc: WebGLUniformLocation | null
   latMinLoc: WebGLUniformLocation | null
   latMaxLoc: WebGLUniformLocation | null
@@ -180,7 +195,8 @@ export class ZarrRenderer {
     shaderProgram: ShaderProgram,
     matrix: number[] | Float32Array | Float64Array,
     projectionData?: ProjectionData,
-    mapboxGlobe?: MapboxGlobeParams
+    mapboxGlobe?: MapboxGlobeParams,
+    mapboxTileRender?: boolean
   ) {
     const gl = this.gl
     const setMatrix4 = (
@@ -235,6 +251,9 @@ export class ZarrRenderer {
           mapboxGlobe?.globeToMercatorMatrix
         )
         setFloat(shaderProgram.globeTransitionLoc, mapboxGlobe?.transition ?? 0)
+        if (shaderProgram.tileRenderLoc) {
+          gl.uniform1i(shaderProgram.tileRenderLoc, mapboxTileRender ? 1 : 0)
+        }
         break
       }
       default: {
@@ -381,6 +400,10 @@ export class ZarrRenderer {
         projectionMode === 'mapbox-globe'
           ? this.gl.getUniformLocation(program, 'u_globe_transition')
           : null,
+      tileRenderLoc:
+        projectionMode === 'mapbox-globe'
+          ? this.gl.getUniformLocation(program, 'u_tile_render')
+          : null,
       isEquirectangularLoc: this.gl.getUniformLocation(
         program,
         'u_isEquirectangular'
@@ -414,12 +437,15 @@ export class ZarrRenderer {
       projectionData,
       customShaderConfig,
       mapboxGlobe,
+      mapboxTileRender,
+      tileTexOverrides,
+      tileOverride,
     } = params
 
     const shaderProgram = this.getOrCreateProgram(
       shaderData,
       customShaderConfig,
-      !!mapboxGlobe
+      !!mapboxGlobe || !!mapboxTileRender
     )
 
     const gl = this.gl
@@ -469,7 +495,8 @@ export class ZarrRenderer {
       shaderProgram,
       matrix,
       projectionData,
-      mapboxGlobe
+      mapboxGlobe,
+      mapboxTileRender
     )
 
     if (isMultiscale) {
@@ -486,14 +513,17 @@ export class ZarrRenderer {
         vertexArr,
         pixCoordArr,
         tileBounds,
-        customShaderConfig
+        customShaderConfig,
+        !!mapboxTileRender,
+        tileTexOverrides
       )
     } else if (singleImage) {
       this.renderSingleImage(
         shaderProgram,
         worldOffsets,
         singleImage,
-        vertexArr
+        vertexArr,
+        tileOverride
       )
     }
   }
@@ -514,7 +544,15 @@ export class ZarrRenderer {
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
     params: SingleImageParams,
-    vertexArr: Float32Array
+    vertexArr: Float32Array,
+    tileOverride?: {
+      scaleX: number
+      scaleY: number
+      shiftX: number
+      shiftY: number
+      texScale: [number, number]
+      texOffset: [number, number]
+    }
   ) {
     const {
       data,
@@ -542,18 +580,32 @@ export class ZarrRenderer {
 
     const gl = this.gl
 
-    const scaleX = (bounds.x1 - bounds.x0) / 2
-    const scaleY = (bounds.y1 - bounds.y0) / 2
-    const shiftX = (bounds.x0 + bounds.x1) / 2
-    const shiftY = (bounds.y0 + bounds.y1) / 2
+    const scaleX =
+      tileOverride?.scaleX !== undefined
+        ? tileOverride.scaleX
+        : (bounds.x1 - bounds.x0) / 2
+    const scaleY =
+      tileOverride?.scaleY !== undefined
+        ? tileOverride.scaleY
+        : (bounds.y1 - bounds.y0) / 2
+    const shiftX =
+      tileOverride?.shiftX !== undefined
+        ? tileOverride.shiftX
+        : (bounds.x0 + bounds.x1) / 2
+    const shiftY =
+      tileOverride?.shiftY !== undefined
+        ? tileOverride.shiftY
+        : (bounds.y0 + bounds.y1) / 2
 
     gl.uniform1f(shaderProgram.scaleLoc, 0)
     gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
     gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
     gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
     gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
-    gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
-    gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)
+    const texScale = tileOverride?.texScale ?? [1.0, 1.0]
+    const texOffset = tileOverride?.texOffset ?? [0.0, 0.0]
+    gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
+    gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer)
     if (!this.singleImageGeometryUploaded) {
@@ -609,7 +661,12 @@ export class ZarrRenderer {
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
     tileBounds?: Record<string, MercatorBounds>,
-    customShaderConfig?: CustomShaderConfig
+    customShaderConfig?: CustomShaderConfig,
+    mapboxTileRender: boolean = false,
+    tileTexOverrides?: Record<
+      string,
+      { texScale: [number, number]; texOffset: [number, number] }
+    >
   ) {
     const gl = this.gl
 
@@ -627,7 +684,10 @@ export class ZarrRenderer {
     const vertexCount = vertexArr.length / 2
 
     for (const worldOffset of worldOffsets) {
-      gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
+      gl.uniform1f(
+        shaderProgram.worldXOffsetLoc,
+        mapboxTileRender ? 0 : worldOffset
+      )
 
       for (const tileTuple of visibleTiles) {
         const [z, x, y] = tileTuple
@@ -697,8 +757,22 @@ export class ZarrRenderer {
             gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
           }
         }
-        gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
-        gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
+        if (mapboxTileRender && tileTexOverrides?.[tileKey]) {
+          const override = tileTexOverrides[tileKey]
+          gl.uniform2f(
+            shaderProgram.texScaleLoc,
+            override.texScale[0],
+            override.texScale[1]
+          )
+          gl.uniform2f(
+            shaderProgram.texOffsetLoc,
+            override.texOffset[0],
+            override.texOffset[1]
+          )
+        } else {
+          gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
+          gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
+        }
 
         gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer)
         if (!tileToRender.geometryUploaded) {
@@ -876,65 +950,4 @@ export class ZarrRenderer {
     }
     return null
   }
-}
-
-/**
- * Vertex shader used for Mapbox globe custom layers.
- * Computes mercator position for current tile quad and derives an ECEF position
- * to blend between globe and mercator using Mapbox-provided matrices.
- */
-function createMapboxGlobeVertexShaderSource(): string {
-  return `#version 300 es
-uniform float scale;
-uniform float scale_x;
-uniform float scale_y;
-uniform float shift_x;
-uniform float shift_y;
-uniform float u_worldXOffset;
-uniform mat4 matrix;
-uniform mat4 u_globe_to_merc;
-uniform float u_globe_transition;
-
-in vec2 pix_coord_in;
-in vec2 vertex;
-
-out vec2 pix_coord;
-
-const float PI = 3.14159265358979323846;
-const float GLOBE_RADIUS = 1303.7972938088067; // matches mapbox-gl-js globe radius
-
-// Convert mercator y (0..1) to latitude in radians
-float mercatorYToLatRad(float y) {
-  float t = PI * (1.0 - 2.0 * y);
-  return atan(sinh(t));
-}
-
-void main() {
-  float sx = scale_x > 0.0 ? scale_x : scale;
-  float sy = scale_y > 0.0 ? scale_y : scale;
-
-  // Mercator position in [0,1] world space
-  vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);
-  vec4 mercClip = matrix * vec4(merc, 0.0, 1.0);
-  mercClip /= mercClip.w;
-
-  // Derive lon/lat from mercator coords to build ECEF position on the globe
-  float lon = (merc.x - 0.5) * 2.0 * PI;
-  float lat = mercatorYToLatRad(merc.y);
-  float cosLat = cos(lat);
-  // Match Mapbox GL JS ECEF convention:
-  // x: cosLat * sin(lon), y: -sinLat, z: cosLat * cos(lon)
-  vec3 ecef = vec3(
-    GLOBE_RADIUS * cosLat * sin(lon),
-    -GLOBE_RADIUS * sin(lat),
-    GLOBE_RADIUS * cosLat * cos(lon)
-  );
-
-  vec4 globeClip = matrix * (u_globe_to_merc * vec4(ecef, 1.0));
-  globeClip /= globeClip.w;
-
-  gl_Position = mix(globeClip, mercClip, clamp(u_globe_transition, 0.0, 1.0));
-  pix_coord = pix_coord_in;
-}
-`
 }

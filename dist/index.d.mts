@@ -88,6 +88,7 @@ declare class ZarrLayer {
     private map;
     private renderer;
     private dataManager;
+    private tileNeedsRender;
     private applyWorldCopiesSetting;
     private initialRenderWorldCopies;
     private projectionChangeHandler;
@@ -125,7 +126,14 @@ declare class ZarrLayer {
     prerender(_gl: WebGL2RenderingContext | WebGLRenderingContext, _params: unknown): void;
     render(_gl: WebGL2RenderingContext | WebGLRenderingContext, params: unknown, projection?: {
         name: string;
-    }, globeToMercatorMatrix?: number[] | Float32Array | Float64Array, transition?: number): void;
+    }, projectionToMercatorMatrix?: number[] | Float32Array | Float64Array, projectionToMercatorTransition?: number, _centerInMercator?: number[], _pixelsPerMeterRatio?: number): void;
+    renderToTile(_gl: WebGL2RenderingContext, tileId: {
+        z: number;
+        x: number;
+        y: number;
+    }): void;
+    private findBestParentTile;
+    shouldRerenderTiles(): boolean;
     onRemove(_map: MapLike, gl: WebGL2RenderingContext): void;
 }
 

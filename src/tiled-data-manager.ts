@@ -18,6 +18,7 @@ import {
   tileToKey,
   TileTuple,
   zoomToLevel,
+  type XYLimits,
 } from './map-utils'
 import { getBands } from './zarr-utils'
 
@@ -99,7 +100,8 @@ export class TiledDataManager implements DataManager {
     const isGlobe = projection?.type === 'globe' || projection?.name === 'globe'
     this.updateGeometryForProjection(isGlobe)
 
-    this.visibleTiles = this.getVisibleTiles(map)
+    const visibleInfo = this.getVisibleTilesWithContext(map)
+    this.visibleTiles = visibleInfo.tiles
     this.tileBounds = this.computeTileBounds(this.visibleTiles)
 
     const currentHash = JSON.stringify(this.selector)
@@ -155,6 +157,18 @@ export class TiledDataManager implements DataManager {
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
     this.loadingCallback = callback
+  }
+
+  getCRS(): CRS {
+    return this.crs
+  }
+
+  getXYLimits(): XYLimits | null {
+    return this.xyLimits
+  }
+
+  getMaxZoom(): number {
+    return this.maxZoom
   }
 
   private emitLoadingState(): void {
@@ -252,22 +266,39 @@ export class TiledDataManager implements DataManager {
     }
   }
 
-  private getVisibleTiles(map: MapLike): TileTuple[] {
-    if (!map.getZoom || !map.getBounds) return []
+  private getVisibleTilesWithContext(map: MapLike): {
+    tiles: TileTuple[]
+    pyramidLevel: number | null
+    mapZoom: number | null
+    bounds: [[number, number], [number, number]] | null
+  } {
+    if (!map.getZoom || !map.getBounds) {
+      return { tiles: [], pyramidLevel: null, mapZoom: null, bounds: null }
+    }
 
     const mapZoom = map.getZoom()
     if (mapZoom < this.minRenderZoom) {
-      return []
+      return { tiles: [], pyramidLevel: null, mapZoom, bounds: null }
     }
     const pyramidLevel = zoomToLevel(mapZoom, this.maxZoom)
     const bounds = map.getBounds()?.toArray()
     if (!bounds) {
-      return []
+      return { tiles: [], pyramidLevel, mapZoom, bounds: null }
     }
     if (this.crs === 'EPSG:4326' && this.xyLimits) {
-      return getTilesAtZoomEquirect(pyramidLevel, bounds, this.xyLimits)
+      return {
+        tiles: getTilesAtZoomEquirect(pyramidLevel, bounds, this.xyLimits),
+        pyramidLevel,
+        mapZoom,
+        bounds,
+      }
     }
-    return getTilesAtZoom(pyramidLevel, bounds)
+    return {
+      tiles: getTilesAtZoom(pyramidLevel, bounds),
+      pyramidLevel,
+      mapZoom,
+      bounds,
+    }
   }
 
   private computeTileBounds(

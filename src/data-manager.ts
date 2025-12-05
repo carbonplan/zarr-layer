@@ -1,6 +1,6 @@
-import type { MercatorBounds, TileTuple } from './map-utils'
+import type { MercatorBounds, TileTuple, XYLimits } from './map-utils'
 import type { TileRenderCache } from './zarr-tile-cache'
-import type { LoadingStateCallback, MapLike } from './types'
+import type { CRS, LoadingStateCallback, MapLike } from './types'
 
 export interface RenderData {
   isMultiscale: boolean
@@ -34,4 +34,7 @@ export interface DataManager {
   ): Promise<void>
   onProjectionChange(isGlobe: boolean): void
   setLoadingCallback(callback: LoadingStateCallback | undefined): void
+  getCRS(): CRS
+  getXYLimits(): XYLimits | null
+  getMaxZoom(): number
 }
