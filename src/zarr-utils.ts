@@ -199,51 +199,12 @@ export async function loadDimensionValues(
   return coordArray
 }
 
-/**
- * Opens and caches a specific multiscale level array.
- * Keeps a small LRU-style cache of up to three levels.
- *
- * @param root        Zarr group root.
- * @param levelPath   Path to the multiscale level.
- * @param variable    Variable name within the level (if any).
- * @param levelCache Cache of opened level arrays.
- * @param zarrVersion Zarr version (2 or 3).
- *
- * @returns The opened Zarr array for the specified level.
- */
-export async function openLevelArray(
-  root: zarr.Location<zarr.FetchStore>,
-  levelPath: string,
-  variable: string,
-  levelCache: Map<number, zarr.Array<zarr.DataType>>,
-  zarrVersion: 2 | 3 | null = null
-): Promise<zarr.Array<zarr.DataType>> {
-  const existing = Array.from(levelCache.entries()).find(
-    ([_, val]) => val.path === levelPath
-  )
-  if (existing) return existing[1]
-
-  const levelRoot = await root.resolve(levelPath)
-  const arrayLoc = variable ? await levelRoot.resolve(variable) : levelRoot
-  const localFunc = resolveOpenFunc(zarrVersion)
-  const arr = await localFunc(arrayLoc, { kind: 'array' })
-
-  const levelIndex = levelCache.size
-  levelCache.set(levelIndex, arr)
-  if (levelCache.size > 3) {
-    const firstKey = levelCache.keys().next().value as number
-    levelCache.delete(firstKey)
-  }
-
-  return arr
-}
-
-export interface BandInfo {
+interface BandInfo {
   band: number | string
   index: number
 }
 
-export function getBandInformation(
+function getBandInformation(
   selector: Record<
     string,
     number | number[] | string | string[] | ZarrSelectorsProps

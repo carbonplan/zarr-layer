@@ -122,7 +122,6 @@ declare class ZarrLayer {
     private initializeManager;
     private initialize;
     private loadInitialDimensionValues;
-    private getWorldOffsets;
     prerender(_gl: WebGL2RenderingContext | WebGLRenderingContext, _params: unknown): void;
     render(_gl: WebGL2RenderingContext | WebGLRenderingContext, params: unknown, projection?: {
         name: string;
@@ -132,7 +131,6 @@ declare class ZarrLayer {
         x: number;
         y: number;
     }): void;
-    private findBestParentTile;
     shouldRerenderTiles(): boolean;
     onRemove(_map: MapLike, gl: WebGL2RenderingContext): void;
 }

@@ -8,7 +8,7 @@
  */
 
 export type TileTuple = [number, number, number]
-export const MERCATOR_LAT_LIMIT = 85.05112878
+const MERCATOR_LAT_LIMIT = 85.05112878
 
 export interface MercatorBounds {
   x0: number
@@ -19,24 +19,11 @@ export interface MercatorBounds {
   latMax?: number
 }
 
-/**
- * Converts longitude to tile X coordinate at given zoom level.
- * @param lon - Longitude in degrees.
- * @param zoom - Zoom level.
- * @returns Tile X coordinate.
- */
-export function lon2tile(lon: number, zoom: number): number {
+function lon2tile(lon: number, zoom: number): number {
   return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom))
 }
 
-/**
- * Converts latitude to tile Y coordinate at given zoom level.
- * Uses Web Mercator projection.
- * @param lat - Latitude in degrees.
- * @param zoom - Zoom level.
- * @returns Tile Y coordinate.
- */
-export function lat2tile(lat: number, zoom: number): number {
+function lat2tile(lat: number, zoom: number): number {
   const clamped = Math.max(
     -MERCATOR_LAT_LIMIT,
     Math.min(MERCATOR_LAT_LIMIT, lat)
@@ -230,7 +217,7 @@ export function latToMercatorNorm(lat: number): number {
   )
 }
 
-export function mercatorNormToLat(mercY: number): number {
+function mercatorNormToLat(mercY: number): number {
   const t = Math.PI * (1 - 2 * mercY)
   return (180 / Math.PI) * Math.atan(Math.sinh(t))
 }
@@ -320,6 +307,42 @@ export function get4326TileGeoBounds(
   const south = xyLimits.yMax - ((y + 1) / tilesPerSide) * ySpan
 
   return { west, east, south, north }
+}
+
+interface TileCacheLike<T> {
+  get(key: string): T | undefined
+}
+
+interface TileDataLike {
+  data: Float32Array | null
+}
+
+export function findBestParentTile<T extends TileDataLike>(
+  tileCache: TileCacheLike<T>,
+  z: number,
+  x: number,
+  y: number
+): {
+  tile: T
+  ancestorZ: number
+  ancestorX: number
+  ancestorY: number
+} | null {
+  let ancestorZ = z - 1
+  let ancestorX = Math.floor(x / 2)
+  let ancestorY = Math.floor(y / 2)
+
+  while (ancestorZ >= 0) {
+    const parentKey = tileToKey([ancestorZ, ancestorX, ancestorY])
+    const parentTile = tileCache.get(parentKey)
+    if (parentTile && parentTile.data) {
+      return { tile: parentTile, ancestorZ, ancestorX, ancestorY }
+    }
+    ancestorZ--
+    ancestorX = Math.floor(ancestorX / 2)
+    ancestorY = Math.floor(ancestorY / 2)
+  }
+  return null
 }
 
 /**

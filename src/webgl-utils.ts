@@ -70,62 +70,6 @@ export function createProgram(
 }
 
 /**
- * Creates a flexible 1D color-ramp texture supporting either normalized (0–1)
- * or integer (0–255) color definitions.
- *
- * @param gl - The WebGL2 rendering context.
- * @param colors - Array of RGB colors in normalized `[0–1]` or integer `[0–255]` format.
- * @param opacity - Opacity multiplier between 0 and 1.
- * @returns A {@link WebGLTexture} representing the color ramp, or `null` if creation failed.
- *
- * @example
- * ```ts
- * const texture = createColorRampTexture(gl, [[1, 0, 0], [0, 0, 1]], 0.8);
- * ```
- */
-export function createColorRampTexture(
-  gl: WebGL2RenderingContext,
-  colors: number[][],
-  opacity: number
-): WebGLTexture | null {
-  if (!gl) return null
-
-  const colorTexture = gl.createTexture()
-  gl.bindTexture(gl.TEXTURE_2D, colorTexture)
-
-  const flat = new Uint8Array(colors.length * 4)
-  const useFloat = colors[0][0] <= 1.0
-
-  for (let i = 0; i < colors.length; i++) {
-    const c = colors[i]
-    flat[i * 4 + 0] = useFloat ? Math.round(c[0] * 255) : c[0]
-    flat[i * 4 + 1] = useFloat ? Math.round(c[1] * 255) : c[1]
-    flat[i * 4 + 2] = useFloat ? Math.round(c[2] * 255) : c[2]
-    flat[i * 4 + 3] = Math.floor(opacity * 255)
-  }
-
-  gl.texImage2D(
-    gl.TEXTURE_2D,
-    0,
-    gl.RGBA,
-    colors.length,
-    1,
-    0,
-    gl.RGBA,
-    gl.UNSIGNED_BYTE,
-    flat
-  )
-
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-
-  gl.bindTexture(gl.TEXTURE_2D, null)
-  return colorTexture
-}
-
-/**
  * Utility to fetch a uniform location with a helpful error if missing.
  */
 export function mustGetUniformLocation(
@@ -160,4 +104,15 @@ export function mustCreateBuffer(gl: WebGL2RenderingContext): WebGLBuffer {
     throw new Error('Failed to create buffer')
   }
   return buf
+}
+
+/**
+ * Configures a data texture with NEAREST filtering and CLAMP_TO_EDGE wrapping.
+ * Call after binding the texture with gl.bindTexture(gl.TEXTURE_2D, texture).
+ */
+export function configureDataTexture(gl: WebGL2RenderingContext) {
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 }

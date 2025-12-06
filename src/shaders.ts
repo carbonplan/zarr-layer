@@ -49,16 +49,7 @@ void main() {
   return maplibreVertexShaderSource
 }
 
-/**
- * Vertex shader for tile rendering (mercator fallback).
- * Transforms tile vertices using scale, shift, and projection matrix uniforms.
- * Vertices are in [-1, 1] and represent a full tile quad.
- * Scale and shift position the tile in mercator [0, 1] space.
- *
- * Note: Y is negated because vertex Y increases upward (+1 is top)
- * but mercator Y increases downward (0 is north, 1 is south).
- */
-export const maplibreVertexShaderSource = `#version 300 es
+const maplibreVertexShaderSource = `#version 300 es
 uniform float scale;
 uniform float scale_x;
 uniform float scale_y;
@@ -156,7 +147,7 @@ void main() {
 }
 `
 
-export interface FragmentShaderOptions {
+interface FragmentShaderOptions {
   bands: string[]
   customUniforms?: string[]
   customFrag?: string

@@ -9,13 +9,6 @@ export type SelectorValue =
   | string[]
   | [number, number]
 
-export interface ColorMapInfo {
-  [key: string]: {
-    interpolate: boolean
-    colors: number[][]
-  }
-}
-
 export interface ZarrSelectorsProps {
   selected: SelectorValue
   type?: 'index' | 'value'
@@ -31,11 +24,6 @@ export interface XYLimits {
 }
 
 export interface XYLimitsProps extends XYLimits {}
-
-export interface ZarrLevelMetadata {
-  width: number
-  height: number
-}
 
 export interface DimensionNamesProps {
   time?: string
@@ -81,25 +69,6 @@ export interface ZarrLayerOptions {
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'
-
-export interface DataSliceProps {
-  startX: number
-  endX: number
-  startY: number
-  endY: number
-  startElevation?: number
-  endElevation?: number
-}
-
-export interface SliceArgs {
-  [key: number]: number | zarr.Slice
-}
-
-export interface ColorScaleProps {
-  min: number
-  max: number
-  colors: number[][]
-}
 
 export interface BoundsLike {
   getWest(): number
