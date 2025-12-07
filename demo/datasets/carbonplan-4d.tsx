@@ -2,6 +2,7 @@ import React from 'react'
 // @ts-expect-error - carbonplan components types not available
 import { Filter, Slider, Row, Column } from '@carbonplan/components'
 import { Box, Flex } from 'theme-ui'
+import type { Theme } from 'theme-ui'
 import { BuildLayerResult, DatasetControlsProps, DatasetModule } from './types'
 import { useAppStore } from '../lib/store'
 
@@ -181,16 +182,19 @@ const Carbonplan4dControls = ({
                 ':focus': {
                   color: 'primary',
                   '&::-webkit-slider-thumb': {
-                    boxShadow: ({ colors }) => `0 0 0 4px ${colors.secondary}`,
+                    boxShadow: ({ colors }: Theme) =>
+                      `0 0 0 4px ${colors?.secondary}`,
                   },
                   '&::-moz-range-thumb': {
-                    boxShadow: ({ colors }) => `0 0 0 4px ${colors.secondary}`,
+                    boxShadow: ({ colors }: Theme) =>
+                      `0 0 0 4px ${colors?.secondary}`,
                   },
                 },
                 '&::-webkit-slider-thumb': {
                   height: [22, 18, 16],
                   width: [22, 18, 16],
-                  boxShadow: ({ colors }) => `0 0 0 0px ${colors.secondary}`,
+                  boxShadow: ({ colors }: Theme) =>
+                    `0 0 0 0px ${colors?.secondary}`,
                   transition: 'box-shadow .15s ease',
                   pointerEvents: 'auto',
                   zIndex: 3,
@@ -198,7 +202,8 @@ const Carbonplan4dControls = ({
                 '&::-moz-range-thumb': {
                   height: [22, 18, 16],
                   width: [22, 18, 16],
-                  boxShadow: ({ colors }) => `0 0 0 0px ${colors.secondary}`,
+                  boxShadow: ({ colors }: Theme) =>
+                    `0 0 0 0px ${colors?.secondary}`,
                   transition: 'box-shadow .15s ease',
                   pointerEvents: 'auto',
                   zIndex: 3,
@@ -229,10 +234,12 @@ const Carbonplan4dControls = ({
                   color: 'primary',
                   bg: 'transparent',
                   '&::-webkit-slider-thumb': {
-                    boxShadow: ({ colors }) => `0 0 0 4px ${colors.secondary}`,
+                    boxShadow: ({ colors }: Theme) =>
+                      `0 0 0 4px ${colors?.secondary}`,
                   },
                   '&::-moz-range-thumb': {
-                    boxShadow: ({ colors }) => `0 0 0 4px ${colors.secondary}`,
+                    boxShadow: ({ colors }: Theme) =>
+                      `0 0 0 4px ${colors?.secondary}`,
                   },
                 },
                 ':focus-visible': {
@@ -242,7 +249,8 @@ const Carbonplan4dControls = ({
                 '&::-webkit-slider-thumb': {
                   height: [22, 18, 16],
                   width: [22, 18, 16],
-                  boxShadow: ({ colors }) => `0 0 0 0px ${colors.secondary}`,
+                  boxShadow: ({ colors }: Theme) =>
+                    `0 0 0 0px ${colors?.secondary}`,
                   transition: 'box-shadow .15s ease',
                   pointerEvents: 'auto',
                   zIndex: 3,
@@ -250,7 +258,8 @@ const Carbonplan4dControls = ({
                 '&::-moz-range-thumb': {
                   height: [22, 18, 16],
                   width: [22, 18, 16],
-                  boxShadow: ({ colors }) => `0 0 0 0px ${colors.secondary}`,
+                  boxShadow: ({ colors }: Theme) =>
+                    `0 0 0 0px ${colors?.secondary}`,
                   transition: 'box-shadow .15s ease',
                   pointerEvents: 'auto',
                   zIndex: 3,
