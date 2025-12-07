@@ -15,6 +15,7 @@ import type {
   XYLimits,
   ZarrSelectorsProps,
 } from './types'
+import { calculateNearestIndex, loadDimensionValues } from './zarr-utils'
 
 const TILE_SUBDIVISIONS = 16
 
@@ -48,6 +49,7 @@ export class SingleImageDataManager implements DataManager {
   private loadingCallback: LoadingStateCallback | undefined
   private isLoadingData: boolean = false
   private fetchRequestId: number = 0
+  private dimensionValues: { [key: string]: Float64Array | number[] } = {}
 
   constructor(
     store: ZarrStore,
@@ -258,19 +260,29 @@ export class SingleImageDataManager implements DataManager {
             | ZarrSelectorsProps
             | undefined
           if (dimSelection !== undefined) {
-            const selectionValue =
+            const isObj =
               typeof dimSelection === 'object' &&
               dimSelection !== null &&
               !Array.isArray(dimSelection) &&
               'selected' in dimSelection
-                ? dimSelection.selected
-                : dimSelection
-            const normalizedValue = Array.isArray(selectionValue)
-              ? selectionValue.find((v) => typeof v === 'number') ?? 0
-              : typeof selectionValue === 'number'
-              ? selectionValue
-              : 0
-            sliceArgs[dimInfo.index] = normalizedValue
+            const selectionValue = isObj
+              ? (dimSelection as ZarrSelectorsProps).selected
+              : dimSelection
+            const selectionType = isObj
+              ? (dimSelection as ZarrSelectorsProps).type
+              : undefined
+            const primaryValue = Array.isArray(selectionValue)
+              ? selectionValue.find(
+                  (v) => typeof v === 'number' || typeof v === 'string'
+                )
+              : selectionValue
+
+            sliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
+              dimName,
+              dimInfo,
+              primaryValue,
+              selectionType
+            )
           } else {
             sliceArgs[dimInfo.index] = 0
           }
@@ -292,5 +304,47 @@ export class SingleImageDataManager implements DataManager {
         this.emitLoadingState()
       }
     }
+  }
+
+  private async resolveSelectionIndex(
+    dimName: string,
+    dimInfo: {
+      index: number
+      name: string
+      array: zarr.Array<zarr.DataType> | null
+    },
+    value: number | string | [number, number] | undefined,
+    type?: 'index' | 'value'
+  ): Promise<number> {
+    if (type === 'index') {
+      return typeof value === 'number' ? value : 0
+    }
+
+    if (!this.zarrStore.root) {
+      return typeof value === 'number' ? value : 0
+    }
+
+    try {
+      const coords = await loadDimensionValues(
+        this.dimensionValues,
+        null,
+        dimInfo,
+        this.zarrStore.root,
+        this.zarrStore.version
+      )
+      this.dimensionValues[dimName] = coords
+
+      if (typeof value === 'number' || typeof value === 'string') {
+        const coordIdx = (coords as (number | string)[]).indexOf(value)
+        if (coordIdx >= 0) return coordIdx
+        if (typeof value === 'number') {
+          return calculateNearestIndex(coords, value)
+        }
+      }
+    } catch {
+      // fall through
+    }
+
+    return typeof value === 'number' ? value : 0
   }
 }

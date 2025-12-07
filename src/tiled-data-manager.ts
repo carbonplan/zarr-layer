@@ -5,6 +5,7 @@ import type {
   SelectorMap,
   XYLimitsProps,
   CRS,
+  ZarrSelectorsProps,
 } from './types'
 import { ZarrStore } from './zarr-store'
 import { TileRenderCache } from './zarr-tile-cache'
@@ -20,7 +21,7 @@ import {
   zoomToLevel,
   type XYLimits,
 } from './map-utils'
-import { getBands } from './zarr-utils'
+import { getBands, toSelectorProps } from './zarr-utils'
 
 const DEFAULT_TILE_SIZE = 128
 const MAX_CACHED_TILES = 64
@@ -37,7 +38,10 @@ export class TiledDataManager implements DataManager {
   private minRenderZoom: number = 3
   private tileSize: number = DEFAULT_TILE_SIZE
   private variable: string
-  private selector: Record<string, number | number[] | string | string[]>
+  private selector: Record<
+    string,
+    number | number[] | string | string[] | ZarrSelectorsProps
+  >
   private invalidate: () => void
   private zarrStore: ZarrStore
   private selectors: SelectorMap = {}
@@ -52,7 +56,10 @@ export class TiledDataManager implements DataManager {
   constructor(
     store: ZarrStore,
     variable: string,
-    selector: Record<string, number | number[] | string | string[]>,
+    selector: Record<
+      string,
+      number | number[] | string | string[] | ZarrSelectorsProps
+    >,
     minRenderZoom: number,
     invalidate: () => void
   ) {
@@ -64,7 +71,7 @@ export class TiledDataManager implements DataManager {
 
     // Initialize selectors
     for (const [dimName, value] of Object.entries(selector)) {
-      this.selectors[dimName] = { selected: value, type: 'index' }
+      this.selectors[dimName] = toSelectorProps(value)
     }
   }
 
@@ -182,11 +189,14 @@ export class TiledDataManager implements DataManager {
   }
 
   async setSelector(
-    selector: Record<string, number | number[] | string | string[]>
+    selector: Record<
+      string,
+      number | number[] | string | string[] | ZarrSelectorsProps
+    >
   ): Promise<void> {
     this.selector = selector
     for (const [dimName, value] of Object.entries(selector)) {
-      this.selectors[dimName] = { selected: value, type: 'index' }
+      this.selectors[dimName] = toSelectorProps(value)
     }
     const bandNames = getBands(this.variable, selector)
 

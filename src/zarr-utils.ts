@@ -248,3 +248,17 @@ export function getBands(
 
   return bandNames
 }
+
+export function toSelectorProps(
+  value: number | number[] | string | string[] | ZarrSelectorsProps
+): ZarrSelectorsProps {
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    'selected' in value
+  ) {
+    return value as ZarrSelectorsProps
+  }
+  return { selected: value as ZarrSelectorsProps['selected'] }
+}

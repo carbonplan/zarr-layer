@@ -93,33 +93,40 @@ export class Tiles {
   ): number[] {
     if (dimSelection === undefined) return [0]
 
-    let items: (number | string | ZarrSelectorsProps)[]
-    if (Array.isArray(dimSelection)) {
-      items = dimSelection
-    } else if (
-      typeof dimSelection === 'object' &&
-      dimSelection !== null &&
-      'selected' in dimSelection
-    ) {
-      const s = dimSelection.selected
-      items = Array.isArray(s) ? s : [s]
-    } else {
-      items = [dimSelection]
-    }
-
     const coords = dimName ? this.coordinates[dimName] : undefined
 
-    return items.map((v) => {
-      const val =
-        typeof v === 'object' && v !== null && 'selected' in v ? v.selected : v
-
-      if (coords && (typeof val === 'number' || typeof val === 'string')) {
-        const idx = coords.indexOf(val)
+    const toIndices = (
+      value: number | string | [number, number],
+      type?: 'index' | 'value'
+    ): number => {
+      if (
+        type !== 'index' &&
+        coords &&
+        (typeof value === 'number' || typeof value === 'string')
+      ) {
+        const idx = coords.indexOf(value)
         if (idx >= 0) return idx
       }
+      return typeof value === 'number' ? value : 0
+    }
 
-      return typeof val === 'number' ? val : 0
-    })
+    if (
+      typeof dimSelection === 'object' &&
+      dimSelection !== null &&
+      !Array.isArray(dimSelection) &&
+      'selected' in dimSelection
+    ) {
+      const values = Array.isArray(dimSelection.selected)
+        ? dimSelection.selected
+        : [dimSelection.selected]
+      return values.map((v) => toIndices(v as number | string | [number, number], dimSelection.type))
+    }
+
+    if (Array.isArray(dimSelection)) {
+      return dimSelection.map((v) => toIndices(v, undefined))
+    }
+
+    return [toIndices(dimSelection, undefined)]
   }
 
   /**

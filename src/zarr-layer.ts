@@ -5,11 +5,7 @@
  * Implements CustomLayerInterface for direct WebGL rendering.
  */
 
-import {
-  calculateNearestIndex,
-  loadDimensionValues,
-  getBands,
-} from './zarr-utils'
+import { loadDimensionValues, getBands, toSelectorProps } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
 import { maplibreFragmentShaderSource, type ShaderData } from './shaders'
 import { ColormapState } from './zarr-colormap'
@@ -41,7 +37,10 @@ export class ZarrLayer {
   private variable: string
   private zarrVersion: 2 | 3 | null = null
   private dimensionNames: DimensionNamesProps
-  private selector: Record<string, number | number[] | string | string[]>
+  private selector: Record<
+    string,
+    number | number[] | string | string[] | ZarrSelectorsProps
+  >
   private invalidate: () => void
 
   private colormap: ColormapState
@@ -137,7 +136,7 @@ export class ZarrLayer {
     this.selectorHash = this.computeSelectorHash(selector)
     this.renderingMode = renderingMode
     for (const [dimName, value] of Object.entries(selector)) {
-      this.selectors[dimName] = { selected: value, type: 'index' }
+      this.selectors[dimName] = toSelectorProps(value)
     }
     this.invalidate = () => {}
 
@@ -217,18 +216,18 @@ export class ZarrLayer {
 
   async setVariable(variable: string) {
     this.variable = variable
-
     if (this.zarrStore) {
       this.zarrStore.variable = variable
     }
-
-    // Re-create manager for new variable
     await this.initializeManager()
     this.invalidate()
   }
 
   async setSelector(
-    selector: Record<string, number | number[] | string | string[]>
+    selector: Record<
+      string,
+      number | number[] | string | string[] | ZarrSelectorsProps
+    >
   ) {
     const nextHash = this.computeSelectorHash(selector)
     if (nextHash === this.selectorHash) {
@@ -237,7 +236,7 @@ export class ZarrLayer {
     this.selectorHash = nextHash
     this.selector = selector
     for (const [dimName, value] of Object.entries(selector)) {
-      this.selectors[dimName] = { selected: value, type: 'index' }
+      this.selectors[dimName] = toSelectorProps(value)
     }
 
     this.bandNames = getBands(this.variable, selector)
@@ -302,7 +301,10 @@ export class ZarrLayer {
   }
 
   private computeSelectorHash(
-    selector: Record<string, number | number[] | string | string[]>
+    selector: Record<
+      string,
+      number | number[] | string | string[] | ZarrSelectorsProps
+    >
   ): string {
     return JSON.stringify(selector, Object.keys(selector).sort())
   }
@@ -385,7 +387,7 @@ export class ZarrLayer {
       this.levelInfos.length > 0 ? this.levelInfos[0] : null
 
     for (const [dimName, value] of Object.entries(this.selector)) {
-      this.selectors[dimName] = { selected: value, type: 'index' }
+      this.selectors[dimName] = toSelectorProps(value)
     }
 
     for (const dimName of Object.keys(this.dimIndices)) {
@@ -400,12 +402,7 @@ export class ZarrLayer {
           )
 
           if (!this.selectors[dimName]) {
-            this.selectors[dimName] = { selected: 0, type: 'index' }
-          } else if (this.selectors[dimName].type === 'value') {
-            this.selectors[dimName].selected = calculateNearestIndex(
-              this.dimensionValues[dimName],
-              this.selectors[dimName].selected as number
-            )
+            this.selectors[dimName] = { selected: 0 }
           }
         } catch (err) {
           console.warn(`Failed to load dimension values for ${dimName}:`, err)

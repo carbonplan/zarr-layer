@@ -53,7 +53,10 @@ export interface ZarrLayerOptions {
   id: string
   source: string
   variable: string
-  selector?: Record<string, number | number[] | string | string[]>
+  selector?: Record<
+    string,
+    number | number[] | string | string[] | ZarrSelectorsProps
+  >
   colormap: ColormapArray
   clim: [number, number]
   opacity?: number

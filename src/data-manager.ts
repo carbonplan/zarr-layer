@@ -1,6 +1,11 @@
 import type { MercatorBounds, TileTuple, XYLimits } from './map-utils'
 import type { TileRenderCache } from './zarr-tile-cache'
-import type { CRS, LoadingStateCallback, MapLike } from './types'
+import type {
+  CRS,
+  LoadingStateCallback,
+  MapLike,
+  ZarrSelectorsProps,
+} from './types'
 
 export interface RenderData {
   isMultiscale: boolean
@@ -30,7 +35,10 @@ export interface DataManager {
   getRenderData(): RenderData
   dispose(gl: WebGL2RenderingContext): void
   setSelector(
-    selector: Record<string, number | number[] | string | string[]>
+    selector: Record<
+      string,
+      number | number[] | string | string[] | ZarrSelectorsProps
+    >
   ): Promise<void>
   onProjectionChange(isGlobe: boolean): void
   setLoadingCallback(callback: LoadingStateCallback | undefined): void
