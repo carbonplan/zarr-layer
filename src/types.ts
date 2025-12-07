@@ -61,7 +61,6 @@ export interface ZarrLayerOptions {
   zarrVersion?: 2 | 3
   dimensionNames?: DimensionNamesProps
   fillValue?: number
-  customFragmentSource?: string
   customFrag?: string
   uniforms?: Record<string, number>
   renderingMode?: '2d' | '3d'

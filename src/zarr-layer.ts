@@ -123,7 +123,6 @@ export class ZarrLayer {
     zarrVersion,
     dimensionNames = {},
     fillValue,
-    customFragmentSource,
     customFrag,
     uniforms,
     renderingMode = '2d',
@@ -144,16 +143,13 @@ export class ZarrLayer {
 
     if (!colormap || !Array.isArray(colormap) || colormap.length === 0) {
       throw new Error(
-        '[ZarrLayer] colormap is required and must be an array of [r, g, b] values'
+        '[ZarrLayer] colormap is required and must be an array of [r, g, b] or hex string values'
       )
     }
     this.colormap = new ColormapState(colormap)
     this.clim = clim
     this.opacity = opacity
     this.minRenderZoom = minRenderZoom
-    if (customFragmentSource) {
-      this.fragmentShaderSource = customFragmentSource
-    }
 
     this.customFrag = customFrag
     this.customUniforms = uniforms || {}
