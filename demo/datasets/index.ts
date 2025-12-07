@@ -12,8 +12,8 @@ const DATASET_MODULE_LIST = createDatasetList(
     clim: [30, 37],
     colormap: 'blues',
     zarrVersion: 2,
-    info: 'Ocean Salinity (Zarr v2 pyramid, EPSG:3857)',
-    sourceInfo: 'Zarr v2 pyramid format (EPSG:3857)',
+    info: 'Ocean salinity (v2 pyramid, EPSG:3857)',
+    sourceInfo: 'v2 pyramid format (EPSG:3857)',
   }),
   createTimeDatasetModule({
     id: 'temperature_v3',
@@ -23,8 +23,8 @@ const DATASET_MODULE_LIST = createDatasetList(
     clim: [0, 27],
     colormap: 'fire',
     zarrVersion: 3,
-    info: 'Ocean Temperature (Zarr v3 pyramid, EPSG:3857)',
-    sourceInfo: 'Zarr v3 pyramid format (EPSG:3857)',
+    info: 'Ocean temperature (v3 pyramid, EPSG:3857)',
+    sourceInfo: 'v3 pyramid (EPSG:3857)',
   }),
   createTimeDatasetModule({
     id: 'pressure_v3',
@@ -34,8 +34,8 @@ const DATASET_MODULE_LIST = createDatasetList(
     clim: [75000, 104000],
     colormap: 'cool',
     zarrVersion: 3,
-    info: 'Hurricane Florence Pressure (untiled, EPSG:4326)',
-    sourceInfo: 'Zarr v3 with no multiscales/tiling, EPSG:4326',
+    info: 'Hurricane pressure (single image, EPSG:4326)',
+    sourceInfo: 'v3 with no multiscales/tiling, EPSG:4326',
   }),
   createTimeDatasetModule({
     id: 'tasmax_pyramid_4326',
@@ -46,7 +46,7 @@ const DATASET_MODULE_LIST = createDatasetList(
     colormap: 'fire',
     zarrVersion: 2,
     info: 'tasmax v2 pyramid (EPSG:4326)',
-    sourceInfo: 'Zarr v2 pyramid (EPSG:4326)',
+    sourceInfo: 'v2 pyramid (EPSG:4326)',
     maxTime: 729,
   }),
   createTimeDatasetModule({
@@ -58,7 +58,7 @@ const DATASET_MODULE_LIST = createDatasetList(
     colormap: 'fire',
     zarrVersion: 3,
     info: 'tasmax v3 pyramid (EPSG:4326)',
-    sourceInfo: 'Zarr v3 pyramid (EPSG:4326)',
+    sourceInfo: 'v3 pyramid (EPSG:4326)',
     maxTime: 729,
   }),
 )
