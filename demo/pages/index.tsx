@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Container } from 'theme-ui'
 // @ts-expect-error - carbonplan components types not available
-import { Dimmer, Header, Meta } from '@carbonplan/components'
+import { Header, Meta } from '@carbonplan/components'
 import { Map } from '../components/map-shared'
 import Sidebar from '../components/sidebar'
 import { useAppStore } from '../lib/store'
@@ -17,11 +17,7 @@ export default function Home() {
       />
       <Container>
         <Box sx={{ position: 'relative', zIndex: 2000 }}>
-          <Header
-            menuItems={[
-              <Dimmer key='dimmer' sx={{ mt: '-2px', color: 'primary' }} />,
-            ]}
-          />
+          <Header />
         </Box>
       </Container>
 
