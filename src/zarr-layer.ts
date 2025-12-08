@@ -64,7 +64,7 @@ export class ZarrLayer {
   private projectionChangeHandler: (() => void) | null = null
   private resolveGl(
     map: MapLike,
-    gl: WebGLRenderingContext | WebGL2RenderingContext | null
+    gl: WebGL2RenderingContext | null
   ): WebGL2RenderingContext {
     const isWebGL2 =
       gl &&
@@ -411,10 +411,7 @@ export class ZarrLayer {
     }
   }
 
-  prerender(
-    _gl: WebGL2RenderingContext | WebGLRenderingContext,
-    _params: unknown
-  ) {
+  prerender(_gl: WebGL2RenderingContext, _params: unknown) {
     if (this.isRemoved || !this.gl || !this.dataManager || !this.map) return
 
     // Update data manager (prefetch tiles etc)
@@ -422,7 +419,7 @@ export class ZarrLayer {
   }
 
   render(
-    _gl: WebGL2RenderingContext | WebGLRenderingContext,
+    _gl: WebGL2RenderingContext,
     params: unknown,
     projection?: { name: string },
     projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
@@ -436,8 +433,9 @@ export class ZarrLayer {
       !this.gl ||
       !this.dataManager ||
       !this.map
-    )
+    ) {
       return
+    }
 
     const projectionParams = resolveProjectionParams(
       params,

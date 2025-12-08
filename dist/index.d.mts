@@ -123,8 +123,8 @@ declare class ZarrLayer {
     private initializeManager;
     private initialize;
     private loadInitialDimensionValues;
-    prerender(_gl: WebGL2RenderingContext | WebGLRenderingContext, _params: unknown): void;
-    render(_gl: WebGL2RenderingContext | WebGLRenderingContext, params: unknown, projection?: {
+    prerender(_gl: WebGL2RenderingContext, _params: unknown): void;
+    render(_gl: WebGL2RenderingContext, params: unknown, projection?: {
         name: string;
     }, projectionToMercatorMatrix?: number[] | Float32Array | Float64Array, projectionToMercatorTransition?: number, _centerInMercator?: number[], _pixelsPerMeterRatio?: number): void;
     renderToTile(_gl: WebGL2RenderingContext, tileId: {

@@ -7497,8 +7497,9 @@ var ZarrLayer = class {
     this.dataManager.update(this.map, this.gl);
   }
   render(_gl, params, projection, projectionToMercatorMatrix, projectionToMercatorTransition, _centerInMercator, _pixelsPerMeterRatio) {
-    if (this.isRemoved || !this.renderer || !this.gl || !this.dataManager || !this.map)
+    if (this.isRemoved || !this.renderer || !this.gl || !this.dataManager || !this.map) {
       return;
+    }
     const projectionParams = resolveProjectionParams(
       params,
       projection,
