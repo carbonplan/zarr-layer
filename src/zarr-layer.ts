@@ -24,6 +24,12 @@ import type { ZarrMode, RenderContext } from './zarr-mode'
 import { TiledMode } from './tiled-mode'
 import { SingleImageMode } from './single-image-mode'
 import { computeWorldOffsets, resolveProjectionParams } from './render-utils'
+import type {
+  PointQueryResult,
+  RegionQueryResult,
+  QuerySelector,
+  QueryGeometry,
+} from './query/types'
 
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
@@ -47,7 +53,7 @@ export class ZarrLayer {
   private selectorHash: string = ''
 
   private isMultiscale: boolean = true
-  private fillValue: number | null = null
+  private _fillValue: number | null = null
   private scaleFactor: number = 1
   private offset: number = 0
 
@@ -99,6 +105,10 @@ export class ZarrLayer {
   private onLoadingStateChange: LoadingStateCallback | undefined
   private metadataLoading: boolean = false
   private chunksLoading: boolean = false
+
+  get fillValue(): number | null {
+    return this._fillValue
+  }
 
   private isGlobeProjection(shaderData?: ShaderData): boolean {
     if (shaderData?.vertexShaderPrelude) return true
@@ -158,7 +168,7 @@ export class ZarrLayer {
       }
     }
 
-    if (fillValue !== undefined) this.fillValue = fillValue
+    if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
   }
 
@@ -223,7 +233,7 @@ export class ZarrLayer {
         this.zarrStore = null
       }
       this.dimensionValues = {}
-      this.fillValue = null
+      this._fillValue = null
       await this.initialize()
       await this.initializeMode()
       this.invalidate()
@@ -371,11 +381,11 @@ export class ZarrLayer {
       this.offset = desc.addOffset
 
       if (
-        this.fillValue === null &&
+        this._fillValue === null &&
         desc.fill_value !== null &&
         desc.fill_value !== undefined
       ) {
-        this.fillValue = desc.fill_value
+        this._fillValue = desc.fill_value
       }
 
       this.isMultiscale = this.levelInfos.length > 0
@@ -475,7 +485,7 @@ export class ZarrLayer {
       uniforms: {
         clim: this.clim,
         opacity: this.opacity,
-        fillValue: this.fillValue,
+        fillValue: this._fillValue,
         scaleFactor: this.scaleFactor,
         offset: this.offset,
       },
@@ -516,7 +526,7 @@ export class ZarrLayer {
       uniforms: {
         clim: this.clim,
         opacity: this.opacity,
-        fillValue: this.fillValue,
+        fillValue: this._fillValue,
         scaleFactor: this.scaleFactor,
         offset: this.offset,
       },
@@ -560,5 +570,41 @@ export class ZarrLayer {
       this.map.off('projectionchange', this.projectionChangeHandler)
       this.map.off('style.load', this.projectionChangeHandler)
     }
+  }
+
+  // ========== Query Interface ==========
+
+  /**
+   * Query the data value at a geographic point.
+   * @param lng - Longitude in degrees.
+   * @param lat - Latitude in degrees.
+   * @returns Promise resolving to the query result.
+   */
+  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
+    if (!this.mode?.queryPoint) {
+      return { lng, lat, value: null }
+    }
+
+    return this.mode.queryPoint(lng, lat)
+  }
+
+  /**
+   * Query all data values within a geographic region.
+   * @param geometry - GeoJSON Polygon or MultiPolygon geometry.
+   * @param selector - Optional selector to override the layer's selector.
+   * @returns Promise resolving to the query result.
+   */
+  async queryRegion(
+    geometry: QueryGeometry,
+    selector?: QuerySelector
+  ): Promise<RegionQueryResult> {
+    if (!this.mode?.queryRegion) {
+      return {
+        values: [],
+        dimensions: [],
+        coordinates: { lat: [], lon: [] },
+      }
+    }
+    return this.mode.queryRegion(geometry, selector)
   }
 }

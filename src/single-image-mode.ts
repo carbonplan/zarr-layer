@@ -5,6 +5,14 @@ import type {
   TileId,
   SingleImageRenderState,
 } from './zarr-mode'
+import type {
+  PointQueryResult,
+  RegionQueryResult,
+  QuerySelector,
+  QueryGeometry,
+} from './query/types'
+import { queryPointSingleImage } from './query/point-query'
+import { queryRegionSingleImage } from './query/region-query'
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
@@ -445,5 +453,55 @@ export class SingleImageMode implements ZarrMode {
     }
 
     return typeof value === 'number' ? value : 0
+  }
+
+  /**
+   * Query the data value at a geographic point.
+   */
+  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
+    if (!this.mercatorBounds) {
+      return { lng, lat, value: null }
+    }
+
+    return queryPointSingleImage(
+      lng,
+      lat,
+      this.data,
+      this.width,
+      this.height,
+      this.mercatorBounds,
+      this.crs ?? 'EPSG:4326'
+    )
+  }
+
+  /**
+   * Query all data values within a geographic region.
+   */
+  async queryRegion(
+    geometry: QueryGeometry,
+    selector?: QuerySelector
+  ): Promise<RegionQueryResult> {
+    if (!this.mercatorBounds) {
+      return {
+        values: [],
+        dimensions: [],
+        coordinates: { lat: [], lon: [] },
+      }
+    }
+
+    const desc = this.zarrStore.describe()
+    const querySelector = selector || (this.selector as QuerySelector)
+
+    return queryRegionSingleImage(
+      geometry,
+      querySelector,
+      this.data,
+      this.width,
+      this.height,
+      this.mercatorBounds,
+      this.crs ?? 'EPSG:4326',
+      desc.dimensions,
+      desc.coordinates
+    )
   }
 }

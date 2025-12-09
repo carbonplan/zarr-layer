@@ -61,6 +61,17 @@ const DATASET_MODULE_LIST = createDatasetList(
     sourceInfo: 'v3 pyramid (EPSG:4326)',
     maxTime: 729,
   }),
+  createTimeDatasetModule({
+    id: 'pr - v3 sharding',
+    source:
+      'https://carbonplan-scratch.s3.us-west-2.amazonaws.com/zarr-pyramids/zarr-v3-single-layer-default.zarr',
+    variable: 'pr',
+    clim: [0, 10],
+    colormap: 'blues',
+    zarrVersion: 3,
+    info: 'Precipitation (v3 sharding, EPSG:3857)',
+    sourceInfo: 'v3 sharding (EPSG:3857)',
+  }),
 )
 
 export { DATASET_MODULE_LIST }

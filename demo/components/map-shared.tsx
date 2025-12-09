@@ -2,14 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Spinner } from 'theme-ui'
 // @ts-expect-error - carbonplan colormaps types not available
 import { useThemedColormap } from '@carbonplan/colormaps'
-import { ZarrLayer } from '@carbonplan/zarr-layer'
+import {
+  ZarrLayer,
+  QueryGeometry,
+  ZarrLayerOptions,
+} from '@carbonplan/zarr-layer'
 import maplibregl from 'maplibre-gl'
 import mapboxgl from 'mapbox-gl'
 import { layers, namedFlavor } from '@protomaps/basemaps'
 import { Protocol } from 'pmtiles'
 import { useAppStore } from '../lib/store'
 import { BuildLayerResult } from '../datasets/types'
-import type { ZarrLayerOptions } from '../../src/types'
 
 export type MapProvider = 'maplibre' | 'mapbox'
 
@@ -49,13 +52,17 @@ const mapLibreTheme = {
 }
 
 export interface MapInstance {
-  on(event: string, callback: () => void): void
+  queryRenderedFeatures?: (...args: any[]) => unknown
+  on(event: string, callback: (event?: any) => void): void
+  on(event: string, layerId: string, callback: (event: any) => void): void
+  off?(event: string, callback: (event: any) => void): void
   remove(): void
   getLayer(id: string): unknown
   removeLayer(id: string): void
   addLayer(layer: unknown, beforeId?: string): void
   setProjection(projection: unknown): void
   resize?(): void
+  getBounds?(): [number, number, number, number] | null
   flyTo(options: { center: [number, number]; zoom: number }): void
 }
 
@@ -93,10 +100,10 @@ const mapLibreConfig: MapConfig = {
       },
       center: [0, 20],
       zoom: 2.4,
-    }) as MapInstance
+    }) as unknown as MapInstance
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
-    ;(map as maplibregl.Map).setProjection(
+    ;(map as unknown as maplibregl.Map).setProjection(
       globeProjection ? { type: 'globe' } : { type: 'mercator' },
     )
   },
@@ -118,12 +125,12 @@ const mapboxConfig: MapConfig = {
     }) as unknown as MapInstance
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
-    ;(map as mapboxgl.Map).setProjection({
+    ;(map as unknown as mapboxgl.Map).setProjection({
       name: globeProjection ? 'globe' : 'mercator',
     } as mapboxgl.ProjectionSpecification)
   },
   getLayerBeforeId: (map: MapInstance) => {
-    const styleLayers = (map as mapboxgl.Map).getStyle().layers
+    const styleLayers = (map as unknown as mapboxgl.Map).getStyle().layers
     return styleLayers?.find((layer) => layer.type === 'symbol')?.id
   },
   needsResize: true,
@@ -144,6 +151,8 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
   const mapProvider = useAppStore((state) => state.mapProvider)
   const setLoadingState = useAppStore((state) => state.setLoadingState)
   const colormapArray = useThemedColormap(colormap, { format: 'hex' })
+  const setPointResult = useAppStore((state) => state.setPointResult)
+  const setZarrLayer = useAppStore((state) => state.setZarrLayer)
 
   const layerConfig: BuildLayerResult = useMemo(
     () => datasetModule.buildLayerProps({ state: datasetState as any }),
@@ -154,6 +163,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     if (!map || !isMapLoaded) return
 
     const mapConfig = getMapConfig(mapProvider)
+    let clickHandler: ((event: any) => void) | null = null
 
     if (zarrLayerRef.current) {
       try {
@@ -193,7 +203,17 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
         beforeId = mapConfig.getLayerBeforeId(map)
       } catch (e) {}
       map.addLayer(layer, beforeId)
+      console.log('zarr-layer', layer)
+      clickHandler = (event: any) => {
+        const lng = event.lngLat.lng
+        const lat = event.lngLat.lat
+        layer.queryPoint(lng, lat).then((result) => {
+          setPointResult(result)
+        })
+      }
+      map.on('click', clickHandler)
       zarrLayerRef.current = layer
+      setZarrLayer(layer)
 
       if (datasetModule.center) {
         map.flyTo({
@@ -212,7 +232,13 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
             map.removeLayer('zarr-layer')
           }
         } catch (e) {}
+        setZarrLayer(null)
         zarrLayerRef.current = null
+      }
+      if (clickHandler && map.off) {
+        try {
+          map.off('click', clickHandler)
+        } catch (e) {}
       }
     }
     // colormap changes are handled via the update effect to avoid full layer
@@ -255,6 +281,7 @@ export const Map = () => {
   const mapProvider = useAppStore((state) => state.mapProvider)
   const globeProjection = useAppStore((state) => state.globeProjection)
   const loadingState = useAppStore((state) => state.loadingState)
+  const setMapInstance = useAppStore((state) => state.setMapInstance)
 
   const mapConfig = getMapConfig(mapProvider)
 
@@ -269,6 +296,7 @@ export const Map = () => {
     newMap.on('load', () => {
       setMap(newMap)
       setIsMapLoaded(true)
+      setMapInstance(newMap)
     })
 
     return () => {
@@ -278,6 +306,7 @@ export const Map = () => {
         } catch (error) {
           console.warn('Error removing map:', error)
         }
+        setMapInstance(null)
         mapInstanceRef.current = null
       }
     }

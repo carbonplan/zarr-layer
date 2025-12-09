@@ -7,8 +7,9 @@
  * adapted from zarr-cesium/src/map-utils.ts
  */
 
+import { MERCATOR_LAT_LIMIT } from './constants'
+
 export type TileTuple = [number, number, number]
-const MERCATOR_LAT_LIMIT = 85.05112878
 
 export interface NormalizedExtent {
   xMin: number

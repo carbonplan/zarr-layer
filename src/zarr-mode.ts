@@ -14,6 +14,12 @@ import type {
   SingleImageParams,
 } from './renderer-types'
 import type { ZarrRenderer } from './zarr-renderer'
+import type {
+  PointQueryResult,
+  RegionQueryResult,
+  QuerySelector,
+  QueryGeometry,
+} from './query/types'
 
 export interface RenderContext {
   gl: WebGL2RenderingContext
@@ -71,4 +77,11 @@ export interface ZarrMode {
   getMaxZoom(): number
   getTiledState?(): TiledRenderState | null
   getSingleImageState?(): SingleImageRenderState | null
+
+  // Query methods (optional)
+  queryPoint?(lng: number, lat: number): Promise<PointQueryResult>
+  queryRegion?(
+    geometry: QueryGeometry,
+    selector?: QuerySelector
+  ): Promise<RegionQueryResult>
 }

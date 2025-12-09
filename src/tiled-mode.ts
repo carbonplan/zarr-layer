@@ -5,6 +5,15 @@ import type {
   TiledRenderState,
 } from './zarr-mode'
 import type {
+  PointQueryResult,
+  RegionQueryResult,
+  QuerySelector,
+  QueryGeometry,
+} from './query/types'
+import { queryPointTiled } from './query/point-query'
+import { queryRegionTiled } from './query/region-query'
+import { getSelectorHash } from './query/selector-utils'
+import type {
   LoadingStateCallback,
   MapLike,
   SelectorMap,
@@ -436,5 +445,56 @@ export class TiledMode implements ZarrMode {
       this.emitLoadingState()
       throw err
     }
+  }
+
+  /**
+   * Query the data value at a geographic point.
+   */
+  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
+    if (!this.tilesManager || !this.xyLimits) {
+      return { lng, lat, value: null }
+    }
+
+    return queryPointTiled(
+      lng,
+      lat,
+      this.tilesManager,
+      this.zarrStore,
+      this.selector as QuerySelector,
+      this.crs,
+      this.xyLimits,
+      this.maxZoom,
+      this.tileSize
+    )
+  }
+
+  /**
+   * Query all data values within a geographic region.
+   */
+  async queryRegion(
+    geometry: QueryGeometry,
+    selector?: QuerySelector
+  ): Promise<RegionQueryResult> {
+    if (!this.tilesManager || !this.xyLimits) {
+      return {
+        values: [],
+        dimensions: [],
+        coordinates: { lat: [], lon: [] },
+      }
+    }
+
+    // Use provided selector or fall back to layer's selector
+    const querySelector = selector || (this.selector as QuerySelector)
+
+    return queryRegionTiled(
+      geometry,
+      querySelector,
+      this.tilesManager,
+      this.zarrStore,
+      this.crs,
+      this.xyLimits,
+      this.maxZoom,
+      this.tileSize
+    )
   }
 }

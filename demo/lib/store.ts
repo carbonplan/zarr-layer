@@ -7,6 +7,9 @@ import {
   DatasetStateMap,
 } from './constants'
 import { MapProvider } from '../components/map-shared'
+import type { PointQueryResult, RegionQueryResult } from '../../src/query/types'
+import type { MapInstance } from '../components/map-shared'
+import type { ZarrLayer } from '@carbonplan/zarr-layer'
 import type { LoadingState } from '@carbonplan/zarr-layer'
 
 type DatasetStateStore = {
@@ -23,6 +26,10 @@ interface AppState {
   mapProvider: MapProvider
   datasetState: DatasetStateStore
   loadingState: LoadingState
+  pointResult: PointQueryResult | null
+  regionResult: RegionQueryResult | null
+  mapInstance: MapInstance | null
+  zarrLayer: InstanceType<typeof ZarrLayer> | null
   setSidebarWidth: (width: number) => void
   setDatasetId: (id: DatasetId) => void
   setOpacity: (opacity: number) => void
@@ -36,6 +43,10 @@ interface AppState {
   ) => void
   setActiveDatasetState: (updates: Partial<DatasetStateMap[DatasetId]>) => void
   setLoadingState: (state: LoadingState) => void
+  setPointResult: (result: PointQueryResult | null) => void
+  setRegionResult: (result: RegionQueryResult | null) => void
+  setMapInstance: (map: MapInstance | null) => void
+  setZarrLayer: (layer: InstanceType<typeof ZarrLayer> | null) => void
   getDatasetModule: () => DatasetModuleMap[DatasetId]
   getDatasetState: () => DatasetStateMap[DatasetId]
 }
@@ -54,6 +65,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     },
   },
   loadingState: { loading: false, metadata: false, chunks: false },
+  pointResult: null,
+  regionResult: null,
+  mapInstance: null,
+  zarrLayer: null,
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   setLoadingState: (loadingState) => set({ loadingState }),
   setDatasetId: (id) => {
@@ -92,6 +107,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const activeId = get().datasetId
     get().setDatasetState(activeId, updates)
   },
+  setPointResult: (pointResult) => set({ pointResult }),
+  setRegionResult: (regionResult) => set({ regionResult }),
+  setMapInstance: (mapInstance) => set({ mapInstance }),
+  setZarrLayer: (zarrLayer) => set({ zarrLayer }),
   getDatasetModule: () => DATASET_MODULES[get().datasetId],
   getDatasetState: () => {
     const id = get().datasetId
