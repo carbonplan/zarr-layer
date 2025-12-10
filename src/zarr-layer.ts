@@ -584,15 +584,10 @@ export class ZarrLayer {
     selector?: QuerySelector
   ): Promise<QueryDataResult> {
     if (!this.mode?.queryData) {
-      const coordLatLon =
-        geometry.type === 'Point'
-          ? { lat: [geometry.coordinates[1]], lon: [geometry.coordinates[0]] }
-          : { lat: [], lon: [] }
-      // Return empty result matching carbonplan/maps structure
       return {
         [this.variable]: [],
         dimensions: ['lat', 'lon'],
-        coordinates: coordLatLon,
+        coordinates: { lat: [], lon: [] },
       }
     }
     return this.mode.queryData(geometry, selector)

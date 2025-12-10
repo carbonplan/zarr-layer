@@ -70,29 +70,53 @@ export async function queryRegionTiled(
   const latCoords: number[] = []
   const lonCoords: number[] = []
 
-  // Build coordinates object for all dimensions
-  const resultCoordinates: Record<string, (number | string)[]> = {
-    lat: latCoords,
-    lon: lonCoords,
-  }
+  const mappedDimensions = dimensions.map((d) => {
+    const dimLower = d.toLowerCase()
+    if (['x', 'lon', 'longitude'].includes(dimLower)) return 'lon'
+    if (['y', 'lat', 'latitude'].includes(dimLower)) return 'lat'
+    return d
+  })
 
-  // Add non-spatial dimension coordinates from selector
-  for (const dim of dimensions) {
-    const dimLower = dim.toLowerCase()
-    if (!['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(dimLower)) {
-      const selectorValue = selector[dim]
-      if (Array.isArray(selectorValue)) {
-        resultCoordinates[dim] = selectorValue as (string | number)[]
-      } else if (
-        selectorValue !== undefined &&
-        typeof selectorValue !== 'object'
-      ) {
-        resultCoordinates[dim] = [selectorValue]
-      } else if (coordinates[dim]) {
-        // Unconstrained dimension: include all coordinate values
-        resultCoordinates[dim] = coordinates[dim]
-      }
+  const resultDimensions = useNestedResults ? mappedDimensions : ['lat', 'lon']
+
+  const buildResultCoordinates = (): Record<string, (number | string)[]> => {
+    const coords: Record<string, (number | string)[]> = {
+      lat: latCoords,
+      lon: lonCoords,
     }
+
+    if (useNestedResults) {
+      const addDimCoordinates = (dim: string) => {
+        const dimLower = dim.toLowerCase()
+        if (
+          ['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(dimLower)
+        ) {
+          return
+        }
+
+        const sel = selector[dim]
+        let values: (number | string)[] | undefined
+
+        if (Array.isArray(sel)) {
+          values = sel as (number | string)[]
+        } else if (sel && typeof sel === 'object' && 'selected' in sel) {
+          const selected = sel.selected
+          values = Array.isArray(selected) ? selected : [selected]
+        } else if (sel !== undefined && typeof sel !== 'object') {
+          values = [sel]
+        } else if (coordinates[dim]) {
+          values = coordinates[dim]
+        }
+
+        if (values) {
+          coords[dim] = values
+        }
+      }
+
+      dimensions.forEach(addDimCoordinates)
+    }
+
+    return coords
   }
 
   // Get tiles that intersect the polygon
@@ -101,13 +125,8 @@ export async function queryRegionTiled(
     // Return empty result in carbonplan/maps format
     const result = {
       [variable]: results,
-      dimensions: useNestedResults
-        ? dimensions.filter((d) => {
-            const dimLower = d.toLowerCase()
-            return !['x', 'lon', 'longitude'].includes(dimLower)
-          })
-        : ['lat', 'lon'],
-      coordinates: resultCoordinates,
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates(),
     } as QueryDataResult
     return result
   }
@@ -236,18 +255,10 @@ export async function queryRegionTiled(
     }
   }
 
-  // Build final result matching carbonplan/maps structure
-  const resultDimensions = useNestedResults
-    ? dimensions.filter((d) => {
-        const dimLower = d.toLowerCase()
-        return !['x', 'lon', 'longitude'].includes(dimLower)
-      })
-    : ['lat', 'lon']
-
   const result = {
     [variable]: results,
     dimensions: resultDimensions,
-    coordinates: resultCoordinates,
+    coordinates: buildResultCoordinates(),
   } as QueryDataResult
 
   return result
@@ -294,40 +305,60 @@ export async function queryRegionSingleImage(
   const latCoords: number[] = []
   const lonCoords: number[] = []
 
-  // Build coordinates object
-  const resultCoordinates: Record<string, (number | string)[]> = {
-    lat: latCoords,
-    lon: lonCoords,
-  }
+  const mappedDimensions = dimensions.map((d) => {
+    const dimLower = d.toLowerCase()
+    if (['x', 'lon', 'longitude'].includes(dimLower)) return 'lon'
+    if (['y', 'lat', 'latitude'].includes(dimLower)) return 'lat'
+    return d
+  })
 
-  // Add non-spatial dimension coordinates from selector
-  for (const dim of dimensions) {
-    const dimLower = dim.toLowerCase()
-    if (!['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(dimLower)) {
-      const selectorValue = selector[dim]
-      if (Array.isArray(selectorValue)) {
-        resultCoordinates[dim] = selectorValue as (string | number)[]
-      } else if (
-        selectorValue !== undefined &&
-        typeof selectorValue !== 'object'
-      ) {
-        resultCoordinates[dim] = [selectorValue]
-      } else if (coordinates[dim]) {
-        resultCoordinates[dim] = coordinates[dim]
-      }
+  const resultDimensions = useNestedResults ? mappedDimensions : ['lat', 'lon']
+
+  const buildResultCoordinates = (): Record<string, (number | string)[]> => {
+    const coords: Record<string, (number | string)[]> = {
+      lat: latCoords,
+      lon: lonCoords,
     }
+
+    if (useNestedResults) {
+      const addDimCoordinates = (dim: string) => {
+        const dimLower = dim.toLowerCase()
+        if (
+          ['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(dimLower)
+        ) {
+          return
+        }
+
+        const sel = selector[dim]
+        let values: (number | string)[] | undefined
+
+        if (Array.isArray(sel)) {
+          values = sel as (number | string)[]
+        } else if (sel && typeof sel === 'object' && 'selected' in sel) {
+          const selected = sel.selected
+          values = Array.isArray(selected) ? selected : [selected]
+        } else if (sel !== undefined && typeof sel !== 'object') {
+          values = [sel]
+        } else if (coordinates[dim]) {
+          values = coordinates[dim]
+        }
+
+        if (values) {
+          coords[dim] = values
+        }
+      }
+
+      dimensions.forEach(addDimCoordinates)
+    }
+
+    return coords
   }
 
   if (!data) {
     const result = {
       [variable]: results,
-      dimensions: useNestedResults
-        ? dimensions.filter((d) => {
-            const dimLower = d.toLowerCase()
-            return !['x', 'lon', 'longitude'].includes(dimLower)
-          })
-        : ['lat', 'lon'],
-      coordinates: resultCoordinates,
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates(),
     } as QueryDataResult
     return result
   }
@@ -348,13 +379,8 @@ export async function queryRegionSingleImage(
   if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
     const result = {
       [variable]: results,
-      dimensions: useNestedResults
-        ? dimensions.filter((d) => {
-            const dimLower = d.toLowerCase()
-            return !['x', 'lon', 'longitude'].includes(dimLower)
-          })
-        : ['lat', 'lon'],
-      coordinates: resultCoordinates,
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates(),
     } as QueryDataResult
     return result
   }
@@ -424,18 +450,10 @@ export async function queryRegionSingleImage(
     }
   }
 
-  // Build final result
-  const resultDimensions = useNestedResults
-    ? dimensions.filter((d) => {
-        const dimLower = d.toLowerCase()
-        return !['x', 'lon', 'longitude'].includes(dimLower)
-      })
-    : ['lat', 'lon']
-
   const result = {
     [variable]: results,
     dimensions: resultDimensions,
-    coordinates: resultCoordinates,
+    coordinates: buildResultCoordinates(),
   } as QueryDataResult
 
   return result

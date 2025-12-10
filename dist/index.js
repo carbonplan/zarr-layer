@@ -6417,32 +6417,50 @@ async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xy
   let results = useNestedResults ? {} : [];
   const latCoords = [];
   const lonCoords = [];
-  const resultCoordinates = {
-    lat: latCoords,
-    lon: lonCoords
-  };
-  for (const dim of dimensions) {
-    const dimLower = dim.toLowerCase();
-    if (!["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
-      const selectorValue = selector[dim];
-      if (Array.isArray(selectorValue)) {
-        resultCoordinates[dim] = selectorValue;
-      } else if (selectorValue !== void 0 && typeof selectorValue !== "object") {
-        resultCoordinates[dim] = [selectorValue];
-      } else if (coordinates[dim]) {
-        resultCoordinates[dim] = coordinates[dim];
-      }
+  const mappedDimensions = dimensions.map((d) => {
+    const dimLower = d.toLowerCase();
+    if (["x", "lon", "longitude"].includes(dimLower)) return "lon";
+    if (["y", "lat", "latitude"].includes(dimLower)) return "lat";
+    return d;
+  });
+  const resultDimensions = useNestedResults ? mappedDimensions : ["lat", "lon"];
+  const buildResultCoordinates = () => {
+    const coords = {
+      lat: latCoords,
+      lon: lonCoords
+    };
+    if (useNestedResults) {
+      const addDimCoordinates = (dim) => {
+        const dimLower = dim.toLowerCase();
+        if (["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
+          return;
+        }
+        const sel = selector[dim];
+        let values;
+        if (Array.isArray(sel)) {
+          values = sel;
+        } else if (sel && typeof sel === "object" && "selected" in sel) {
+          const selected = sel.selected;
+          values = Array.isArray(selected) ? selected : [selected];
+        } else if (sel !== void 0 && typeof sel !== "object") {
+          values = [sel];
+        } else if (coordinates[dim]) {
+          values = coordinates[dim];
+        }
+        if (values) {
+          coords[dim] = values;
+        }
+      };
+      dimensions.forEach(addDimCoordinates);
     }
-  }
+    return coords;
+  };
   const tiles = getTilesForPolygon(geometry, maxZoom, crs, xyLimits);
   if (tiles.length === 0) {
     const result2 = {
       [variable]: results,
-      dimensions: useNestedResults ? dimensions.filter((d) => {
-        const dimLower = d.toLowerCase();
-        return !["x", "lon", "longitude"].includes(dimLower);
-      }) : ["lat", "lon"],
-      coordinates: resultCoordinates
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates()
     };
     return result2;
   }
@@ -6546,14 +6564,10 @@ async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xy
       }
     }
   }
-  const resultDimensions = useNestedResults ? dimensions.filter((d) => {
-    const dimLower = d.toLowerCase();
-    return !["x", "lon", "longitude"].includes(dimLower);
-  }) : ["lat", "lon"];
   const result = {
     [variable]: results,
     dimensions: resultDimensions,
-    coordinates: resultCoordinates
+    coordinates: buildResultCoordinates()
   };
   return result;
 }
@@ -6572,31 +6586,49 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
   let results = useNestedResults ? {} : [];
   const latCoords = [];
   const lonCoords = [];
-  const resultCoordinates = {
-    lat: latCoords,
-    lon: lonCoords
-  };
-  for (const dim of dimensions) {
-    const dimLower = dim.toLowerCase();
-    if (!["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
-      const selectorValue = selector[dim];
-      if (Array.isArray(selectorValue)) {
-        resultCoordinates[dim] = selectorValue;
-      } else if (selectorValue !== void 0 && typeof selectorValue !== "object") {
-        resultCoordinates[dim] = [selectorValue];
-      } else if (coordinates[dim]) {
-        resultCoordinates[dim] = coordinates[dim];
-      }
+  const mappedDimensions = dimensions.map((d) => {
+    const dimLower = d.toLowerCase();
+    if (["x", "lon", "longitude"].includes(dimLower)) return "lon";
+    if (["y", "lat", "latitude"].includes(dimLower)) return "lat";
+    return d;
+  });
+  const resultDimensions = useNestedResults ? mappedDimensions : ["lat", "lon"];
+  const buildResultCoordinates = () => {
+    const coords = {
+      lat: latCoords,
+      lon: lonCoords
+    };
+    if (useNestedResults) {
+      const addDimCoordinates = (dim) => {
+        const dimLower = dim.toLowerCase();
+        if (["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
+          return;
+        }
+        const sel = selector[dim];
+        let values;
+        if (Array.isArray(sel)) {
+          values = sel;
+        } else if (sel && typeof sel === "object" && "selected" in sel) {
+          const selected = sel.selected;
+          values = Array.isArray(selected) ? selected : [selected];
+        } else if (sel !== void 0 && typeof sel !== "object") {
+          values = [sel];
+        } else if (coordinates[dim]) {
+          values = coordinates[dim];
+        }
+        if (values) {
+          coords[dim] = values;
+        }
+      };
+      dimensions.forEach(addDimCoordinates);
     }
-  }
+    return coords;
+  };
   if (!data) {
     const result2 = {
       [variable]: results,
-      dimensions: useNestedResults ? dimensions.filter((d) => {
-        const dimLower = d.toLowerCase();
-        return !["x", "lon", "longitude"].includes(dimLower);
-      }) : ["lat", "lon"],
-      coordinates: resultCoordinates
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates()
     };
     return result2;
   }
@@ -6612,11 +6644,8 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
   if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
     const result2 = {
       [variable]: results,
-      dimensions: useNestedResults ? dimensions.filter((d) => {
-        const dimLower = d.toLowerCase();
-        return !["x", "lon", "longitude"].includes(dimLower);
-      }) : ["lat", "lon"],
-      coordinates: resultCoordinates
+      dimensions: resultDimensions,
+      coordinates: buildResultCoordinates()
     };
     return result2;
   }
@@ -6665,14 +6694,10 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
       }
     }
   }
-  const resultDimensions = useNestedResults ? dimensions.filter((d) => {
-    const dimLower = d.toLowerCase();
-    return !["x", "lon", "longitude"].includes(dimLower);
-  }) : ["lat", "lon"];
   const result = {
     [variable]: results,
     dimensions: resultDimensions,
-    coordinates: resultCoordinates
+    coordinates: buildResultCoordinates()
   };
   return result;
 }
@@ -8106,17 +8131,62 @@ var SingleImageMode = class {
       }
       const { x, y } = pixel;
       const baseIndex = (y * this.width + x) * this.channels;
-      const values = [];
+      const valuesNested = this.multiValueDimNames.length > 0;
+      let values = valuesNested ? {} : [];
       for (let c = 0; c < this.channels; c++) {
         const value = this.data[baseIndex + c];
-        if (value !== void 0 && value !== null && Number.isFinite(value)) {
+        if (value === void 0 || value === null || !Number.isFinite(value)) {
+          continue;
+        }
+        if (valuesNested) {
+          const labels = this.channelLabels?.[c];
+          if (labels && this.multiValueDimNames.length > 0 && labels.length === this.multiValueDimNames.length) {
+            values = setObjectValues(values, labels, value);
+          } else if (Array.isArray(values)) {
+            values.push(value);
+          }
+        } else if (Array.isArray(values)) {
           values.push(value);
+        }
+      }
+      const desc2 = this.zarrStore.describe();
+      const dimensions = desc2.dimensions;
+      const mappedDimensions = dimensions.map((d) => {
+        const dimLower = d.toLowerCase();
+        if (["x", "lon", "longitude"].includes(dimLower)) return "lon";
+        if (["y", "lat", "latitude"].includes(dimLower)) return "lat";
+        return d;
+      });
+      const outputDimensions = valuesNested ? mappedDimensions : ["lat", "lon"];
+      const resultCoordinates = {
+        lat: coords.lat,
+        lon: coords.lon
+      };
+      if (valuesNested) {
+        const querySelector2 = selector || this.selector;
+        for (const dim of dimensions) {
+          const dimLower = dim.toLowerCase();
+          if (["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
+            continue;
+          }
+          const selVal = querySelector2[dim];
+          if (Array.isArray(selVal)) {
+            resultCoordinates[dim] = selVal;
+          } else if (selVal !== void 0 && typeof selVal !== "object") {
+            resultCoordinates[dim] = [selVal];
+          } else if (selVal && typeof selVal === "object" && "selected" in selVal) {
+            const selected = selVal.selected;
+            const vals = Array.isArray(selected) ? selected : [selected];
+            resultCoordinates[dim] = vals;
+          } else if (desc2.coordinates[dim]) {
+            resultCoordinates[dim] = desc2.coordinates[dim];
+          }
         }
       }
       return {
         [this.variable]: values,
-        dimensions: ["lat", "lon"],
-        coordinates: coords
+        dimensions: outputDimensions,
+        coordinates: resultCoordinates
       };
     }
     const desc = this.zarrStore.describe();
@@ -8596,11 +8666,10 @@ var ZarrLayer = class {
    */
   async queryData(geometry, selector) {
     if (!this.mode?.queryData) {
-      const coordLatLon = geometry.type === "Point" ? { lat: [geometry.coordinates[1]], lon: [geometry.coordinates[0]] } : { lat: [], lon: [] };
       return {
         [this.variable]: [],
         dimensions: ["lat", "lon"],
-        coordinates: coordLatLon
+        coordinates: { lat: [], lon: [] }
       };
     }
     return this.mode.queryData(geometry, selector);

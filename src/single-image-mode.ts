@@ -12,6 +12,7 @@ import type {
 } from './query/types'
 import { queryRegionSingleImage } from './query/region-query'
 import { mercatorBoundsToPixel } from './query/query-utils'
+import { setObjectValues } from './query/selector-utils'
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
@@ -517,19 +518,84 @@ export class SingleImageMode implements ZarrMode {
 
       const { x, y } = pixel
       const baseIndex = (y * this.width + x) * this.channels
-      const values: number[] = []
+      const valuesNested = this.multiValueDimNames.length > 0
+      let values: number[] | Record<string | number, any> = valuesNested
+        ? {}
+        : []
 
       for (let c = 0; c < this.channels; c++) {
         const value = this.data[baseIndex + c]
-        if (value !== undefined && value !== null && Number.isFinite(value)) {
+        if (value === undefined || value === null || !Number.isFinite(value)) {
+          continue
+        }
+
+        if (valuesNested) {
+          const labels = this.channelLabels?.[c]
+          if (
+            labels &&
+            this.multiValueDimNames.length > 0 &&
+            labels.length === this.multiValueDimNames.length
+          ) {
+            values = setObjectValues(values as any, labels, value) as any
+          } else if (Array.isArray(values)) {
+            values.push(value)
+          }
+        } else if (Array.isArray(values)) {
           values.push(value)
         }
       }
 
+      const desc = this.zarrStore.describe()
+      const dimensions = desc.dimensions
+      const mappedDimensions = dimensions.map((d) => {
+        const dimLower = d.toLowerCase()
+        if (['x', 'lon', 'longitude'].includes(dimLower)) return 'lon'
+        if (['y', 'lat', 'latitude'].includes(dimLower)) return 'lat'
+        return d
+      })
+
+      const outputDimensions = valuesNested ? mappedDimensions : ['lat', 'lon']
+      const resultCoordinates: {
+        lat: number[]
+        lon: number[]
+        [key: string]: (number | string)[]
+      } = {
+        lat: coords.lat,
+        lon: coords.lon,
+      }
+
+      if (valuesNested) {
+        const querySelector = selector || (this.selector as QuerySelector)
+        for (const dim of dimensions) {
+          const dimLower = dim.toLowerCase()
+          if (
+            ['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(dimLower)
+          ) {
+            continue
+          }
+          const selVal = querySelector[dim]
+          if (Array.isArray(selVal)) {
+            resultCoordinates[dim] = selVal as (number | string)[]
+          } else if (selVal !== undefined && typeof selVal !== 'object') {
+            resultCoordinates[dim] = [selVal]
+          } else if (
+            selVal &&
+            typeof selVal === 'object' &&
+            'selected' in selVal
+          ) {
+            const selected = selVal.selected
+            const vals = Array.isArray(selected) ? selected : [selected]
+            resultCoordinates[dim] = vals as (number | string)[]
+          } else if (desc.coordinates[dim]) {
+            resultCoordinates[dim] = desc.coordinates[dim]
+          }
+        }
+      }
+
       return {
-        [this.variable]: values,
-        dimensions: ['lat', 'lon'],
-        coordinates: coords,
+        [this.variable]: values as any,
+        dimensions: outputDimensions,
+        coordinates: resultCoordinates,
       }
     }
 

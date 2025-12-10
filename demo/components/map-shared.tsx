@@ -168,6 +168,27 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     isCarbonplan4d &&
     (currentBand === 'tavg_range' || currentBand === 'prec_range')
 
+  const latestLayerConfigRef = useRef(layerConfig)
+  const latestRangeStateRef = useRef({
+    isRangeBand,
+    monthStart,
+    monthEnd,
+    currentBand,
+  })
+
+  useEffect(() => {
+    latestLayerConfigRef.current = layerConfig
+  }, [layerConfig])
+
+  useEffect(() => {
+    latestRangeStateRef.current = {
+      isRangeBand,
+      monthStart,
+      monthEnd,
+      currentBand,
+    }
+  }, [isRangeBand, monthStart, monthEnd, currentBand])
+
   useEffect(() => {
     if (!map || !isMapLoaded) return
 
@@ -183,6 +204,8 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       zarrLayerRef.current = null
     }
 
+    const currentLayerConfig = latestLayerConfigRef.current
+
     const options: ZarrLayerOptions = {
       id: 'zarr-layer',
       source: datasetModule.source,
@@ -190,7 +213,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       clim: clim,
       colormap: colormapArray,
       opacity: opacity,
-      selector: layerConfig.selector,
+      selector: currentLayerConfig.selector,
       zarrVersion: datasetModule.zarrVersion,
       minRenderZoom: datasetModule.minRenderZoom ?? 0,
       fillValue: datasetModule.fillValue,
@@ -198,11 +221,11 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       onLoadingStateChange: setLoadingState,
     }
 
-    if (layerConfig.customFrag) {
-      options.customFrag = layerConfig.customFrag
+    if (currentLayerConfig.customFrag) {
+      options.customFrag = currentLayerConfig.customFrag
     }
-    if (layerConfig.uniforms) {
-      options.uniforms = layerConfig.uniforms
+    if (currentLayerConfig.uniforms) {
+      options.uniforms = currentLayerConfig.uniforms
     }
 
     try {
@@ -220,13 +243,21 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
           type: 'Point',
           coordinates: [lng, lat],
         }
-        let querySelector = layerConfig.selector
-        if (isRangeBand && monthStart !== null && monthEnd !== null) {
+        const {
+          isRangeBand: rangeMode,
+          monthStart: latestMonthStart,
+          monthEnd: latestMonthEnd,
+          currentBand: latestBand,
+        } = latestRangeStateRef.current
+        const latestSelector = latestLayerConfigRef.current.selector
+
+        let querySelector = latestSelector
+        if (rangeMode && latestMonthStart !== null && latestMonthEnd !== null) {
           const monthRange: number[] = []
-          for (let m = monthStart; m <= monthEnd; m++) {
+          for (let m = latestMonthStart; m <= latestMonthEnd; m++) {
             monthRange.push(m)
           }
-          const baseBand = currentBand === 'tavg_range' ? 'tavg' : 'prec'
+          const baseBand = latestBand === 'tavg_range' ? 'tavg' : 'prec'
           querySelector = { band: baseBand, month: monthRange }
         }
 
@@ -273,12 +304,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     datasetId,
     datasetModule,
     layerConfig.customFrag,
-    layerConfig.selector,
     mapProvider,
-    isRangeBand,
-    monthStart,
-    monthEnd,
-    currentBand,
     setLoadingState,
   ])
 
