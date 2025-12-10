@@ -136,7 +136,7 @@ void main() {
   float raw = texture(tex, sample_coord).r;
   float value = raw * u_scaleFactor + u_addOffset;
   
-  if (raw == fillValue || raw != raw || value != value) {
+  if (raw == fillValue || isnan(raw) || isnan(value)) {
     discard;
   }
   
@@ -196,7 +196,7 @@ export function createFragmentShaderSource(
   const fillValueChecks = bands
     .map(
       (name) =>
-        `(${name}_raw == fillValue || ${name}_raw != ${name}_raw || ${name}_val != ${name}_val)`
+        `(${name}_raw == fillValue || isnan(${name}_raw) || isnan(${name}_val))`
     )
     .join(' || ')
 
@@ -243,7 +243,7 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
   float value = ${bands[0]};
   float raw = ${bands[0]}_raw;
   
-  if (raw == fillValue || raw != raw || value != value) {
+  if (raw == fillValue || isnan(raw) || isnan(value)) {
     discard;
   }
   

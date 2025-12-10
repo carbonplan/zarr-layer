@@ -406,7 +406,7 @@ export class ZarrStore {
     this.dimensions = zattrs?._ARRAY_DIMENSIONS || []
     this.shape = zarray?.shape || []
     this.chunks = zarray?.chunks || []
-    this.fill_value = zarray?.fill_value ?? null
+    this.fill_value = this.normalizeFillValue(zarray?.fill_value ?? null)
     this.dtype = zarray?.dtype || null
     this.scaleFactor = zattrs?.scale_factor ?? 1
     this.addOffset = zattrs?.add_offset ?? 0
@@ -483,7 +483,7 @@ export class ZarrStore {
     this.chunks =
       shardedChunkShape || gridChunkShape || legacyChunks || this.shape
 
-    this.fill_value = arrayMetadata.fill_value
+    this.fill_value = this.normalizeFillValue(arrayMetadata.fill_value)
     this.dtype = arrayMetadata.data_type || null
     this.scaleFactor =
       typeof attrs?.scale_factor === 'number' ? attrs.scale_factor : 1
@@ -518,6 +518,20 @@ export class ZarrStore {
       this.dimensionNames,
       coordinates
     )
+  }
+
+  private normalizeFillValue(value: unknown): number | null {
+    if (value === undefined || value === null) return null
+    if (typeof value === 'string') {
+      const lower = value.toLowerCase()
+      if (lower === 'nan') return Number.NaN
+      const parsed = Number(value)
+      return Number.isNaN(parsed) ? null : parsed
+    }
+    if (typeof value === 'number') {
+      return value
+    }
+    return null
   }
 
   private async _loadXYLimits() {
