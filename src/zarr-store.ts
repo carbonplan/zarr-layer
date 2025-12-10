@@ -120,6 +120,7 @@ interface StoreDescription {
   scaleFactor: number
   addOffset: number
   coordinates: Record<string, (string | number)[]>
+  latIsAscending: boolean | null
 }
 
 export class ZarrStore {
@@ -151,6 +152,7 @@ export class ZarrStore {
   scaleFactor: number = 1
   addOffset: number = 0
   coordinates: Record<string, (string | number)[]> = {}
+  latIsAscending: boolean | null = null
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -260,6 +262,7 @@ export class ZarrStore {
       scaleFactor: this.scaleFactor,
       addOffset: this.addOffset,
       coordinates: this.coordinates,
+      latIsAscending: this.latIsAscending,
     }
   }
 
@@ -549,6 +552,8 @@ export class ZarrStore {
       const xValues = Array.from(xdata.data as ArrayLike<number>)
       const yValues = Array.from(ydata.data as ArrayLike<number>)
 
+      this.latIsAscending = this._detectAscending(yValues)
+
       this.xyLimits = {
         xMin: Math.min(...xValues),
         xMax: Math.max(...xValues),
@@ -576,6 +581,7 @@ export class ZarrStore {
           yMax: 90,
         }
       }
+      this.latIsAscending = null
     }
   }
 
@@ -604,5 +610,26 @@ export class ZarrStore {
   static clearCache() {
     ZarrStore._cache.clear()
     ZarrStore._storeCache.clear()
+  }
+
+  private _detectAscending(values: number[]): boolean | null {
+    if (!values || values.length < 2) return null
+
+    let direction = 0
+    for (let i = 0; i < values.length - 1; i++) {
+      const diff = values[i + 1] - values[i]
+      if (Math.abs(diff) < 1e-12) {
+        continue
+      }
+      const sign = diff > 0 ? 1 : -1
+      if (direction === 0) {
+        direction = sign
+      } else if (direction !== sign) {
+        return null
+      }
+    }
+
+    if (direction === 0) return null
+    return direction > 0
   }
 }

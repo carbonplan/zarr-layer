@@ -36,6 +36,8 @@ export function renderSingleImage(
     pixCoordArr,
     geometryVersion,
     dataVersion,
+    texScale: baseTexScale = [1, 1],
+    texOffset: baseTexOffset = [0, 0],
   } = params
 
   let uploaded = state.uploaded
@@ -83,8 +85,16 @@ export function renderSingleImage(
   gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
   gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
   gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
-  const texScale = tileOverride?.texScale ?? [1.0, 1.0]
-  const texOffset = tileOverride?.texOffset ?? [0.0, 0.0]
+  const overrideScale = tileOverride?.texScale ?? [1.0, 1.0]
+  const overrideOffset = tileOverride?.texOffset ?? [0.0, 0.0]
+  const texScale: [number, number] = [
+    baseTexScale[0] * overrideScale[0],
+    baseTexScale[1] * overrideScale[1],
+  ]
+  const texOffset: [number, number] = [
+    baseTexOffset[0] * overrideScale[0] + overrideOffset[0],
+    baseTexOffset[1] * overrideScale[1] + overrideOffset[1],
+  ]
   gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
   gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 

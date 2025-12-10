@@ -26,6 +26,8 @@ export interface SingleImageParams {
   pixCoordArr: Float32Array
   geometryVersion: number
   dataVersion: number
+  texScale?: [number, number]
+  texOffset?: [number, number]
 }
 
 export interface MapboxGlobeParams {

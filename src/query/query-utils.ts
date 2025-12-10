@@ -419,7 +419,8 @@ function pixelRectLonLatSingle(
   height: number,
   x: number,
   y: number,
-  crs: CRS
+  crs: CRS,
+  latIsAscending?: boolean
 ): [number, number][] {
   const offsets = [
     [0, 0],
@@ -436,9 +437,13 @@ function pixelRectLonLatSingle(
       crs === 'EPSG:4326' &&
       bounds.latMin !== undefined &&
       bounds.latMax !== undefined
-        ? bounds.latMax -
-          ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-            (bounds.latMax - bounds.latMin)
+        ? latIsAscending
+          ? bounds.latMin +
+            ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
+              (bounds.latMax - bounds.latMin)
+          : bounds.latMax -
+            ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
+              (bounds.latMax - bounds.latMin)
         : mercatorNormToLat(mercY)
     corners.push([lon, lat])
   }
@@ -465,9 +470,18 @@ export function pixelIntersectsGeometrySingle(
   x: number,
   y: number,
   crs: CRS,
-  geometry: QueryDataGeometry
+  geometry: QueryDataGeometry,
+  latIsAscending?: boolean
 ): boolean {
-  const rect = pixelRectLonLatSingle(bounds, width, height, x, y, crs)
+  const rect = pixelRectLonLatSingle(
+    bounds,
+    width,
+    height,
+    x,
+    y,
+    crs,
+    latIsAscending
+  )
   return rectIntersectsGeometry(rect, geometry)
 }
 
@@ -515,7 +529,8 @@ export function mercatorBoundsToPixel(
   bounds: MercatorBounds,
   width: number,
   height: number,
-  crs: CRS
+  crs: CRS,
+  latIsAscending?: boolean
 ): { x: number; y: number } | null {
   let normX: number
   let normY: number
@@ -528,7 +543,11 @@ export function mercatorBoundsToPixel(
     // For equirectangular data, use linear lat mapping
     normX = (lonToMercatorNorm(lng) - bounds.x0) / (bounds.x1 - bounds.x0)
     // Convert lat to mercator for display, but sample linearly in source data
-    const latNorm = (bounds.latMax - lat) / (bounds.latMax - bounds.latMin)
+    const latRange = bounds.latMax - bounds.latMin
+    if (latRange === 0) return null
+    const latNorm = latIsAscending
+      ? (lat - bounds.latMin) / latRange
+      : (bounds.latMax - lat) / latRange
     normY = latNorm
   } else {
     normX = (lonToMercatorNorm(lng) - bounds.x0) / (bounds.x1 - bounds.x0)

@@ -288,7 +288,8 @@ export async function queryRegionSingleImage(
   coordinates: Record<string, (string | number)[]>,
   channels: number = 1,
   channelLabels?: (string | number)[][],
-  multiValueDimNames?: string[]
+  multiValueDimNames?: string[],
+  latIsAscending?: boolean
 ): Promise<QueryDataResult> {
   // Warn if selector has multi-valued dimensions
   const hasMultiValue = hasArraySelector(selector)
@@ -404,10 +405,25 @@ export async function queryRegionSingleImage(
     const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax)
     const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax)
 
-    const yStartFrac = (latMax - clampedNorth) / (latMax - latMin)
-    const yEndFrac = (latMax - clampedSouth) / (latMax - latMin)
+    const latRange = latMax - latMin
+    if (latRange === 0) {
+      const result = {
+        [variable]: results,
+        dimensions: resultDimensions,
+        coordinates: buildResultCoordinates(),
+      } as QueryDataResult
+      return result
+    }
+    const toFrac = (latVal: number) =>
+      latIsAscending
+        ? (latVal - latMin) / latRange
+        : (latMax - latVal) / latRange
+    const yStartFracRaw = toFrac(clampedNorth)
+    const yEndFracRaw = toFrac(clampedSouth)
+    const yFracMin = Math.min(yStartFracRaw, yEndFracRaw)
+    const yFracMax = Math.max(yStartFracRaw, yEndFracRaw)
 
-    if (overlapX1 <= overlapX0 || yEndFrac <= yStartFrac) {
+    if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) {
       const result = {
         [variable]: results,
         dimensions: resultDimensions,
@@ -421,8 +437,8 @@ export async function queryRegionSingleImage(
 
     xStart = Math.max(0, Math.floor(minX))
     xEnd = Math.min(width, Math.ceil(maxX + 1))
-    yStart = Math.max(0, Math.floor(yStartFrac * height))
-    yEnd = Math.min(height, Math.ceil(yEndFrac * height))
+    yStart = Math.max(0, Math.floor(yFracMin * height))
+    yEnd = Math.min(height, Math.ceil(yFracMax * height))
   } else {
     const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1))
     const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1))
@@ -467,7 +483,8 @@ export async function queryRegionSingleImage(
           x,
           y,
           _crs,
-          geometry
+          geometry,
+          latIsAscending
         )
       ) {
         continue
@@ -481,9 +498,13 @@ export async function queryRegionSingleImage(
         _crs === 'EPSG:4326' &&
         bounds.latMin !== undefined &&
         bounds.latMax !== undefined
-          ? bounds.latMax -
-            ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-              (bounds.latMax - bounds.latMin)
+          ? latIsAscending
+            ? bounds.latMin +
+              ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
+                (bounds.latMax - bounds.latMin)
+            : bounds.latMax -
+              ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
+                (bounds.latMax - bounds.latMin)
           : mercatorNormToLat(mercY)
 
       const baseIndex = (y * width + x) * channels

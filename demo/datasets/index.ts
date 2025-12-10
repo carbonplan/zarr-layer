@@ -66,7 +66,7 @@ const DATASET_MODULE_LIST = createDatasetList(
     source:
       'https://carbonplan-scratch.s3.us-west-2.amazonaws.com/zarr-pyramids/zarr-v3-single-layer-default.zarr',
     variable: 'pr',
-    clim: [0, 10],
+    clim: [0, 20],
     colormap: 'blues',
     zarrVersion: 3,
     info: 'Precipitation (v3 sharding, EPSG:3857)',

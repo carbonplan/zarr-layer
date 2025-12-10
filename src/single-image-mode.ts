@@ -73,6 +73,9 @@ export class SingleImageMode implements ZarrMode {
   private metadataLoading: boolean = false
   private fetchRequestId: number = 0
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
+  private latIsAscending: boolean | null = null
+  private texScale: [number, number] = [1, 1]
+  private texOffset: [number, number] = [0, 0]
 
   constructor(
     store: ZarrStore,
@@ -98,6 +101,7 @@ export class SingleImageMode implements ZarrMode {
       this.dimIndices = desc.dimIndices
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
+      this.latIsAscending = desc.latIsAscending ?? null
 
       this.zarrArray = await this.zarrStore.getArray()
       this.width = this.zarrArray.shape[this.dimIndices.lon.index]
@@ -110,6 +114,7 @@ export class SingleImageMode implements ZarrMode {
       }
 
       this.updateGeometryForProjection(false)
+      this.updateTexTransform()
     } finally {
       this.metadataLoading = false
       this.emitLoadingState()
@@ -162,6 +167,22 @@ export class SingleImageMode implements ZarrMode {
       false
     )
 
+    const bounds = singleImageState.singleImage.bounds
+    if (bounds) {
+      if (shaderProgram.isEquirectangularLoc) {
+        renderer.gl.uniform1i(
+          shaderProgram.isEquirectangularLoc,
+          bounds.latMin !== undefined ? 1 : 0
+        )
+      }
+      if (shaderProgram.latMinLoc && bounds.latMin !== undefined) {
+        renderer.gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin)
+      }
+      if (shaderProgram.latMaxLoc && bounds.latMax !== undefined) {
+        renderer.gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax)
+      }
+    }
+
     renderer.renderSingleImage(
       shaderProgram,
       context.worldOffsets,
@@ -208,6 +229,8 @@ export class SingleImageMode implements ZarrMode {
         pixCoordArr: this.pixCoordArr,
         geometryVersion: this.geometryVersion,
         dataVersion: this.dataVersion,
+        texScale: this.texScale,
+        texOffset: this.texOffset,
       },
       vertexArr: this.vertexArr,
     }
@@ -505,7 +528,8 @@ export class SingleImageMode implements ZarrMode {
         this.mercatorBounds,
         this.width,
         this.height,
-        this.crs ?? 'EPSG:4326'
+        this.crs ?? 'EPSG:4326',
+        this.latIsAscending ?? undefined
       )
 
       if (!pixel) {
@@ -615,7 +639,19 @@ export class SingleImageMode implements ZarrMode {
       desc.coordinates,
       this.channels,
       this.channelLabels,
-      this.multiValueDimNames
+      this.multiValueDimNames,
+      this.latIsAscending ?? undefined
     )
+  }
+
+  private updateTexTransform() {
+    if (this.latIsAscending) {
+      this.texScale = [1, -1]
+      this.texOffset = [0, 1]
+    } else {
+      this.texScale = [1, 1]
+      this.texOffset = [0, 0]
+    }
+    this.geometryVersion += 1
   }
 }

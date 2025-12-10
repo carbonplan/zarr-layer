@@ -4391,6 +4391,7 @@ var _ZarrStore = class _ZarrStore {
     this.scaleFactor = 1;
     this.addOffset = 0;
     this.coordinates = {};
+    this.latIsAscending = null;
     this.store = null;
     this.root = null;
     this._arrayHandles = /* @__PURE__ */ new Map();
@@ -4474,7 +4475,8 @@ var _ZarrStore = class _ZarrStore {
       xyLimits: this.xyLimits,
       scaleFactor: this.scaleFactor,
       addOffset: this.addOffset,
-      coordinates: this.coordinates
+      coordinates: this.coordinates,
+      latIsAscending: this.latIsAscending
     };
   }
   async getChunk(level, chunkIndices) {
@@ -4674,6 +4676,7 @@ var _ZarrStore = class _ZarrStore {
       const ydata = await get2(yarr);
       const xValues = Array.from(xdata.data);
       const yValues = Array.from(ydata.data);
+      this.latIsAscending = this._detectAscending(yValues);
       this.xyLimits = {
         xMin: Math.min(...xValues),
         xMax: Math.max(...xValues),
@@ -4701,6 +4704,7 @@ var _ZarrStore = class _ZarrStore {
           yMax: 90
         };
       }
+      this.latIsAscending = null;
     }
   }
   _getPyramidMetadata(multiscales) {
@@ -4722,6 +4726,24 @@ var _ZarrStore = class _ZarrStore {
   static clearCache() {
     _ZarrStore._cache.clear();
     _ZarrStore._storeCache.clear();
+  }
+  _detectAscending(values) {
+    if (!values || values.length < 2) return null;
+    let direction = 0;
+    for (let i = 0; i < values.length - 1; i++) {
+      const diff = values[i + 1] - values[i];
+      if (Math.abs(diff) < 1e-12) {
+        continue;
+      }
+      const sign = diff > 0 ? 1 : -1;
+      if (direction === 0) {
+        direction = sign;
+      } else if (direction !== sign) {
+        return null;
+      }
+    }
+    if (direction === 0) return null;
+    return direction > 0;
   }
 };
 _ZarrStore._cache = /* @__PURE__ */ new Map();
@@ -5323,7 +5345,9 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
     channels = 1,
     pixCoordArr,
     geometryVersion,
-    dataVersion
+    dataVersion,
+    texScale: baseTexScale = [1, 1],
+    texOffset: baseTexOffset = [0, 0]
   } = params;
   let uploaded = state.uploaded;
   let currentGeometryVersion = state.geometryVersion;
@@ -5350,8 +5374,16 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
   gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
   gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
   gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
-  const texScale = tileOverride?.texScale ?? [1, 1];
-  const texOffset = tileOverride?.texOffset ?? [0, 0];
+  const overrideScale = tileOverride?.texScale ?? [1, 1];
+  const overrideOffset = tileOverride?.texOffset ?? [0, 0];
+  const texScale = [
+    baseTexScale[0] * overrideScale[0],
+    baseTexScale[1] * overrideScale[1]
+  ];
+  const texOffset = [
+    baseTexOffset[0] * overrideScale[0] + overrideOffset[0],
+    baseTexOffset[1] * overrideScale[1] + overrideOffset[1]
+  ];
   gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
   gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
   gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
@@ -6127,7 +6159,7 @@ function pixelRectLonLat(tile, pixelX, pixelY, tileSize, crs, xyLimits) {
   }
   return corners;
 }
-function pixelRectLonLatSingle(bounds, width, height, x, y, crs) {
+function pixelRectLonLatSingle(bounds, width, height, x, y, crs, latIsAscending) {
   const offsets = [
     [0, 0],
     [1, 0],
@@ -6139,7 +6171,7 @@ function pixelRectLonLatSingle(bounds, width, height, x, y, crs) {
     const mercX = bounds.x0 + (x + dx) / width * (bounds.x1 - bounds.x0);
     const mercY = bounds.y0 + (y + dy) / height * (bounds.y1 - bounds.y0);
     const lon = mercatorNormToLon(mercX);
-    const lat = crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0 ? bounds.latMax - (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : mercatorNormToLat(mercY);
+    const lat = crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0 ? latIsAscending ? bounds.latMin + (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : bounds.latMax - (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : mercatorNormToLat(mercY);
     corners.push([lon, lat]);
   }
   return corners;
@@ -6148,8 +6180,16 @@ function pixelIntersectsGeometryTiled(tile, pixelX, pixelY, tileSize, crs, xyLim
   const rect = pixelRectLonLat(tile, pixelX, pixelY, tileSize, crs, xyLimits);
   return rectIntersectsGeometry(rect, geometry);
 }
-function pixelIntersectsGeometrySingle(bounds, width, height, x, y, crs, geometry) {
-  const rect = pixelRectLonLatSingle(bounds, width, height, x, y, crs);
+function pixelIntersectsGeometrySingle(bounds, width, height, x, y, crs, geometry, latIsAscending) {
+  const rect = pixelRectLonLatSingle(
+    bounds,
+    width,
+    height,
+    x,
+    y,
+    crs,
+    latIsAscending
+  );
   return rectIntersectsGeometry(rect, geometry);
 }
 function getTilesForBoundingBox(bbox, zoom, crs, xyLimits) {
@@ -6166,12 +6206,14 @@ function getTilesForPolygon(geometry, zoom, crs, xyLimits) {
   const bbox = computeBoundingBox(geometry);
   return getTilesForBoundingBox(bbox, zoom, crs, xyLimits);
 }
-function mercatorBoundsToPixel(lng, lat, bounds, width, height, crs) {
+function mercatorBoundsToPixel(lng, lat, bounds, width, height, crs, latIsAscending) {
   let normX;
   let normY;
   if (crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0) {
     normX = (lonToMercatorNorm(lng) - bounds.x0) / (bounds.x1 - bounds.x0);
-    const latNorm = (bounds.latMax - lat) / (bounds.latMax - bounds.latMin);
+    const latRange = bounds.latMax - bounds.latMin;
+    if (latRange === 0) return null;
+    const latNorm = latIsAscending ? (lat - bounds.latMin) / latRange : (bounds.latMax - lat) / latRange;
     normY = latNorm;
   } else {
     normX = (lonToMercatorNorm(lng) - bounds.x0) / (bounds.x1 - bounds.x0);
@@ -6582,7 +6624,7 @@ async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xy
   };
   return result;
 }
-async function queryRegionSingleImage(variable, geometry, selector, data, width, height, bounds, _crs, dimensions, coordinates, channels = 1, channelLabels, multiValueDimNames) {
+async function queryRegionSingleImage(variable, geometry, selector, data, width, height, bounds, _crs, dimensions, coordinates, channels = 1, channelLabels, multiValueDimNames, latIsAscending) {
   const hasMultiValue = hasArraySelector(selector);
   if (hasMultiValue) {
     console.warn(
@@ -6666,9 +6708,21 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
     const latMin = bounds.latMin;
     const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax);
     const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax);
-    const yStartFrac = (latMax - clampedNorth) / (latMax - latMin);
-    const yEndFrac = (latMax - clampedSouth) / (latMax - latMin);
-    if (overlapX1 <= overlapX0 || yEndFrac <= yStartFrac) {
+    const latRange = latMax - latMin;
+    if (latRange === 0) {
+      const result2 = {
+        [variable]: results,
+        dimensions: resultDimensions,
+        coordinates: buildResultCoordinates()
+      };
+      return result2;
+    }
+    const toFrac = (latVal) => latIsAscending ? (latVal - latMin) / latRange : (latMax - latVal) / latRange;
+    const yStartFracRaw = toFrac(clampedNorth);
+    const yEndFracRaw = toFrac(clampedSouth);
+    const yFracMin = Math.min(yStartFracRaw, yEndFracRaw);
+    const yFracMax = Math.max(yStartFracRaw, yEndFracRaw);
+    if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) {
       const result2 = {
         [variable]: results,
         dimensions: resultDimensions,
@@ -6680,8 +6734,8 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
     const maxX = (overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0) * width;
     xStart = Math.max(0, Math.floor(minX));
     xEnd = Math.min(width, Math.ceil(maxX + 1));
-    yStart = Math.max(0, Math.floor(yStartFrac * height));
-    yEnd = Math.min(height, Math.ceil(yEndFrac * height));
+    yStart = Math.max(0, Math.floor(yFracMin * height));
+    yEnd = Math.min(height, Math.ceil(yFracMax * height));
   } else {
     const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1));
     const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1));
@@ -6719,14 +6773,15 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
         x,
         y,
         _crs,
-        geometry
+        geometry,
+        latIsAscending
       )) {
         continue;
       }
       const mercX = bounds.x0 + (x + 0.5) / width * (bounds.x1 - bounds.x0);
       const mercY = bounds.y0 + (y + 0.5) / height * (bounds.y1 - bounds.y0);
       const lon = mercatorNormToLon(mercX);
-      const lat = _crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0 ? bounds.latMax - (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : mercatorNormToLat(mercY);
+      const lat = _crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0 ? latIsAscending ? bounds.latMin + (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : bounds.latMax - (mercY - bounds.y0) / (bounds.y1 - bounds.y0) * (bounds.latMax - bounds.latMin) : mercatorNormToLat(mercY);
       const baseIndex = (y * width + x) * channels;
       let coordPushed = false;
       for (let c = 0; c < channels; c++) {
@@ -7850,6 +7905,9 @@ var SingleImageMode = class {
     this.metadataLoading = false;
     this.fetchRequestId = 0;
     this.dimensionValues = {};
+    this.latIsAscending = null;
+    this.texScale = [1, 1];
+    this.texOffset = [0, 0];
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -7863,6 +7921,7 @@ var SingleImageMode = class {
       this.dimIndices = desc.dimIndices;
       this.crs = desc.crs;
       this.xyLimits = desc.xyLimits;
+      this.latIsAscending = desc.latIsAscending ?? null;
       this.zarrArray = await this.zarrStore.getArray();
       this.width = this.zarrArray.shape[this.dimIndices.lon.index];
       this.height = this.zarrArray.shape[this.dimIndices.lat.index];
@@ -7872,6 +7931,7 @@ var SingleImageMode = class {
         console.warn("SingleImageMode: No XY limits found");
       }
       this.updateGeometryForProjection(false);
+      this.updateTexTransform();
     } finally {
       this.metadataLoading = false;
       this.emitLoadingState();
@@ -7916,6 +7976,21 @@ var SingleImageMode = class {
       context.matrix,
       false
     );
+    const bounds = singleImageState.singleImage.bounds;
+    if (bounds) {
+      if (shaderProgram.isEquirectangularLoc) {
+        renderer.gl.uniform1i(
+          shaderProgram.isEquirectangularLoc,
+          bounds.latMin !== void 0 ? 1 : 0
+        );
+      }
+      if (shaderProgram.latMinLoc && bounds.latMin !== void 0) {
+        renderer.gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin);
+      }
+      if (shaderProgram.latMaxLoc && bounds.latMax !== void 0) {
+        renderer.gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax);
+      }
+    }
     renderer.renderSingleImage(
       shaderProgram,
       context.worldOffsets,
@@ -7953,7 +8028,9 @@ var SingleImageMode = class {
         pixCoordBuffer: this.pixCoordBuffer,
         pixCoordArr: this.pixCoordArr,
         geometryVersion: this.geometryVersion,
-        dataVersion: this.dataVersion
+        dataVersion: this.dataVersion,
+        texScale: this.texScale,
+        texOffset: this.texOffset
       },
       vertexArr: this.vertexArr
     };
@@ -8173,7 +8250,8 @@ var SingleImageMode = class {
         this.mercatorBounds,
         this.width,
         this.height,
-        this.crs ?? "EPSG:4326"
+        this.crs ?? "EPSG:4326",
+        this.latIsAscending ?? void 0
       );
       if (!pixel) {
         return {
@@ -8257,8 +8335,19 @@ var SingleImageMode = class {
       desc.coordinates,
       this.channels,
       this.channelLabels,
-      this.multiValueDimNames
+      this.multiValueDimNames,
+      this.latIsAscending ?? void 0
     );
+  }
+  updateTexTransform() {
+    if (this.latIsAscending) {
+      this.texScale = [1, -1];
+      this.texOffset = [0, 1];
+    } else {
+      this.texScale = [1, 1];
+      this.texOffset = [0, 0];
+    }
+    this.geometryVersion += 1;
   }
 };
 
