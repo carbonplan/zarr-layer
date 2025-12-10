@@ -6,13 +6,12 @@ import type {
   SingleImageRenderState,
 } from './zarr-mode'
 import type {
-  PointQueryResult,
-  RegionQueryResult,
   QuerySelector,
-  QueryGeometry,
+  QueryDataGeometry,
+  QueryDataResult,
 } from './query/types'
-import { queryPointSingleImage } from './query/point-query'
 import { queryRegionSingleImage } from './query/region-query'
+import { mercatorBoundsToPixel } from './query/query-utils'
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
@@ -472,40 +471,65 @@ export class SingleImageMode implements ZarrMode {
   }
 
   /**
-   * Query the data value at a geographic point.
+   * Query data for point or region geometries.
    */
-  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
-    if (!this.mercatorBounds) {
-      return { lng, lat, value: null }
-    }
-
-    return queryPointSingleImage(
-      lng,
-      lat,
-      this.data,
-      this.width,
-      this.height,
-      this.mercatorBounds,
-      this.crs ?? 'EPSG:4326',
-      this.channels,
-      this.channelLabels,
-      this.multiValueDimNames
-    )
-  }
-
-  /**
-   * Query all data values within a geographic region.
-   */
-  async queryRegion(
-    geometry: QueryGeometry,
+  async queryData(
+    geometry: QueryDataGeometry,
     selector?: QuerySelector
-  ): Promise<RegionQueryResult> {
+  ): Promise<QueryDataResult> {
     if (!this.mercatorBounds) {
-      // Return empty result matching carbonplan/maps structure
       return {
         [this.variable]: [],
         dimensions: [],
         coordinates: { lat: [], lon: [] },
+      }
+    }
+
+    // Point geometries: sample single pixel and return region-shaped result
+    if (geometry.type === 'Point') {
+      const [lon, lat] = geometry.coordinates
+      const coords = { lat: [lat], lon: [lon] }
+
+      if (!this.data) {
+        return {
+          [this.variable]: [],
+          dimensions: ['lat', 'lon'],
+          coordinates: coords,
+        }
+      }
+
+      const pixel = mercatorBoundsToPixel(
+        lon,
+        lat,
+        this.mercatorBounds,
+        this.width,
+        this.height,
+        this.crs ?? 'EPSG:4326'
+      )
+
+      if (!pixel) {
+        return {
+          [this.variable]: [],
+          dimensions: ['lat', 'lon'],
+          coordinates: coords,
+        }
+      }
+
+      const { x, y } = pixel
+      const baseIndex = (y * this.width + x) * this.channels
+      const values: number[] = []
+
+      for (let c = 0; c < this.channels; c++) {
+        const value = this.data[baseIndex + c]
+        if (value !== undefined && value !== null && Number.isFinite(value)) {
+          values.push(value)
+        }
+      }
+
+      return {
+        [this.variable]: values,
+        dimensions: ['lat', 'lon'],
+        coordinates: coords,
       }
     }
 

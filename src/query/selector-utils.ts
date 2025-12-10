@@ -6,7 +6,7 @@
  */
 
 import type { ZarrSelectorsProps } from '../types'
-import type { QuerySelector, PointValueEntry, RegionValues } from './types'
+import type { QuerySelector, PointValueEntry, QueryDataValues } from './types'
 
 /**
  * Checks if a selector contains any array values.
@@ -362,10 +362,10 @@ export function getPointValues(
  * Adapted from carbonplan/maps setObjectValues().
  */
 export function setObjectValues(
-  obj: RegionValues,
+  obj: QueryDataValues,
   keys: (string | number)[],
   value: number
-): RegionValues {
+): QueryDataValues {
   if (keys.length === 0) {
     if (Array.isArray(obj)) {
       obj.push(value)
@@ -373,7 +373,7 @@ export function setObjectValues(
     return obj
   }
 
-  let ref = obj as Record<string | number, RegionValues>
+  let ref = obj as Record<string | number, QueryDataValues>
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]
     if (i === keys.length - 1) {
@@ -388,7 +388,7 @@ export function setObjectValues(
       if (!ref[key]) {
         ref[key] = {}
       }
-      ref = ref[key] as Record<string | number, RegionValues>
+      ref = ref[key] as Record<string | number, QueryDataValues>
     }
   }
 

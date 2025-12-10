@@ -17,10 +17,10 @@ import {
 import type { ZarrStore } from '../zarr-store'
 import type { CRS } from '../types'
 import type {
-  QueryGeometry,
+  QueryDataGeometry,
   QuerySelector,
-  RegionQueryResult,
-  RegionValues,
+  QueryDataResult,
+  QueryDataValues,
 } from './types'
 import {
   computeBoundingBox,
@@ -42,14 +42,14 @@ import {
  */
 export async function queryRegionTiled(
   variable: string,
-  geometry: QueryGeometry,
+  geometry: QueryDataGeometry,
   selector: QuerySelector,
   zarrStore: ZarrStore,
   crs: CRS,
   xyLimits: XYLimits,
   maxZoom: number,
   tileSize: number
-): Promise<RegionQueryResult> {
+): Promise<QueryDataResult> {
   const desc = zarrStore.describe()
   const dimensions = desc.dimensions
   const coordinates = desc.coordinates
@@ -65,7 +65,7 @@ export async function queryRegionTiled(
 
   // Determine if results should be nested
   const useNestedResults = resultDim > 2
-  let results: RegionValues = useNestedResults ? {} : []
+  let results: QueryDataValues = useNestedResults ? {} : []
 
   const latCoords: number[] = []
   const lonCoords: number[] = []
@@ -108,7 +108,7 @@ export async function queryRegionTiled(
           })
         : ['lat', 'lon'],
       coordinates: resultCoordinates,
-    } as RegionQueryResult
+    } as QueryDataResult
     return result
   }
 
@@ -248,7 +248,7 @@ export async function queryRegionTiled(
     [variable]: results,
     dimensions: resultDimensions,
     coordinates: resultCoordinates,
-  } as RegionQueryResult
+  } as QueryDataResult
 
   return result
 }
@@ -259,7 +259,7 @@ export async function queryRegionTiled(
  */
 export async function queryRegionSingleImage(
   variable: string,
-  geometry: QueryGeometry,
+  geometry: QueryDataGeometry,
   selector: QuerySelector,
   data: Float32Array | null,
   width: number,
@@ -271,7 +271,7 @@ export async function queryRegionSingleImage(
   channels: number = 1,
   channelLabels?: (string | number)[][],
   multiValueDimNames?: string[]
-): Promise<RegionQueryResult> {
+): Promise<QueryDataResult> {
   // Warn if selector has multi-valued dimensions
   const hasMultiValue = hasArraySelector(selector)
   if (hasMultiValue) {
@@ -289,7 +289,7 @@ export async function queryRegionSingleImage(
 
   // Determine if results should be nested
   const useNestedResults = resultDim > 2
-  let results: RegionValues = useNestedResults ? {} : []
+  let results: QueryDataValues = useNestedResults ? {} : []
 
   const latCoords: number[] = []
   const lonCoords: number[] = []
@@ -328,7 +328,7 @@ export async function queryRegionSingleImage(
           })
         : ['lat', 'lon'],
       coordinates: resultCoordinates,
-    } as RegionQueryResult
+    } as QueryDataResult
     return result
   }
 
@@ -355,7 +355,7 @@ export async function queryRegionSingleImage(
           })
         : ['lat', 'lon'],
       coordinates: resultCoordinates,
-    } as RegionQueryResult
+    } as QueryDataResult
     return result
   }
 
@@ -436,7 +436,7 @@ export async function queryRegionSingleImage(
     [variable]: results,
     dimensions: resultDimensions,
     coordinates: resultCoordinates,
-  } as RegionQueryResult
+  } as QueryDataResult
 
   return result
 }

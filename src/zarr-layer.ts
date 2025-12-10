@@ -25,10 +25,9 @@ import { TiledMode } from './tiled-mode'
 import { SingleImageMode } from './single-image-mode'
 import { computeWorldOffsets, resolveProjectionParams } from './render-utils'
 import type {
-  PointQueryResult,
-  RegionQueryResult,
   QuerySelector,
-  QueryGeometry,
+  QueryDataGeometry,
+  QueryDataResult,
 } from './query/types'
 
 export class ZarrLayer {
@@ -575,37 +574,27 @@ export class ZarrLayer {
   // ========== Query Interface ==========
 
   /**
-   * Query the data value at a geographic point.
-   * @param lng - Longitude in degrees.
-   * @param lat - Latitude in degrees.
-   * @returns Promise resolving to the query result.
-   */
-  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
-    if (!this.mode?.queryPoint) {
-      return { lng, lat, value: null }
-    }
-
-    return this.mode.queryPoint(lng, lat)
-  }
-
-  /**
    * Query all data values within a geographic region.
-   * @param geometry - GeoJSON Polygon or MultiPolygon geometry.
+   * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
    * @param selector - Optional selector to override the layer's selector.
    * @returns Promise resolving to the query result matching carbonplan/maps structure.
    */
-  async queryRegion(
-    geometry: QueryGeometry,
+  async queryData(
+    geometry: QueryDataGeometry,
     selector?: QuerySelector
-  ): Promise<RegionQueryResult> {
-    if (!this.mode?.queryRegion) {
+  ): Promise<QueryDataResult> {
+    if (!this.mode?.queryData) {
+      const coordLatLon =
+        geometry.type === 'Point'
+          ? { lat: [geometry.coordinates[1]], lon: [geometry.coordinates[0]] }
+          : { lat: [], lon: [] }
       // Return empty result matching carbonplan/maps structure
       return {
         [this.variable]: [],
-        dimensions: [],
-        coordinates: { lat: [], lon: [] },
+        dimensions: ['lat', 'lon'],
+        coordinates: coordLatLon,
       }
     }
-    return this.mode.queryRegion(geometry, selector)
+    return this.mode.queryData(geometry, selector)
   }
 }

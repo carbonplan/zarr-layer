@@ -4,8 +4,9 @@ import { Box, Spinner } from 'theme-ui'
 import { useThemedColormap } from '@carbonplan/colormaps'
 import {
   ZarrLayer,
-  QueryGeometry,
   ZarrLayerOptions,
+  QueryDataResult,
+  QueryDataGeometry,
 } from '@carbonplan/zarr-layer'
 import maplibregl from 'maplibre-gl'
 import mapboxgl from 'mapbox-gl'
@@ -159,6 +160,14 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     [datasetModule, datasetState],
   )
 
+  const isCarbonplan4d = datasetModule.id === 'carbonplan_4d'
+  const currentBand = (datasetState as any)?.band
+  const monthStart = (datasetState as any)?.monthStart ?? null
+  const monthEnd = (datasetState as any)?.monthEnd ?? null
+  const isRangeBand =
+    isCarbonplan4d &&
+    (currentBand === 'tavg_range' || currentBand === 'prec_range')
+
   useEffect(() => {
     if (!map || !isMapLoaded) return
 
@@ -207,8 +216,23 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       clickHandler = (event: any) => {
         const lng = event.lngLat.lng
         const lat = event.lngLat.lat
-        layer.queryPoint(lng, lat).then((result) => {
-          setPointResult(result)
+        const geometry: QueryDataGeometry = {
+          type: 'Point',
+          coordinates: [lng, lat],
+        }
+        let querySelector = layerConfig.selector
+        if (isRangeBand && monthStart !== null && monthEnd !== null) {
+          const monthRange: number[] = []
+          for (let m = monthStart; m <= monthEnd; m++) {
+            monthRange.push(m)
+          }
+          const baseBand = currentBand === 'tavg_range' ? 'tavg' : 'prec'
+          querySelector = { band: baseBand, month: monthRange }
+        }
+
+        layer.queryData(geometry, querySelector).then((result) => {
+          console.log('queryData result', result)
+          setPointResult(result as QueryDataResult)
         })
       }
       map.on('click', clickHandler)
@@ -249,7 +273,12 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     datasetId,
     datasetModule,
     layerConfig.customFrag,
+    layerConfig.selector,
     mapProvider,
+    isRangeBand,
+    monthStart,
+    monthEnd,
+    currentBand,
     setLoadingState,
   ])
 

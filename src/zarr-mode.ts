@@ -15,10 +15,9 @@ import type {
 } from './renderer-types'
 import type { ZarrRenderer } from './zarr-renderer'
 import type {
-  PointQueryResult,
-  RegionQueryResult,
   QuerySelector,
-  QueryGeometry,
+  QueryDataGeometry,
+  QueryDataResult,
 } from './query/types'
 
 export interface RenderContext {
@@ -79,9 +78,8 @@ export interface ZarrMode {
   getSingleImageState?(): SingleImageRenderState | null
 
   // Query methods (optional)
-  queryPoint?(lng: number, lat: number): Promise<PointQueryResult>
-  queryRegion?(
-    geometry: QueryGeometry,
+  queryData?(
+    geometry: QueryDataGeometry,
     selector?: QuerySelector
-  ): Promise<RegionQueryResult>
+  ): Promise<QueryDataResult>
 }

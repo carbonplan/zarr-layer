@@ -9,13 +9,14 @@ export type {
 
 // Query interface exports
 export type {
-  PointQueryResult,
-  RegionQueryResult,
-  RegionValues,
+  QueryDataResult,
+  QueryDataValues,
   QuerySelector,
   QueryGeometry,
+  QueryDataGeometry,
   GeoJSONPolygon,
   GeoJSONMultiPolygon,
+  GeoJSONPoint,
   BoundingBox,
 } from './query/types'
 

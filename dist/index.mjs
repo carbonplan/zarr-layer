@@ -5449,14 +5449,14 @@ function getTilesAtZoomEquirect(zoom, bounds, xyLimits) {
   const xSpan = xMax - xMin;
   const ySpan = yMax - yMin;
   const maxTiles = Math.pow(2, zoom);
-  const lonToTile2 = (lon) => Math.floor((lon - xMin) / xSpan * maxTiles);
+  const lonToTile = (lon) => Math.floor((lon - xMin) / xSpan * maxTiles);
   const latToTile = (lat) => {
     const clamped = Math.max(Math.min(lat, yMax), yMin);
     const norm = (yMax - clamped) / ySpan;
     return Math.floor(norm * maxTiles);
   };
-  let nwX = lonToTile2(west);
-  let seX = lonToTile2(east);
+  let nwX = lonToTile(west);
+  let seX = lonToTile(east);
   const nwY = latToTile(north);
   const seY = latToTile(south);
   const tiles = [];
@@ -5953,65 +5953,6 @@ var ZarrRenderer = class _ZarrRenderer {
 function mercatorYFromLat(lat) {
   return (180 - 180 / Math.PI * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))) / 360;
 }
-function lonToTile(lon, zoom) {
-  return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
-}
-function latToTileMercator(lat, zoom) {
-  const clamped = Math.max(
-    -MERCATOR_LAT_LIMIT,
-    Math.min(MERCATOR_LAT_LIMIT, lat)
-  );
-  const z2 = Math.pow(2, zoom);
-  return Math.floor(
-    (1 - Math.log(
-      Math.tan(clamped * Math.PI / 180) + 1 / Math.cos(clamped * Math.PI / 180)
-    ) / Math.PI) / 2 * z2
-  );
-}
-function latToTileEquirect(lat, zoom, xyLimits) {
-  const { yMin, yMax } = xyLimits;
-  const z2 = Math.pow(2, zoom);
-  const clamped = Math.max(Math.min(lat, yMax), yMin);
-  const norm = (yMax - clamped) / (yMax - yMin);
-  return Math.floor(norm * z2);
-}
-function lonToTileEquirect(lon, zoom, xyLimits) {
-  const { xMin, xMax } = xyLimits;
-  const z2 = Math.pow(2, zoom);
-  const clamped = Math.max(Math.min(lon, xMax), xMin);
-  const norm = (clamped - xMin) / (xMax - xMin);
-  return Math.floor(norm * z2);
-}
-function geoToTile(lng, lat, zoom, crs, xyLimits) {
-  if (crs === "EPSG:4326") {
-    return [
-      zoom,
-      lonToTileEquirect(lng, zoom, xyLimits),
-      latToTileEquirect(lat, zoom, xyLimits)
-    ];
-  }
-  return [zoom, lonToTile(lng, zoom), latToTileMercator(lat, zoom)];
-}
-function geoToTileFraction(lng, lat, tile, crs, xyLimits) {
-  const [z, x, y] = tile;
-  const z2 = Math.pow(2, z);
-  if (crs === "EPSG:4326") {
-    const { xMin, xMax, yMin, yMax } = xyLimits;
-    const xSpan = xMax - xMin;
-    const ySpan = yMax - yMin;
-    const globalFracX2 = (lng - xMin) / xSpan;
-    const globalFracY2 = (yMax - lat) / ySpan;
-    const fracX2 = globalFracX2 * z2 - x;
-    const fracY2 = globalFracY2 * z2 - y;
-    return { fracX: fracX2, fracY: fracY2 };
-  }
-  const globalFracX = (lng + 180) / 360;
-  const sin = Math.sin(lat * Math.PI / 180);
-  const globalFracY = 0.5 - 0.25 * Math.log((1 + sin) / (1 - sin)) / Math.PI;
-  const fracX = globalFracX * z2 - x;
-  const fracY = globalFracY * z2 - y;
-  return { fracX, fracY };
-}
 function tilePixelToLatLon(tile, pixelX, pixelY, tileSize, crs, xyLimits) {
   const [z, x, y] = tile;
   const z2 = Math.pow(2, z);
@@ -6033,6 +5974,10 @@ function computeBoundingBox(geometry) {
   let east = -Infinity;
   let south = Infinity;
   let north = -Infinity;
+  if (geometry.type === "Point") {
+    const [lon, lat] = geometry.coordinates;
+    return { west: lon, east: lon, south: lat, north: lat };
+  }
   const processRing = (ring) => {
     for (const [lon, lat] of ring) {
       if (lon < west) west = lon;
@@ -6063,6 +6008,9 @@ function pointInPolygon(point, polygon) {
   return inside;
 }
 function pointInGeoJSON(point, geometry) {
+  if (geometry.type === "Point") {
+    return point[0] === geometry.coordinates[0] && point[1] === geometry.coordinates[1];
+  }
   if (geometry.type === "Polygon") {
     if (!pointInPolygon(point, geometry.coordinates[0])) return false;
     for (let i = 1; i < geometry.coordinates.length; i++) {
@@ -6093,10 +6041,15 @@ function rectIntersectsGeometry(rect, geometry) {
   for (const corner of rect) {
     if (pointInGeoJSON(corner, geometry)) return true;
   }
-  const rings = geometry.type === "Polygon" ? geometry.coordinates : geometry.coordinates.flatMap((poly) => poly);
-  for (const ring of rings) {
-    for (const [lon, lat] of ring) {
-      if (pointInRect([lon, lat])) return true;
+  if (geometry.type === "Point" && pointInRect([geometry.coordinates[0], geometry.coordinates[1]])) {
+    return true;
+  }
+  if (geometry.type !== "Point") {
+    const rings = geometry.type === "Polygon" ? geometry.coordinates : geometry.coordinates.flatMap((poly) => poly);
+    for (const ring of rings) {
+      for (const [lon, lat] of ring) {
+        if (pointInRect([lon, lat])) return true;
+      }
     }
   }
   const rectEdges = [
@@ -6108,7 +6061,7 @@ function rectIntersectsGeometry(rect, geometry) {
   const edgesFromRing = (ring) => ring.slice(0, -1).map(
     (_, i) => [ring[i], ring[i + 1]]
   );
-  const segments = geometry.type === "Polygon" ? edgesFromRing(geometry.coordinates[0]) : geometry.coordinates.flatMap((poly) => edgesFromRing(poly[0]));
+  const segments = geometry.type === "Polygon" ? edgesFromRing(geometry.coordinates[0]) : geometry.type === "MultiPolygon" ? geometry.coordinates.flatMap((poly) => edgesFromRing(poly[0])) : [];
   const intersects = (a1, a2, b1, b2) => {
     const cross = (v1, v2) => v1[0] * v2[1] - v1[1] * v2[0];
     const sub = (p1, p2) => [p1[0] - p2[0], p1[1] - p2[1]];
@@ -6370,9 +6323,6 @@ function setObjectValues(obj, keys, value) {
   }
   return obj;
 }
-function getSelectorHash(selector) {
-  return JSON.stringify(selector, Object.keys(selector).sort());
-}
 function getChunks(selector, dimensions, coordinates, shape, chunks, x, y) {
   const chunkIndicesToUse = dimensions.map((dimension, i) => {
     const dimLower = dimension.toLowerCase();
@@ -6430,95 +6380,6 @@ function getChunks(selector, dimensions, coordinates, shape, chunks, x, y) {
     result = updatedResult;
   });
   return result;
-}
-
-// src/query/point-query.ts
-async function queryPointTiled(lng, lat, tilesManager, selector, crs, xyLimits, maxZoom, tileSize) {
-  const tile = geoToTile(lng, lat, maxZoom, crs, xyLimits);
-  const [z, x, y] = tile;
-  const { fracX, fracY } = geoToTileFraction(lng, lat, tile, crs, xyLimits);
-  const pixelX = Math.floor(fracX * tileSize);
-  const pixelY = Math.floor(fracY * tileSize);
-  const clampedPixelX = Math.max(0, Math.min(pixelX, tileSize - 1));
-  const clampedPixelY = Math.max(0, Math.min(pixelY, tileSize - 1));
-  if (pixelX < 0 || pixelX >= tileSize || pixelY < 0 || pixelY >= tileSize) {
-    return {
-      lng,
-      lat,
-      value: null,
-      tile: { z, x, y },
-      pixel: { x: clampedPixelX, y: clampedPixelY }
-    };
-  }
-  const selectorHash = getSelectorHash(selector);
-  let tileData = tilesManager.getTile(tile) || null;
-  if (!tileData || !tileData.data || tileData.selectorHash !== selectorHash) {
-    tileData = await tilesManager.fetchTile(tile, selectorHash);
-  }
-  if (!tileData || !tileData.data) {
-    return {
-      lng,
-      lat,
-      value: null,
-      tile: { z, x, y },
-      pixel: { x: clampedPixelX, y: clampedPixelY }
-    };
-  }
-  const channels = tileData.channels || 1;
-  const dataIndex = clampedPixelY * tileSize * channels + clampedPixelX * channels;
-  const value = tileData.data[dataIndex];
-  let bandValues;
-  if (tileData.bandData && tileData.bandData.size > 0) {
-    bandValues = {};
-    for (const [bandName, bandData] of tileData.bandData) {
-      const bandIndex = clampedPixelY * tileSize + clampedPixelX;
-      bandValues[bandName] = bandData[bandIndex] ?? null;
-    }
-  }
-  return {
-    lng,
-    lat,
-    value: value ?? null,
-    bandValues,
-    tile: { z, x, y },
-    pixel: { x: clampedPixelX, y: clampedPixelY }
-  };
-}
-function queryPointSingleImage(lng, lat, data, width, height, bounds, crs, channels = 1, channelLabels, multiValueDimNames) {
-  if (!data) {
-    return { lng, lat, value: null };
-  }
-  const pixel = mercatorBoundsToPixel(lng, lat, bounds, width, height, crs);
-  if (!pixel) {
-    return { lng, lat, value: null };
-  }
-  const { x, y } = pixel;
-  const baseIndex = (y * width + x) * channels;
-  const value = data[baseIndex];
-  let bandValues;
-  if (channels > 1) {
-    bandValues = {};
-    for (let c = 0; c < channels; c++) {
-      const labels = channelLabels?.[c];
-      let key;
-      if (labels && multiValueDimNames && labels.length === multiValueDimNames.length) {
-        key = labels.map((label, i) => `${multiValueDimNames[i]}=${label}`).join("|");
-      } else if (labels && labels.length > 0) {
-        key = labels.join("|");
-      } else {
-        key = `band${c}`;
-      }
-      const channelValue = data[baseIndex + c];
-      bandValues[key] = channelValue ?? null;
-    }
-  }
-  return {
-    lng,
-    lat,
-    value: value ?? null,
-    bandValues,
-    pixel: { x, y }
-  };
 }
 
 // src/query/region-query.ts
@@ -7838,27 +7699,9 @@ var TiledMode = class {
     }
   }
   /**
-   * Query the data value at a geographic point.
+   * Query data for point or region geometries.
    */
-  async queryPoint(lng, lat) {
-    if (!this.tilesManager || !this.xyLimits) {
-      return { lng, lat, value: null };
-    }
-    return queryPointTiled(
-      lng,
-      lat,
-      this.tilesManager,
-      this.selector,
-      this.crs,
-      this.xyLimits,
-      this.maxZoom,
-      this.tileSize
-    );
-  }
-  /**
-   * Query all data values within a geographic region.
-   */
-  async queryRegion(geometry, selector) {
+  async queryData(geometry, selector) {
     if (!this.tilesManager || !this.xyLimits) {
       return {
         [this.variable]: [],
@@ -8206,34 +8049,54 @@ var SingleImageMode = class {
     return typeof value === "number" ? value : 0;
   }
   /**
-   * Query the data value at a geographic point.
+   * Query data for point or region geometries.
    */
-  async queryPoint(lng, lat) {
-    if (!this.mercatorBounds) {
-      return { lng, lat, value: null };
-    }
-    return queryPointSingleImage(
-      lng,
-      lat,
-      this.data,
-      this.width,
-      this.height,
-      this.mercatorBounds,
-      this.crs ?? "EPSG:4326",
-      this.channels,
-      this.channelLabels,
-      this.multiValueDimNames
-    );
-  }
-  /**
-   * Query all data values within a geographic region.
-   */
-  async queryRegion(geometry, selector) {
+  async queryData(geometry, selector) {
     if (!this.mercatorBounds) {
       return {
         [this.variable]: [],
         dimensions: [],
         coordinates: { lat: [], lon: [] }
+      };
+    }
+    if (geometry.type === "Point") {
+      const [lon, lat] = geometry.coordinates;
+      const coords = { lat: [lat], lon: [lon] };
+      if (!this.data) {
+        return {
+          [this.variable]: [],
+          dimensions: ["lat", "lon"],
+          coordinates: coords
+        };
+      }
+      const pixel = mercatorBoundsToPixel(
+        lon,
+        lat,
+        this.mercatorBounds,
+        this.width,
+        this.height,
+        this.crs ?? "EPSG:4326"
+      );
+      if (!pixel) {
+        return {
+          [this.variable]: [],
+          dimensions: ["lat", "lon"],
+          coordinates: coords
+        };
+      }
+      const { x, y } = pixel;
+      const baseIndex = (y * this.width + x) * this.channels;
+      const values = [];
+      for (let c = 0; c < this.channels; c++) {
+        const value = this.data[baseIndex + c];
+        if (value !== void 0 && value !== null && Number.isFinite(value)) {
+          values.push(value);
+        }
+      }
+      return {
+        [this.variable]: values,
+        dimensions: ["lat", "lon"],
+        coordinates: coords
       };
     }
     const desc = this.zarrStore.describe();
@@ -8706,32 +8569,21 @@ var ZarrLayer = class {
   }
   // ========== Query Interface ==========
   /**
-   * Query the data value at a geographic point.
-   * @param lng - Longitude in degrees.
-   * @param lat - Latitude in degrees.
-   * @returns Promise resolving to the query result.
-   */
-  async queryPoint(lng, lat) {
-    if (!this.mode?.queryPoint) {
-      return { lng, lat, value: null };
-    }
-    return this.mode.queryPoint(lng, lat);
-  }
-  /**
    * Query all data values within a geographic region.
-   * @param geometry - GeoJSON Polygon or MultiPolygon geometry.
+   * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
    * @param selector - Optional selector to override the layer's selector.
    * @returns Promise resolving to the query result matching carbonplan/maps structure.
    */
-  async queryRegion(geometry, selector) {
-    if (!this.mode?.queryRegion) {
+  async queryData(geometry, selector) {
+    if (!this.mode?.queryData) {
+      const coordLatLon = geometry.type === "Point" ? { lat: [geometry.coordinates[1]], lon: [geometry.coordinates[0]] } : { lat: [], lon: [] };
       return {
         [this.variable]: [],
-        dimensions: [],
-        coordinates: { lat: [], lon: [] }
+        dimensions: ["lat", "lon"],
+        coordinates: coordLatLon
       };
     }
-    return this.mode.queryRegion(geometry, selector);
+    return this.mode.queryData(geometry, selector);
   }
 };
 export {

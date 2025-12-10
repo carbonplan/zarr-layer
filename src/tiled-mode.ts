@@ -5,12 +5,10 @@ import type {
   TiledRenderState,
 } from './zarr-mode'
 import type {
-  PointQueryResult,
-  RegionQueryResult,
   QuerySelector,
-  QueryGeometry,
+  QueryDataGeometry,
+  QueryDataResult,
 } from './query/types'
-import { queryPointTiled } from './query/point-query'
 import { queryRegionTiled } from './query/region-query'
 import type {
   LoadingStateCallback,
@@ -451,34 +449,13 @@ export class TiledMode implements ZarrMode {
   }
 
   /**
-   * Query the data value at a geographic point.
+   * Query data for point or region geometries.
    */
-  async queryPoint(lng: number, lat: number): Promise<PointQueryResult> {
-    if (!this.tilesManager || !this.xyLimits) {
-      return { lng, lat, value: null }
-    }
-
-    return queryPointTiled(
-      lng,
-      lat,
-      this.tilesManager,
-      this.selector as QuerySelector,
-      this.crs,
-      this.xyLimits,
-      this.maxZoom,
-      this.tileSize
-    )
-  }
-
-  /**
-   * Query all data values within a geographic region.
-   */
-  async queryRegion(
-    geometry: QueryGeometry,
+  async queryData(
+    geometry: QueryDataGeometry,
     selector?: QuerySelector
-  ): Promise<RegionQueryResult> {
+  ): Promise<QueryDataResult> {
     if (!this.tilesManager || !this.xyLimits) {
-      // Return empty result matching carbonplan/maps structure
       return {
         [this.variable]: [],
         dimensions: [],

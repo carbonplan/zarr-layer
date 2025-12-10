@@ -15,7 +15,7 @@ import {
   mercatorNormToLon,
 } from '../map-utils'
 import type { CRS } from '../types'
-import type { BoundingBox, QueryGeometry } from './types'
+import type { BoundingBox, QueryDataGeometry } from './types'
 import { MERCATOR_LAT_LIMIT } from '../constants'
 
 /**
@@ -185,11 +185,16 @@ export function tilePixelToLatLon(
 /**
  * Computes bounding box from GeoJSON geometry.
  */
-export function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
+export function computeBoundingBox(geometry: QueryDataGeometry): BoundingBox {
   let west = Infinity
   let east = -Infinity
   let south = Infinity
   let north = -Infinity
+
+  if (geometry.type === 'Point') {
+    const [lon, lat] = geometry.coordinates
+    return { west: lon, east: lon, south: lat, north: lat }
+  }
 
   const processRing = (ring: number[][]) => {
     for (const [lon, lat] of ring) {
@@ -240,8 +245,15 @@ export function pointInPolygon(
  */
 export function pointInGeoJSON(
   point: [number, number],
-  geometry: QueryGeometry
+  geometry: QueryDataGeometry
 ): boolean {
+  if (geometry.type === 'Point') {
+    return (
+      point[0] === geometry.coordinates[0] &&
+      point[1] === geometry.coordinates[1]
+    )
+  }
+
   if (geometry.type === 'Polygon') {
     // Test outer ring
     if (!pointInPolygon(point, geometry.coordinates[0])) return false
@@ -276,7 +288,7 @@ export function pointInGeoJSON(
  */
 function rectIntersectsGeometry(
   rect: [number, number][],
-  geometry: QueryGeometry
+  geometry: QueryDataGeometry
 ): boolean {
   const rectMinX = Math.min(...rect.map((p) => p[0]))
   const rectMaxX = Math.max(...rect.map((p) => p[0]))
@@ -286,19 +298,29 @@ function rectIntersectsGeometry(
   const pointInRect = (p: [number, number]) =>
     p[0] >= rectMinX && p[0] <= rectMaxX && p[1] >= rectMinY && p[1] <= rectMaxY
 
-  // Any rect corner inside polygon
+  // Any rect corner inside geometry (supports point or polygon)
   for (const corner of rect) {
     if (pointInGeoJSON(corner, geometry)) return true
   }
 
+  // Point geometry inside rectangle
+  if (
+    geometry.type === 'Point' &&
+    pointInRect([geometry.coordinates[0], geometry.coordinates[1]])
+  ) {
+    return true
+  }
+
   // Any polygon vertex inside rect
-  const rings =
-    geometry.type === 'Polygon'
-      ? geometry.coordinates
-      : geometry.coordinates.flatMap((poly) => poly)
-  for (const ring of rings) {
-    for (const [lon, lat] of ring) {
-      if (pointInRect([lon, lat])) return true
+  if (geometry.type !== 'Point') {
+    const rings =
+      geometry.type === 'Polygon'
+        ? geometry.coordinates
+        : geometry.coordinates.flatMap((poly) => poly)
+    for (const ring of rings) {
+      for (const [lon, lat] of ring) {
+        if (pointInRect([lon, lat])) return true
+      }
     }
   }
 
@@ -320,7 +342,9 @@ function rectIntersectsGeometry(
   const segments =
     geometry.type === 'Polygon'
       ? edgesFromRing(geometry.coordinates[0])
-      : geometry.coordinates.flatMap((poly) => edgesFromRing(poly[0]))
+      : geometry.type === 'MultiPolygon'
+      ? geometry.coordinates.flatMap((poly) => edgesFromRing(poly[0]))
+      : []
 
   const intersects = (
     a1: [number, number],
@@ -428,7 +452,7 @@ export function pixelIntersectsGeometryTiled(
   tileSize: number,
   crs: CRS,
   xyLimits: XYLimits,
-  geometry: QueryGeometry
+  geometry: QueryDataGeometry
 ): boolean {
   const rect = pixelRectLonLat(tile, pixelX, pixelY, tileSize, crs, xyLimits)
   return rectIntersectsGeometry(rect, geometry)
@@ -441,7 +465,7 @@ export function pixelIntersectsGeometrySingle(
   x: number,
   y: number,
   crs: CRS,
-  geometry: QueryGeometry
+  geometry: QueryDataGeometry
 ): boolean {
   const rect = pixelRectLonLatSingle(bounds, width, height, x, y, crs)
   return rectIntersectsGeometry(rect, geometry)
@@ -472,7 +496,7 @@ export function getTilesForBoundingBox(
  * Gets tiles that intersect a GeoJSON geometry at a given zoom level.
  */
 export function getTilesForPolygon(
-  geometry: QueryGeometry,
+  geometry: QueryDataGeometry,
   zoom: number,
   crs: CRS,
   xyLimits: XYLimits

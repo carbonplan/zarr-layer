@@ -1,25 +1,7 @@
 import type { ZarrSelectorsProps } from '../types'
 
 /**
- * Result from a point query at a specific geographic location.
- */
-export interface PointQueryResult {
-  /** The queried longitude */
-  lng: number
-  /** The queried latitude */
-  lat: number
-  /** Primary value at the point (or null if no data) */
-  value: number | null
-  /** Values per band if multi-band data */
-  bandValues?: Record<string, number | null>
-  /** Tile coordinates where the data was found */
-  tile?: { z: number; x: number; y: number }
-  /** Pixel coordinates within the tile */
-  pixel?: { x: number; y: number }
-}
-
-/**
- * Nested values structure for multi-dimensional region queries.
+ * Nested values structure for multi-dimensional data queries.
  */
 export interface NestedValues {
   [key: string]: number[] | NestedValues
@@ -27,20 +9,23 @@ export interface NestedValues {
 }
 
 /**
- * Values from a region query. Can be flat array or nested when selector has array values.
+ * Values from a data query. Can be flat array or nested when selector has array values.
  *
  * Flat: `number[]` when selector = `{ month: 1 }`
  * Nested: `{ 1: number[], 2: number[] }` when selector = `{ month: [1, 2] }`
  */
-export type RegionValues = number[] | NestedValues
+export type QueryDataValues = number[] | NestedValues
 
 /**
- * Result from a region query within a geographic polygon.
+ * Result from a data query (point or region).
  * Matches carbonplan/maps structure: { [variable]: values, dimensions, coordinates }
  */
-export interface RegionQueryResult {
+export interface QueryDataResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */
-  [variable: string]: RegionValues | string[] | { [key: string]: (number | string)[] }
+  [variable: string]:
+    | QueryDataValues
+    | string[]
+    | { [key: string]: (number | string)[] }
   /** Dimension names in order (e.g., ['month', 'lat', 'lon']) */
   dimensions: string[]
   /** Coordinate arrays for each dimension */
@@ -82,6 +67,14 @@ export interface BoundingBox {
 }
 
 /**
+ * GeoJSON Point geometry.
+ */
+export interface GeoJSONPoint {
+  type: 'Point'
+  coordinates: [number, number]
+}
+
+/**
  * GeoJSON Polygon geometry.
  */
 export interface GeoJSONPolygon {
@@ -98,6 +91,14 @@ export interface GeoJSONMultiPolygon {
 }
 
 /**
- * Supported GeoJSON geometry types for region queries.
+ * Supported GeoJSON geometry types for polygon-based queries.
  */
 export type QueryGeometry = GeoJSONPolygon | GeoJSONMultiPolygon
+
+/**
+ * Supported GeoJSON geometry types for data queries.
+ */
+export type QueryDataGeometry =
+  | GeoJSONPoint
+  | GeoJSONPolygon
+  | GeoJSONMultiPolygon

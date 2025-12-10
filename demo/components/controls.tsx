@@ -19,9 +19,9 @@ import { DATASET_MODULES } from '../lib/constants'
 import { useAppStore } from '../lib/store'
 import { DatasetControlsProps } from '../datasets/types'
 import type {
-  QueryGeometry,
-  RegionQueryResult,
-  RegionValues,
+  QueryDataGeometry,
+  QueryDataResult,
+  QueryDataValues,
 } from '../../src/query/types'
 
 const colormaps = [
@@ -93,7 +93,7 @@ type BoundsLike =
       getNorth?: () => number
     }
   | [number, number, number, number]
-export const boundsToGeometry = (bounds: BoundsLike): QueryGeometry => {
+export const boundsToGeometry = (bounds: BoundsLike): QueryDataGeometry => {
   let west: number
   let east: number
   let south: number
@@ -162,7 +162,7 @@ const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max)
 
 const collectNumbers = (
-  values: RegionValues | undefined,
+  values: QueryDataValues | undefined,
   fillValue: number,
   depth: number = 0,
 ): number[] => {
@@ -191,7 +191,7 @@ const collectNumbers = (
     if (entry === values) continue // Skip circular references
     // Use concat instead of spread to avoid stack overflow with large arrays
     const collected = collectNumbers(
-      entry as RegionValues,
+      entry as QueryDataValues,
       fillValue,
       depth + 1,
     )
@@ -200,42 +200,8 @@ const collectNumbers = (
   return results
 }
 
-const collectRangeBandValues = (
-  bandValues:
-    | Record<string, RegionValues | number | null | undefined>
-    | undefined,
-  monthStart: number | null,
-  monthEnd: number | null,
-  fillValue: number,
-): number[] => {
-  if (!bandValues || monthStart === null || monthEnd === null) return []
-
-  const inRange = (month: number) => month >= monthStart && month <= monthEnd
-  let collected: number[] = []
-
-  for (const [bandName, values] of Object.entries(bandValues)) {
-    const match = /^month_(\d+)/.exec(bandName)
-    if (!match) continue
-    const month = Number(match[1])
-    if (!Number.isFinite(month) || !inRange(month)) continue
-
-    if (typeof values === 'number') {
-      if (values !== fillValue && Number.isFinite(values))
-        collected.push(values)
-      continue
-    }
-    if (values === null || values === undefined) continue
-    // Use concat instead of spread to avoid stack overflow with large arrays
-    collected = collected.concat(
-      collectNumbers(values as RegionValues, fillValue),
-    )
-  }
-
-  return collected
-}
-
 const getRegionMean = (
-  result: RegionQueryResult | null,
+  result: QueryDataResult | null,
   fillValue: number,
 ): number | null => {
   if (!result) return null
@@ -253,7 +219,7 @@ const getRegionMean = (
     try {
       // Use concat instead of spread to avoid stack overflow with large arrays
       numbers = numbers.concat(
-        collectNumbers(value as RegionValues, fillValue, 0),
+        collectNumbers(value as QueryDataValues, fillValue, 0),
       )
     } catch (error) {
       console.error('Error collecting numbers from', key, error)
@@ -349,30 +315,16 @@ const Controls = () => {
   }, [datasetId, currentBand, setPointResult, setRegionResult])
 
   const pointDisplayValue = useMemo(() => {
-    if (isRangeBand) {
-      const values = collectRangeBandValues(
-        pointResult?.bandValues as
-          | Record<string, RegionValues | number | null | undefined>
-          | undefined,
-        monthStart,
-        monthEnd,
-        fillValue,
-      )
-      if (values.length > 0) {
-        const sum = values.reduce((acc, value) => acc + value, 0)
-        return sum / values.length
-      }
-    }
-
-    const value = pointResult?.value
-    if (
-      typeof value === 'number' &&
-      Number.isFinite(value) &&
-      value !== fillValue
+    if (!pointResult) return null
+    const values = collectNumbers(
+      pointResult[datasetModule.variable] as QueryDataValues,
+      fillValue,
     )
-      return value
-    return null
-  }, [fillValue, isRangeBand, monthEnd, monthStart, pointResult])
+    if (values.length === 0) return null
+    // For range bands or multi-values, show mean of collected values
+    const mean = values.reduce((acc, value) => acc + value, 0) / values.length
+    return Number.isFinite(mean) ? mean : null
+  }, [datasetModule.variable, fillValue, pointResult])
 
   const regionMean = useMemo(
     () => getRegionMean(regionResult, fillValue),
@@ -433,7 +385,10 @@ const Controls = () => {
         )
       }
 
-      const result = await zarrLayer.queryRegion(geometry, querySelector)
+      const result = (await zarrLayer.queryData(
+        geometry,
+        querySelector,
+      )) as QueryDataResult
       console.log('Query result:', result)
       setRegionResult(result)
     } catch (error) {

@@ -61,50 +61,26 @@ interface MapLike {
 }
 
 /**
- * Result from a point query at a specific geographic location.
- */
-interface PointQueryResult {
-    /** The queried longitude */
-    lng: number;
-    /** The queried latitude */
-    lat: number;
-    /** Primary value at the point (or null if no data) */
-    value: number | null;
-    /** Values per band if multi-band data */
-    bandValues?: Record<string, number | null>;
-    /** Tile coordinates where the data was found */
-    tile?: {
-        z: number;
-        x: number;
-        y: number;
-    };
-    /** Pixel coordinates within the tile */
-    pixel?: {
-        x: number;
-        y: number;
-    };
-}
-/**
- * Nested values structure for multi-dimensional region queries.
+ * Nested values structure for multi-dimensional data queries.
  */
 interface NestedValues {
     [key: string]: number[] | NestedValues;
     [key: number]: number[] | NestedValues;
 }
 /**
- * Values from a region query. Can be flat array or nested when selector has array values.
+ * Values from a data query. Can be flat array or nested when selector has array values.
  *
  * Flat: `number[]` when selector = `{ month: 1 }`
  * Nested: `{ 1: number[], 2: number[] }` when selector = `{ month: [1, 2] }`
  */
-type RegionValues = number[] | NestedValues;
+type QueryDataValues = number[] | NestedValues;
 /**
- * Result from a region query within a geographic polygon.
+ * Result from a data query (point or region).
  * Matches carbonplan/maps structure: { [variable]: values, dimensions, coordinates }
  */
-interface RegionQueryResult {
+interface QueryDataResult {
     /** Variable name mapped to its values (flat array or nested based on selector) */
-    [variable: string]: RegionValues | string[] | {
+    [variable: string]: QueryDataValues | string[] | {
         [key: string]: (number | string)[];
     };
     /** Dimension names in order (e.g., ['month', 'lat', 'lon']) */
@@ -131,6 +107,13 @@ interface BoundingBox {
     north: number;
 }
 /**
+ * GeoJSON Point geometry.
+ */
+interface GeoJSONPoint {
+    type: 'Point';
+    coordinates: [number, number];
+}
+/**
  * GeoJSON Polygon geometry.
  */
 interface GeoJSONPolygon {
@@ -145,9 +128,13 @@ interface GeoJSONMultiPolygon {
     coordinates: number[][][][];
 }
 /**
- * Supported GeoJSON geometry types for region queries.
+ * Supported GeoJSON geometry types for polygon-based queries.
  */
 type QueryGeometry = GeoJSONPolygon | GeoJSONMultiPolygon;
+/**
+ * Supported GeoJSON geometry types for data queries.
+ */
+type QueryDataGeometry = GeoJSONPoint | GeoJSONPolygon | GeoJSONMultiPolygon;
 
 /**
  * @module zarr-layer
@@ -224,19 +211,12 @@ declare class ZarrLayer {
     shouldRerenderTiles(): boolean;
     onRemove(_map: MapLike, gl: WebGL2RenderingContext): void;
     /**
-     * Query the data value at a geographic point.
-     * @param lng - Longitude in degrees.
-     * @param lat - Latitude in degrees.
-     * @returns Promise resolving to the query result.
-     */
-    queryPoint(lng: number, lat: number): Promise<PointQueryResult>;
-    /**
      * Query all data values within a geographic region.
-     * @param geometry - GeoJSON Polygon or MultiPolygon geometry.
+     * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
      * @param selector - Optional selector to override the layer's selector.
      * @returns Promise resolving to the query result matching carbonplan/maps structure.
      */
-    queryRegion(geometry: QueryGeometry, selector?: QuerySelector): Promise<RegionQueryResult>;
+    queryData(geometry: QueryDataGeometry, selector?: QuerySelector): Promise<QueryDataResult>;
 }
 
 /**
@@ -254,4 +234,4 @@ declare class ZarrLayer {
  */
 declare function mercatorYFromLat(lat: number): number;
 
-export { type BoundingBox, type ColormapArray, type DimensionNamesProps, type GeoJSONMultiPolygon, type GeoJSONPolygon, type LoadingState, type LoadingStateCallback, type PointQueryResult, type QueryGeometry, type QuerySelector, type RegionQueryResult, type RegionValues, ZarrLayer, type ZarrLayerOptions, mercatorYFromLat };
+export { type BoundingBox, type ColormapArray, type DimensionNamesProps, type GeoJSONMultiPolygon, type GeoJSONPoint, type GeoJSONPolygon, type LoadingState, type LoadingStateCallback, type QueryDataGeometry, type QueryDataResult, type QueryDataValues, type QueryGeometry, type QuerySelector, ZarrLayer, type ZarrLayerOptions, mercatorYFromLat };
