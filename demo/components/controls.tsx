@@ -22,7 +22,7 @@ import type {
   QueryDataGeometry,
   QueryDataResult,
   QueryDataValues,
-} from '../../src/query/types'
+} from '@carbonplan/zarr-layer'
 
 const colormaps = [
   'reds',

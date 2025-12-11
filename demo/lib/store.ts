@@ -7,9 +7,8 @@ import {
   DatasetStateMap,
 } from './constants'
 import { MapProvider } from '../components/map-shared'
-import type { QueryDataResult } from '../../src/query/types'
 import type { MapInstance } from '../components/map-shared'
-import type { ZarrLayer } from '@carbonplan/zarr-layer'
+import type { ZarrLayer, QueryDataResult } from '@carbonplan/zarr-layer'
 import type { LoadingState } from '@carbonplan/zarr-layer'
 
 type DatasetStateStore = {
