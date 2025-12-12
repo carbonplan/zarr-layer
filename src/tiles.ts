@@ -7,8 +7,14 @@ import type {
   SelectorValue,
 } from './types'
 import { ZarrStore } from './zarr-store'
+import { resolveSelectorValue } from './zarr-utils'
+import { mustCreateBuffer, mustCreateTexture } from './webgl-utils'
 
-export interface TileDataCache {
+/**
+ * Tile cache entry containing raw data and WebGL resources.
+ */
+export interface TileData {
+  // Raw chunk data
   chunkData: Float32Array | null
   chunkShape: number[] | null
   chunkIndices?: number[]
@@ -17,7 +23,17 @@ export interface TileDataCache {
   channels: number
   selectorHash: string | null
   loading: boolean
-  lastUsed: number
+
+  // WebGL resources
+  tileTexture: WebGLTexture | null
+  bandTextures: Map<string, WebGLTexture>
+  bandTexturesUploaded: Set<string>
+  bandTexturesConfigured: Set<string>
+  textureUploaded: boolean
+  textureConfigured: boolean
+  vertexBuffer: WebGLBuffer | null
+  pixCoordBuffer: WebGLBuffer | null
+  geometryUploaded: boolean
 }
 
 interface TilesOptions {
@@ -30,6 +46,10 @@ interface TilesOptions {
   bandNames?: string[]
 }
 
+/**
+ * Tile cache managing raw Zarr chunk data, extracted slices, and WebGL resources.
+ * Uses Map's insertion-order iteration for O(1) LRU tracking.
+ */
 export class Tiles {
   private store: ZarrStore
   private selector: NormalizedSelector
@@ -37,9 +57,9 @@ export class Tiles {
   private dimIndices: DimIndicesProps
   private coordinates: Record<string, (string | number)[]>
   private maxCachedTiles: number
-  private tiles: Map<string, TileDataCache> = new Map()
-  private accessOrder: string[] = []
+  private tiles: Map<string, TileData> = new Map()
   private bandNames: string[]
+  private gl: WebGL2RenderingContext | null = null
 
   constructor({
     store,
@@ -57,6 +77,13 @@ export class Tiles {
     this.coordinates = coordinates
     this.maxCachedTiles = maxCachedTiles
     this.bandNames = bandNames
+  }
+
+  /**
+   * Initialize WebGL resources. Must be called before rendering.
+   */
+  setGL(gl: WebGL2RenderingContext) {
+    this.gl = gl
   }
 
   updateBandNames(bandNames: string[]) {
@@ -140,17 +167,6 @@ export class Tiles {
 
   /**
    * Compute which chunk indices to fetch for a given tile.
-   *
-   * Selector shapes we accept:
-   *   - Direct number/string: `this.selector['band'] = 0` or `'t0'`
-   *   - Wrapped: `{ selected: 0 | 't0', type?: 'index' | 'value' }`
-   *   - Arrays (multi-band): `[0, 1]` or `{ selected: [0, 1], type: 'index' }`
-   *
-   * Default is value-based when coordinates exist: we map numbers/strings to
-   * coordinate indices unless `type: 'index'` is set. Unknown strings fall back
-   * to index 0; unmatched numbers fall back to the numeric index. Multi-band
-   * uses the first value's chunk index; if values span chunks we warn and fetch
-   * one chunk.
    */
   private computeChunkIndices(
     levelArray: zarr.Array<zarr.DataType>,
@@ -170,10 +186,12 @@ export class Tiles {
       } else if (dimKey === 'lat') {
         chunkIndices[i] = y
       } else {
-        const dimSelection =
-          this.selector[dimKey] ??
-          this.selector[dimName] ??
-          this.selector[this.dimIndices[dimKey]?.name]
+        const dimSelection = resolveSelectorValue(
+          this.selector,
+          dimKey,
+          dimName,
+          this.dimIndices
+        )
 
         const selectionValues = this.normalizeSelection(dimSelection, dimName)
 
@@ -204,18 +222,7 @@ export class Tiles {
 
   /**
    * Extract a 2D slice (+ optional extra channels) from a loaded chunk.
-   *
-   * When the selector includes multiple values for a non-spatial dimension
-   * (e.g., `{ band: [0, 1] }`), this method packs them into separate channels
-   * of the output texture:
-   *   - 1 value  → R channel only (single band)
-   *   - 2 values → R and G channels (e.g., tavg + prec)
-   *   - 3 values → R, G, B channels
-   *   - 4 values → R, G, B, A channels
-   *
-   * The fragment shader can then access these via texture(tex, coord).r, .g, etc.
    */
-
   private extractSliceFromChunk(
     chunkData: Float32Array,
     chunkShape: number[],
@@ -255,10 +262,12 @@ export class Tiles {
         lonSize = Math.min(chunkShape[i], tileWidth)
         selectorIndices.push(-1)
       } else {
-        const dimSelection =
-          this.selector[dimKey] ??
-          this.selector[dimName] ??
-          this.selector[this.dimIndices[dimKey]?.name]
+        const dimSelection = resolveSelectorValue(
+          this.selector,
+          dimKey,
+          dimName,
+          this.dimIndices
+        )
 
         const selectedValues = this.normalizeSelection(dimSelection, dimName)
 
@@ -326,7 +335,6 @@ export class Tiles {
           }
 
           const srcIdx = getChunkIndex(indices)
-          // Pre-calculate destination index to avoid repeated arithmetic
           const baseDstIdx = latIdx * tileWidth + lonIdx
           const dstIdx = baseDstIdx * channels + channelIdx
 
@@ -347,43 +355,106 @@ export class Tiles {
     return { data: paddedData, channels, bandData }
   }
 
-  private getOrCreateTile(tileKey: string): TileDataCache {
+  /**
+   * Get or create a tile entry, using Map's insertion order for LRU tracking.
+   * O(1) for both access and eviction.
+   */
+  private getOrCreateTile(tileKey: string): TileData {
     let tile = this.tiles.get(tileKey)
-    if (!tile) {
-      tile = {
-        chunkData: null,
-        chunkShape: null,
-        chunkIndices: undefined,
-        data: null,
-        bandData: new Map(),
-        channels: 1,
-        selectorHash: null,
-        loading: false,
-        lastUsed: Date.now(),
-      }
+
+    if (tile) {
+      // Move to end of Map iteration order (most recently used)
+      this.tiles.delete(tileKey)
       this.tiles.set(tileKey, tile)
-      this.accessOrder.push(tileKey)
-      this.evictOldTiles()
-    } else {
-      tile.lastUsed = Date.now()
-      const idx = this.accessOrder.indexOf(tileKey)
-      if (idx > -1) {
-        this.accessOrder.splice(idx, 1)
-        this.accessOrder.push(tileKey)
-      }
+      return tile
     }
+
+    // Create new tile entry with WebGL resources if GL context available
+    tile = {
+      chunkData: null,
+      chunkShape: null,
+      chunkIndices: undefined,
+      data: null,
+      bandData: new Map(),
+      channels: 1,
+      selectorHash: null,
+      loading: false,
+      tileTexture: this.gl ? mustCreateTexture(this.gl) : null,
+      bandTextures: new Map(),
+      bandTexturesUploaded: new Set(),
+      bandTexturesConfigured: new Set(),
+      textureUploaded: false,
+      textureConfigured: false,
+      vertexBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
+      pixCoordBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
+      geometryUploaded: false,
+    }
+    this.tiles.set(tileKey, tile)
+    this.evictOldTiles()
+
     return tile
   }
 
+  /**
+   * Evict oldest tiles when cache exceeds limit.
+   * Uses Map iteration order (oldest first).
+   */
   private evictOldTiles() {
     while (this.tiles.size > this.maxCachedTiles) {
-      const oldestKey = this.accessOrder.shift()
+      // Get first key (oldest entry due to Map insertion order)
+      const oldestKey = this.tiles.keys().next().value
       if (!oldestKey) break
+
+      const tile = this.tiles.get(oldestKey)
+      if (tile && this.gl) {
+        // Clean up WebGL resources
+        if (tile.tileTexture) this.gl.deleteTexture(tile.tileTexture)
+        for (const tex of tile.bandTextures.values()) {
+          this.gl.deleteTexture(tex)
+        }
+        if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer)
+        if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer)
+      }
       this.tiles.delete(oldestKey)
     }
   }
 
-  getTile(tileTuple: TileTuple): TileDataCache | undefined {
+  /**
+   * Get a tile from the cache. Returns undefined if not found.
+   */
+  get(tileKey: string): TileData | undefined {
+    const tile = this.tiles.get(tileKey)
+    if (tile) {
+      // Update LRU order
+      this.tiles.delete(tileKey)
+      this.tiles.set(tileKey, tile)
+    }
+    return tile
+  }
+
+  /**
+   * Get or create a tile entry. Creates WebGL resources if not present.
+   */
+  upsert(tileKey: string): TileData {
+    return this.getOrCreateTile(tileKey)
+  }
+
+  /**
+   * Ensure a band texture exists for a tile.
+   */
+  ensureBandTexture(tileKey: string, bandName: string): WebGLTexture | null {
+    const tile = this.tiles.get(tileKey)
+    if (!tile || !this.gl) return null
+
+    let tex = tile.bandTextures.get(bandName)
+    if (!tex) {
+      tex = mustCreateTexture(this.gl)
+      tile.bandTextures.set(bandName, tex)
+    }
+    return tex
+  }
+
+  getTile(tileTuple: TileTuple): TileData | undefined {
     return this.tiles.get(tileToKey(tileTuple))
   }
 
@@ -417,6 +488,9 @@ export class Tiles {
         tile.channels = sliced.channels
         tile.bandData = sliced.bandData
         tile.selectorHash = selectorHash
+        // Mark textures as needing re-upload
+        tile.textureUploaded = false
+        tile.bandTexturesUploaded.clear()
       } else {
         tile.data = null
         tile.bandData = new Map()
@@ -424,6 +498,8 @@ export class Tiles {
         tile.chunkData = null
         tile.chunkShape = null
         tile.chunkIndices = undefined
+        tile.textureUploaded = false
+        tile.bandTexturesUploaded.clear()
       }
     }
   }
@@ -431,7 +507,7 @@ export class Tiles {
   async fetchTile(
     tileTuple: TileTuple,
     selectorHash: string
-  ): Promise<TileDataCache | null> {
+  ): Promise<TileData | null> {
     const [z] = tileTuple
     const levelPath = this.store.levels[z]
     if (!levelPath) return null
@@ -465,6 +541,8 @@ export class Tiles {
         tile.channels = sliced.channels
         tile.bandData = sliced.bandData
         tile.selectorHash = selectorHash
+        tile.textureUploaded = false
+        tile.bandTexturesUploaded.clear()
         tile.loading = false
         return tile
       }
@@ -489,6 +567,8 @@ export class Tiles {
       tile.channels = sliced.channels
       tile.bandData = sliced.bandData
       tile.selectorHash = selectorHash
+      tile.textureUploaded = false
+      tile.bandTexturesUploaded.clear()
       tile.loading = false
       return tile
     } catch (err) {
@@ -496,5 +576,31 @@ export class Tiles {
       tile.loading = false
       return null
     }
+  }
+
+  /**
+   * Mark all tile geometry as needing re-upload (e.g., after subdivision change).
+   */
+  markGeometryDirty() {
+    for (const tile of this.tiles.values()) {
+      tile.geometryUploaded = false
+    }
+  }
+
+  /**
+   * Clear all tiles and release WebGL resources.
+   */
+  clear() {
+    if (this.gl) {
+      for (const tile of this.tiles.values()) {
+        if (tile.tileTexture) this.gl.deleteTexture(tile.tileTexture)
+        for (const tex of tile.bandTextures.values()) {
+          this.gl.deleteTexture(tex)
+        }
+        if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer)
+        if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer)
+      }
+    }
+    this.tiles.clear()
   }
 }

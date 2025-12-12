@@ -49,15 +49,22 @@ export interface MercatorBounds {
   latMax?: number
 }
 
-function lon2tile(lon: number, zoom: number): number {
+/**
+ * Converts longitude to tile X coordinate at a given zoom level.
+ */
+export function lonToTile(lon: number, zoom: number): number {
   return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom))
 }
 
-function lat2tile(lat: number, zoom: number): number {
+/**
+ * Converts latitude to tile Y coordinate at a given zoom level (Mercator).
+ */
+export function latToTileMercator(lat: number, zoom: number): number {
   const clamped = Math.max(
     -MERCATOR_LAT_LIMIT,
     Math.min(MERCATOR_LAT_LIMIT, lat)
   )
+  const z2 = Math.pow(2, zoom)
   return Math.floor(
     ((1 -
       Math.log(
@@ -66,7 +73,7 @@ function lat2tile(lat: number, zoom: number): number {
       ) /
         Math.PI) /
       2) *
-      Math.pow(2, zoom)
+      z2
   )
 }
 
@@ -85,10 +92,10 @@ export function getTilesAtZoom(
   const [[west, south], [east, north]] = bounds
   const clampedSouth = Math.max(-MERCATOR_LAT_LIMIT, south)
   const clampedNorth = Math.min(MERCATOR_LAT_LIMIT, north)
-  let nwX = lon2tile(west, zoom)
-  let seX = lon2tile(east, zoom)
-  const nwY = lat2tile(clampedNorth, zoom)
-  const seY = lat2tile(clampedSouth, zoom)
+  let nwX = lonToTile(west, zoom)
+  let seX = lonToTile(east, zoom)
+  const nwY = latToTileMercator(clampedNorth, zoom)
+  const seY = latToTileMercator(clampedSouth, zoom)
 
   const maxTiles = Math.pow(2, zoom)
   const tiles: TileTuple[] = []

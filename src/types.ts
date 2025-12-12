@@ -15,14 +15,6 @@ export type Selector = Record<string, SelectorValue | SelectorSpec>
 // Internal normalized form (object per dimension).
 export type NormalizedSelector = Record<string, SelectorSpec>
 
-export interface XYLimits {
-  xMin: number
-  xMax: number
-  yMin: number
-  yMax: number
-}
-
-export interface XYLimitsProps extends XYLimits {}
 
 export interface DimensionNamesProps {
   time?: string

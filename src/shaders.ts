@@ -153,6 +153,9 @@ interface FragmentShaderOptions {
   customFrag?: string
 }
 
+// Compiled once at module load to avoid recompilation on every shader creation
+const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*;/g
+
 export function createFragmentShaderSource(
   options: FragmentShaderOptions
 ): string {
@@ -168,17 +171,18 @@ export function createFragmentShaderSource(
     .join('\n')
 
   let processedFragBody = customFrag || ''
-  const uniformRegex = /uniform\s+\w+\s+(\w+)\s*;/g
+  // Reset lastIndex since we reuse the regex
+  UNIFORM_REGEX.lastIndex = 0
   let match
   const extractedUniforms: string[] = []
 
-  while ((match = uniformRegex.exec(processedFragBody)) !== null) {
+  while ((match = UNIFORM_REGEX.exec(processedFragBody)) !== null) {
     if (!customUniforms.includes(match[1])) {
       extractedUniforms.push(match[0])
     }
   }
 
-  processedFragBody = processedFragBody.replace(uniformRegex, '')
+  processedFragBody = processedFragBody.replace(UNIFORM_REGEX, '')
 
   const extraUniformsDecl = extractedUniforms.join('\n')
 

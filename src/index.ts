@@ -20,5 +20,3 @@ export type {
   GeoJSONPoint,
   BoundingBox,
 } from './query/types'
-
-export { mercatorYFromLat } from './query/query-utils'

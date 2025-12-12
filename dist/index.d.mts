@@ -222,19 +222,4 @@ declare class ZarrLayer {
     queryData(geometry: QueryDataGeometry, selector?: QuerySelector): Promise<QueryDataResult>;
 }
 
-/**
- * @module query-utils
- *
- * Utility functions for query coordinate transformations,
- * mercator corrections, and point-in-polygon tests.
- */
-
-/**
- * Converts latitude to normalized mercator Y coordinate [0, 1].
- * This is the carbonplan/maps formula for latitude correction.
- *
- * From carbonplan/maps src/utils.js:81-88
- */
-declare function mercatorYFromLat(lat: number): number;
-
-export { type BoundingBox, type ColormapArray, type DimensionNamesProps, type GeoJSONMultiPolygon, type GeoJSONPoint, type GeoJSONPolygon, type LoadingState, type LoadingStateCallback, type QueryDataGeometry, type QueryDataResult, type QueryDataValues, type QueryGeometry, type QuerySelector, type Selector, ZarrLayer, type ZarrLayerOptions, mercatorYFromLat };
+export { type BoundingBox, type ColormapArray, type DimensionNamesProps, type GeoJSONMultiPolygon, type GeoJSONPoint, type GeoJSONPolygon, type LoadingState, type LoadingStateCallback, type QueryDataGeometry, type QueryDataResult, type QueryDataValues, type QueryGeometry, type QuerySelector, type Selector, ZarrLayer, type ZarrLayerOptions };

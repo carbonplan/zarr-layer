@@ -15,7 +15,9 @@ import {
 import type { ZarrRenderer } from './zarr-renderer'
 import type { ZarrMode, RenderContext, TileId } from './zarr-mode'
 import type { SingleImageParams } from './renderer-types'
+import { computeTexOverride } from './webgl-utils'
 
+/** Identity matrix for globe rendering (no additional transformation) */
 const IDENTITY_MATRIX = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ])
@@ -28,8 +30,13 @@ interface MapboxTileRenderParams {
 }
 
 /**
- * Creates a 4x4 matrix that transforms from Mercator normalized coordinates [0,1]
- * to clip space [-1,1] for a specific tile region.
+ * Creates a 4x4 transformation matrix for rendering to a specific tile region.
+ *
+ * @param tileX0 - Left edge of tile in normalized Mercator X [0,1]
+ * @param tileY0 - Top edge of tile in normalized Mercator Y [0,1]
+ * @param tileX1 - Right edge of tile in normalized Mercator X [0,1]
+ * @param tileY1 - Bottom edge of tile in normalized Mercator Y [0,1]
+ * @returns 4x4 column-major transformation matrix
  */
 function createTileMatrix(
   tileX0: number,
@@ -37,11 +44,10 @@ function createTileMatrix(
   tileX1: number,
   tileY1: number
 ): Float32Array {
-  const EPS = 1e-7
-  const x0 = Math.max(0, tileX0 + EPS)
-  const x1 = Math.min(1, tileX1 - EPS)
-  const y0 = Math.max(0, tileY0 + EPS)
-  const y1 = Math.min(1, tileY1 - EPS)
+  const x0 = Math.max(0, tileX0)
+  const x1 = Math.min(1, tileX1)
+  const y0 = Math.max(0, tileY0)
+  const y1 = Math.min(1, tileY1)
   const width = x1 - x0
   const height = y1 - y0
 
@@ -63,31 +69,6 @@ function createTileMatrix(
     0,
     1,
   ])
-}
-
-/**
- * Computes texture override values that, when composed with the base transform
- * in renderSingleImage, produce the correct flip(crop(v)) ordering.
- *
- * Background: renderSingleImage applies transforms in crop(flip(v)) order, but
- * for correct lat/lon reprojection we need flip(crop(v)) order. This function
- * computes the override values that achieve the correct result.
- *
- * The formula: overrideOffset = baseScale * cropOffset + baseOffset * (1 - cropScale)
- */
-function computeTexOverride(
-  cropScale: [number, number],
-  cropOffset: [number, number],
-  baseScale: [number, number],
-  baseOffset: [number, number]
-): { texScale: [number, number]; texOffset: [number, number] } {
-  return {
-    texScale: cropScale,
-    texOffset: [
-      baseScale[0] * cropOffset[0] + baseOffset[0] * (1 - cropScale[0]),
-      baseScale[1] * cropOffset[1] + baseOffset[1] * (1 - cropScale[1]),
-    ],
-  }
 }
 
 /**
@@ -244,6 +225,21 @@ function renderSingleImageToTile(
   }
 }
 
+/**
+ * Renders Zarr data to a Mapbox globe tile.
+ *
+ * This is the main entry point for globe tile rendering. It handles:
+ * - Single image (non-tiled) data: Renders the portion of the image that
+ *   intersects the requested tile
+ * - Tiled pyramid data: Finds and renders the appropriate Zarr tiles that
+ *   overlap the Mapbox tile
+ *
+ * For EPSG:4326 data, performs coordinate reprojection to correctly display
+ * equirectangular data on the Mercator-based globe tiles.
+ *
+ * @param params - Render parameters including renderer, mode, tile ID, and context
+ * @returns true if more data is needed (tile data not yet loaded), false otherwise
+ */
 export function renderMapboxTile({
   renderer,
   mode,
@@ -299,7 +295,12 @@ export function renderMapboxTile({
   const mapboxMercY0 = tileId.y / tilesPerSide
   const mapboxMercY1 = (tileId.y + 1) / tilesPerSide
 
-  const tileMatrix = createTileMatrix(mapboxMercX0, mapboxMercY0, mapboxMercX1, mapboxMercY1)
+  const tileMatrix = createTileMatrix(
+    mapboxMercX0,
+    mapboxMercY0,
+    mapboxMercX1,
+    mapboxMercY1
+  )
 
   const crs = mode.getCRS()
   const xyLimits = mode.getXYLimits()

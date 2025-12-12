@@ -112,7 +112,7 @@ export class ZarrRenderer {
     projectionData?: ProjectionData,
     mapboxGlobe?: MapboxGlobeParams,
     matrix?: number[] | Float32Array | Float64Array,
-    isMapboxTile: boolean = false
+    isGlobeTileRender: boolean = false
   ): void {
     const gl = this._gl
 
@@ -163,7 +163,7 @@ export class ZarrRenderer {
         matrix,
         projectionData,
         mapboxGlobe,
-        isMapboxTile
+        isGlobeTileRender
       )
     }
   }
@@ -172,13 +172,13 @@ export class ZarrRenderer {
     shaderProgram: ShaderProgram,
     visibleTiles: import('./map-utils').TileTuple[],
     worldOffsets: number[],
-    tileCache: import('./zarr-tile-cache').TileRenderCache,
+    tileCache: import('./tiles').Tiles,
     tileSize: number,
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
     tileBounds?: Record<string, import('./map-utils').MercatorBounds>,
     customShaderConfig?: CustomShaderConfig,
-    isMapboxTile: boolean = false,
+    isGlobeTileRender: boolean = false,
     tileTexOverrides?: Record<
       string,
       { texScale: [number, number]; texOffset: [number, number] }
@@ -195,7 +195,7 @@ export class ZarrRenderer {
       pixCoordArr,
       tileBounds,
       customShaderConfig,
-      isMapboxTile,
+      isGlobeTileRender,
       tileTexOverrides
     )
   }

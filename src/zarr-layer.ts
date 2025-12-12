@@ -29,7 +29,11 @@ import type {
 import type { ZarrMode, RenderContext } from './zarr-mode'
 import { TiledMode } from './tiled-mode'
 import { SingleImageMode } from './single-image-mode'
-import { computeWorldOffsets, resolveProjectionParams } from './render-utils'
+import {
+  computeWorldOffsets,
+  resolveProjectionParams,
+  isGlobeProjection as checkGlobeProjection,
+} from './render-utils'
 import type {
   QuerySelector,
   QueryDataGeometry,
@@ -116,7 +120,7 @@ export class ZarrLayer {
   private isGlobeProjection(shaderData?: ShaderData): boolean {
     if (shaderData?.vertexShaderPrelude) return true
     const projection = this.map?.getProjection ? this.map.getProjection() : null
-    return projection?.type === 'globe' || projection?.name === 'globe'
+    return checkGlobeProjection(projection)
   }
 
   constructor({
@@ -146,7 +150,6 @@ export class ZarrLayer {
     this.selector = selector
     this.normalizedSelector = normalizeSelector(selector)
     this.selectorHash = this.computeSelectorHash(this.normalizedSelector)
-    this.normalizedSelector = normalizeSelector(selector)
     this.renderingMode = renderingMode
     this.invalidate = () => {}
 

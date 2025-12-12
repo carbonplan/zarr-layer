@@ -1,6 +1,16 @@
 import type { ProjectionData, ShaderData } from './shaders'
 import type { MapLike } from './types'
 
+/**
+ * Detects if the given projection is a globe projection.
+ * Works with both Mapbox (projection.name) and MapLibre (projection.type).
+ */
+export function isGlobeProjection(
+  projection: { type?: string; name?: string } | null | undefined
+): boolean {
+  return projection?.type === 'globe' || projection?.name === 'globe'
+}
+
 interface ProjectionResolution {
   matrix: number[] | Float32Array | Float64Array | null
   shaderData?: ShaderData

@@ -1,6 +1,6 @@
 import type { SingleImageParams } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
-import { configureDataTexture } from './webgl-utils'
+import { configureDataTexture, getTextureFormats } from './webgl-utils'
 
 export interface SingleImageState {
   uploaded: boolean
@@ -114,22 +114,7 @@ export function renderSingleImage(
   configureDataTexture(gl)
 
   if (dataChanged) {
-    const format =
-      channels === 2
-        ? gl.RG
-        : channels === 3
-        ? gl.RGB
-        : channels >= 4
-        ? gl.RGBA
-        : gl.RED
-    const internalFormat =
-      channels === 2
-        ? gl.RG32F
-        : channels === 3
-        ? gl.RGB32F
-        : channels >= 4
-        ? gl.RGBA32F
-        : gl.R32F
+    const { format, internalFormat } = getTextureFormats(gl, channels)
 
     gl.texImage2D(
       gl.TEXTURE_2D,

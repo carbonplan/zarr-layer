@@ -1,11 +1,7 @@
 import * as zarr from 'zarrita'
 import type { Readable } from '@zarrita/storage'
-import type {
-  DimensionNamesProps,
-  DimIndicesProps,
-  XYLimitsProps,
-  CRS,
-} from './types'
+import type { DimensionNamesProps, DimIndicesProps, CRS } from './types'
+import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
 
 const textDecoder = new TextDecoder()
@@ -117,7 +113,7 @@ interface StoreDescription {
   tileSize: number
   crs: CRS
   dimIndices: DimIndicesProps
-  xyLimits: XYLimitsProps | null
+  xyLimits: XYLimits | null
   scaleFactor: number
   addOffset: number
   coordinates: Record<string, (string | number)[]>
@@ -149,7 +145,7 @@ export class ZarrStore {
   tileSize: number = 128
   crs: CRS = 'EPSG:4326'
   dimIndices: DimIndicesProps = {}
-  xyLimits: XYLimitsProps | null = null
+  xyLimits: XYLimits | null = null
   scaleFactor: number = 1
   addOffset: number = 0
   coordinates: Record<string, (string | number)[]> = {}
@@ -516,7 +512,11 @@ export class ZarrStore {
           this.levels.length > 0 ? `${this.levels[0]}/${dimName}` : dimName
         const coordArray = await this._getArray(coordKey)
         coordinates[dimName] = coordArray
-      } catch {}
+      } catch (err) {
+        // Coordinate array not found or failed to load - this is common for
+        // datasets without explicit coordinate arrays
+        console.debug(`Could not load coordinate array for '${dimName}':`, err)
+      }
     }
 
     this.dimIndices = identifyDimensionIndices(

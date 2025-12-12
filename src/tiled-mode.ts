@@ -11,11 +11,9 @@ import type {
   MapLike,
   NormalizedSelector,
   Selector,
-  XYLimitsProps,
   CRS,
 } from './types'
 import { ZarrStore } from './zarr-store'
-import { TileRenderCache } from './zarr-tile-cache'
 import { Tiles } from './tiles'
 import {
   getTilesAtZoom,
@@ -38,11 +36,11 @@ import {
 } from './constants'
 import type { ZarrRenderer } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
+import { isGlobeProjection } from './render-utils'
 
 export class TiledMode implements ZarrMode {
   isMultiscale: true = true
-  private tileCache: TileRenderCache | null = null
-  private tilesManager: Tiles | null = null
+  private tileCache: Tiles | null = null
   private vertexArr: Float32Array = new Float32Array()
   private pixCoordArr: Float32Array = new Float32Array()
   private currentSubdivisions: number = 0
@@ -55,7 +53,7 @@ export class TiledMode implements ZarrMode {
   private zarrStore: ZarrStore
   private visibleTiles: TileTuple[] = []
   private crs: CRS = 'EPSG:4326'
-  private xyLimits: XYLimitsProps | null = null
+  private xyLimits: XYLimits | null = null
   private tileBounds: Record<string, MercatorBounds> = {}
   private loadingCallback: LoadingStateCallback | undefined
   private pendingChunks: Set<string> = new Set()
@@ -89,7 +87,8 @@ export class TiledMode implements ZarrMode {
 
       const bandNames = getBands(this.variable, this.selector)
 
-      this.tilesManager = new Tiles({
+      // Create unified tile cache (handles both data and WebGL resources)
+      this.tileCache = new Tiles({
         store: this.zarrStore,
         selector: this.selector,
         fillValue: desc.fill_value ?? 0,
@@ -108,11 +107,14 @@ export class TiledMode implements ZarrMode {
 
   update(map: MapLike, gl: WebGL2RenderingContext): void {
     if (!this.tileCache) {
-      this.tileCache = new TileRenderCache(gl, MAX_CACHED_TILES)
+      return
     }
 
+    // Initialize WebGL context for the unified cache
+    this.tileCache.setGL(gl)
+
     const projection = map.getProjection ? map.getProjection() : null
-    const isGlobe = projection?.type === 'globe' || projection?.name === 'globe'
+    const isGlobe = isGlobeProjection(projection)
     this.updateGeometryForProjection(isGlobe)
 
     const visibleInfo = this.getVisibleTilesWithContext(map)
@@ -159,11 +161,11 @@ export class TiledMode implements ZarrMode {
       return
     }
 
-    const isMapboxTile = !!context.mapboxGlobe
+    const useMapboxGlobe = !!context.mapboxGlobe
     const shaderProgram = renderer.getProgram(
       context.shaderData,
       context.customShaderConfig,
-      isMapboxTile
+      useMapboxGlobe
     )
 
     renderer.gl.useProgram(shaderProgram.program)
@@ -264,28 +266,16 @@ export class TiledMode implements ZarrMode {
     this.selector = selector
     const bandNames = getBands(this.variable, selector)
 
-    this.tilesManager?.updateSelector(this.selector)
-    this.tilesManager?.updateBandNames(bandNames)
+    this.tileCache?.updateSelector(this.selector)
+    this.tileCache?.updateBandNames(bandNames)
 
-    if (this.tilesManager && this.visibleTiles.length > 0) {
+    if (this.tileCache && this.visibleTiles.length > 0) {
       const currentHash = JSON.stringify(this.selector)
-      await this.tilesManager.reextractTileSlices(
+      // Unified cache handles both data and texture state
+      await this.tileCache.reextractTileSlices(
         this.visibleTiles,
         currentHash
       )
-
-      for (const tileTuple of this.visibleTiles) {
-        const tileKey = tileToKey(tileTuple)
-        const tile = this.tileCache?.get(tileKey)
-        const cache = this.tilesManager.getTile(tileTuple)
-        if (!tile || !cache) continue
-        tile.data = cache.data
-        tile.textureUploaded = false
-        tile.bandTexturesUploaded.clear()
-        tile.channels = cache.channels
-        tile.selectorHash = cache.selectorHash
-        tile.bandData = cache.bandData
-      }
     }
 
     this.invalidate()
@@ -387,7 +377,7 @@ export class TiledMode implements ZarrMode {
     tileTuple: TileTuple,
     selectorHash: string
   ): Promise<Float32Array | null> {
-    if (!this.tilesManager || !this.tileCache) {
+    if (!this.tileCache) {
       const tileKey = tileToKey(tileTuple)
       this.pendingChunks.delete(tileKey)
       this.emitLoadingState()
@@ -395,24 +385,17 @@ export class TiledMode implements ZarrMode {
     }
 
     const tileKey = tileToKey(tileTuple)
-    const tile = this.tileCache.upsert(tileKey)
 
     try {
-      const cache = await this.tilesManager.fetchTile(tileTuple, selectorHash)
+      // Unified cache handles both data fetching and WebGL resources
+      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash)
 
       this.pendingChunks.delete(tileKey)
 
-      if (!cache) {
+      if (!tile) {
         this.emitLoadingState()
         return null
       }
-
-      tile.data = cache.data
-      tile.textureUploaded = false
-      tile.bandTexturesUploaded.clear()
-      tile.selectorHash = cache.selectorHash
-      tile.channels = cache.channels
-      tile.bandData = cache.bandData
 
       this.emitLoadingState()
       this.invalidate()
@@ -432,7 +415,7 @@ export class TiledMode implements ZarrMode {
     geometry: QueryDataGeometry,
     selector?: Selector
   ): Promise<QueryDataResult> {
-    if (!this.tilesManager || !this.xyLimits) {
+    if (!this.tileCache || !this.xyLimits) {
       return {
         [this.variable]: [],
         dimensions: [],

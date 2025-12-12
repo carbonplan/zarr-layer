@@ -13,53 +13,11 @@ import {
   lonToMercatorNorm,
   mercatorNormToLat,
   mercatorNormToLon,
+  lonToTile,
+  latToTileMercator,
 } from '../map-utils'
 import type { CRS } from '../types'
 import type { BoundingBox, QueryDataGeometry } from './types'
-import { MERCATOR_LAT_LIMIT } from '../constants'
-
-/**
- * Converts latitude to normalized mercator Y coordinate [0, 1].
- * This is the carbonplan/maps formula for latitude correction.
- *
- * From carbonplan/maps src/utils.js:81-88
- */
-export function mercatorYFromLat(lat: number): number {
-  return (
-    (180 -
-      (180 / Math.PI) *
-        Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360))) /
-    360
-  )
-}
-
-/**
- * Converts longitude to tile X coordinate at a given zoom level.
- */
-export function lonToTile(lon: number, zoom: number): number {
-  return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom))
-}
-
-/**
- * Converts latitude to tile Y coordinate at a given zoom level (Mercator).
- */
-export function latToTileMercator(lat: number, zoom: number): number {
-  const clamped = Math.max(
-    -MERCATOR_LAT_LIMIT,
-    Math.min(MERCATOR_LAT_LIMIT, lat)
-  )
-  const z2 = Math.pow(2, zoom)
-  return Math.floor(
-    ((1 -
-      Math.log(
-        Math.tan((clamped * Math.PI) / 180) +
-          1 / Math.cos((clamped * Math.PI) / 180)
-      ) /
-        Math.PI) /
-      2) *
-      z2
-  )
-}
 
 /**
  * Converts latitude to tile Y coordinate at a given zoom level (Equirectangular/EPSG:4326).

@@ -1,6 +1,6 @@
 import type { MercatorBounds, TileTuple, XYLimits } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
-import type { TileRenderCache } from './zarr-tile-cache'
+import type { Tiles } from './tiles'
 import type {
   CRS,
   LoadingStateCallback,
@@ -39,7 +39,7 @@ export interface TileId {
 }
 
 export interface TiledRenderState {
-  tileCache: TileRenderCache
+  tileCache: Tiles
   visibleTiles: TileTuple[]
   tileSize: number
   vertexArr: Float32Array

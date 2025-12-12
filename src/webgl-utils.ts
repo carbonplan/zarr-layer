@@ -107,6 +107,37 @@ export function mustCreateBuffer(gl: WebGL2RenderingContext): WebGLBuffer {
 }
 
 /**
+ * Returns the WebGL texture format and internal format for a given number of channels.
+ * Used for uploading Float32 data textures with varying channel counts.
+ *
+ * @param gl - The WebGL2 rendering context.
+ * @param channels - Number of channels (1-4).
+ * @returns Object with `format` and `internalFormat` WebGL constants.
+ */
+export function getTextureFormats(
+  gl: WebGL2RenderingContext,
+  channels: number
+): { format: GLenum; internalFormat: GLenum } {
+  const format =
+    channels === 2
+      ? gl.RG
+      : channels === 3
+      ? gl.RGB
+      : channels >= 4
+      ? gl.RGBA
+      : gl.RED
+  const internalFormat =
+    channels === 2
+      ? gl.RG32F
+      : channels === 3
+      ? gl.RGB32F
+      : channels >= 4
+      ? gl.RGBA32F
+      : gl.R32F
+  return { format, internalFormat }
+}
+
+/**
  * Configures a data texture with NEAREST filtering and CLAMP_TO_EDGE wrapping.
  * Call after binding the texture with gl.bindTexture(gl.TEXTURE_2D, texture).
  */
@@ -115,6 +146,30 @@ export function configureDataTexture(gl: WebGL2RenderingContext) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+}
+
+/**
+ * Computes texture override parameters for composing crop and flip transforms.
+ *
+ * Background: Some renderers apply transforms in crop(flip(v)) order, but
+ * for correct lat/lon reprojection we need flip(crop(v)) order. This function
+ * computes the override values that achieve the correct result.
+ *
+ * Formula: overrideOffset = baseScale * cropOffset + baseOffset * (1 - cropScale)
+ */
+export function computeTexOverride(
+  cropScale: [number, number],
+  cropOffset: [number, number],
+  baseScale: [number, number],
+  baseOffset: [number, number]
+): { texScale: [number, number]; texOffset: [number, number] } {
+  return {
+    texScale: cropScale,
+    texOffset: [
+      baseScale[0] * cropOffset[0] + baseOffset[0] * (1 - cropScale[0]),
+      baseScale[1] * cropOffset[1] + baseOffset[1] * (1 - cropScale[1]),
+    ],
+  }
 }
 
 export function createSubdividedQuad(subdivisions: number): {

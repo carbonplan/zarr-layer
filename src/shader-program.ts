@@ -225,7 +225,7 @@ export function applyProjectionUniforms(
   matrix: number[] | Float32Array | Float64Array,
   projectionData?: ProjectionData,
   mapboxGlobe?: MapboxGlobeParams,
-  mapboxTileRender?: boolean
+  isGlobeTileRender?: boolean
 ) {
   const setMatrix4 = (
     loc: WebGLUniformLocation | null | undefined,
@@ -277,7 +277,7 @@ export function applyProjectionUniforms(
       )
       setFloat(shaderProgram.globeTransitionLoc, mapboxGlobe?.transition ?? 0)
       if (shaderProgram.tileRenderLoc) {
-        gl.uniform1i(shaderProgram.tileRenderLoc, mapboxTileRender ? 1 : 0)
+        gl.uniform1i(shaderProgram.tileRenderLoc, isGlobeTileRender ? 1 : 0)
       }
       break
     }
@@ -287,4 +287,5 @@ export function applyProjectionUniforms(
     }
   }
 }
+
 

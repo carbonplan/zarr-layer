@@ -10,11 +10,7 @@ import { queryRegionSingleImage } from './query/region-query'
 import { mercatorBoundsToPixel } from './query/query-utils'
 import { setObjectValues } from './query/selector-utils'
 import { ZarrStore } from './zarr-store'
-import {
-  boundsToMercatorNorm,
-  MercatorBounds,
-  type XYLimits as MapXYLimits,
-} from './map-utils'
+import { boundsToMercatorNorm, MercatorBounds, type XYLimits } from './map-utils'
 import {
   mustCreateBuffer,
   mustCreateTexture,
@@ -27,7 +23,6 @@ import type {
   MapLike,
   NormalizedSelector,
   Selector,
-  XYLimits,
 } from './types'
 import {
   calculateNearestIndex,
@@ -37,6 +32,7 @@ import {
 import { SINGLE_IMAGE_TILE_SUBDIVISIONS } from './constants'
 import type { ZarrRenderer } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
+import { isGlobeProjection } from './render-utils'
 
 export class SingleImageMode implements ZarrMode {
   isMultiscale: false = false
@@ -128,7 +124,7 @@ export class SingleImageMode implements ZarrMode {
     }
 
     const projection = map.getProjection ? map.getProjection() : null
-    const isGlobe = projection?.type === 'globe' || projection?.name === 'globe'
+    const isGlobe = isGlobeProjection(projection)
     this.updateGeometryForProjection(isGlobe)
 
     if (!this.data && !this.isLoadingData) {
@@ -142,11 +138,11 @@ export class SingleImageMode implements ZarrMode {
     const singleImageState = this.getSingleImageState()
     if (!singleImageState) return
 
-    const isMapboxTile = !!context.mapboxGlobe
+    const useMapboxGlobe = !!context.mapboxGlobe
     const shaderProgram = renderer.getProgram(
       context.shaderData,
       context.customShaderConfig,
-      isMapboxTile
+      useMapboxGlobe
     )
 
     renderer.gl.useProgram(shaderProgram.program)
@@ -252,7 +248,7 @@ export class SingleImageMode implements ZarrMode {
     return this.crs ?? 'EPSG:4326'
   }
 
-  getXYLimits(): MapXYLimits | null {
+  getXYLimits(): XYLimits | null {
     return this.xyLimits
   }
 
@@ -479,8 +475,9 @@ export class SingleImageMode implements ZarrMode {
           return calculateNearestIndex(coords, value)
         }
       }
-    } catch {
-      // fall through
+    } catch (err) {
+      // Coordinate lookup failed - fall through to use raw index value
+      console.debug(`Could not resolve coordinate for '${dimName}':`, err)
     }
 
     return typeof value === 'number' ? value : 0

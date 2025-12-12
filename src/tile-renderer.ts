@@ -7,21 +7,21 @@ import {
 } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
-import type { TileRenderCache, TileRenderData } from './zarr-tile-cache'
-import { configureDataTexture } from './webgl-utils'
+import type { Tiles, TileData } from './tiles'
+import { configureDataTexture, getTextureFormats } from './webgl-utils'
 
 export function renderTiles(
   gl: WebGL2RenderingContext,
   shaderProgram: ShaderProgram,
   visibleTiles: TileTuple[],
   worldOffsets: number[],
-  tileCache: TileRenderCache,
+  tileCache: Tiles,
   tileSize: number,
   vertexArr: Float32Array,
   pixCoordArr: Float32Array,
   tileBounds?: Record<string, MercatorBounds>,
   customShaderConfig?: CustomShaderConfig,
-  mapboxTileRender: boolean = false,
+  isGlobeTileRender: boolean = false,
   tileTexOverrides?: Record<
     string,
     { texScale: [number, number]; texOffset: [number, number] }
@@ -43,7 +43,7 @@ export function renderTiles(
   for (const worldOffset of worldOffsets) {
     gl.uniform1f(
       shaderProgram.worldXOffsetLoc,
-      mapboxTileRender ? 0 : worldOffset
+      isGlobeTileRender ? 0 : worldOffset
     )
 
     for (const tileTuple of visibleTiles) {
@@ -52,7 +52,7 @@ export function renderTiles(
       const tile = tileCache.get(tileKey)
       const bounds = tileBounds?.[tileKey]
 
-      let tileToRender: TileRenderData | null = null
+      let tileToRender: TileData | null = null
       let renderTileKey = tileKey
       let texScale: [number, number] = [1, 1]
       let texOffset: [number, number] = [0, 0]
@@ -77,7 +77,16 @@ export function renderTiles(
         }
       }
 
-      if (!tileToRender || !tileToRender.data) continue
+      // Skip tiles without data or WebGL resources
+      if (
+        !tileToRender ||
+        !tileToRender.data ||
+        !tileToRender.vertexBuffer ||
+        !tileToRender.pixCoordBuffer ||
+        !tileToRender.tileTexture
+      ) {
+        continue
+      }
 
       if (bounds) {
         const scaleX = (bounds.x1 - bounds.x0) / 2
@@ -114,7 +123,7 @@ export function renderTiles(
           gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
         }
       }
-      if (mapboxTileRender && tileTexOverrides?.[tileKey]) {
+      if (isGlobeTileRender && tileTexOverrides?.[tileKey]) {
         const override = tileTexOverrides[tileKey]
         gl.uniform2f(
           shaderProgram.texScaleLoc,
@@ -201,22 +210,7 @@ export function renderTiles(
           tileToRender.textureConfigured = true
         }
         const channels = tileToRender.channels ?? 1
-        const format =
-          channels === 2
-            ? gl.RG
-            : channels === 3
-            ? gl.RGB
-            : channels >= 4
-            ? gl.RGBA
-            : gl.RED
-        const internalFormat =
-          channels === 2
-            ? gl.RG32F
-            : channels === 3
-            ? gl.RGB32F
-            : channels >= 4
-            ? gl.RGBA32F
-            : gl.R32F
+        const { format, internalFormat } = getTextureFormats(gl, channels)
 
         if (!tileToRender.textureUploaded) {
           gl.texImage2D(

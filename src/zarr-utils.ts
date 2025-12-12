@@ -42,7 +42,6 @@ const DIMENSION_ALIASES_DEFAULT: {
     'elevation',
     'depthu',
     'depthv',
-    'depthv',
   ],
 }
 
@@ -269,4 +268,46 @@ export function normalizeSelector(selector: Selector): NormalizedSelector {
     acc[dimName] = toSelectorProps(value)
     return acc
   }, {} as NormalizedSelector)
+}
+
+/**
+ * Resolves a selector value for a dimension, handling the common pattern of
+ * looking up by dimension key, dimension name, or the name stored in dimIndices.
+ *
+ * This consolidates the triple-fallback pattern used throughout the codebase:
+ * ```
+ * selector[dimKey] ?? selector[dimName] ?? selector[dimIndices[dimKey]?.name]
+ * ```
+ *
+ * @param selector - The normalized selector object
+ * @param dimKey - The canonical dimension key (e.g., 'lat', 'lon', 'time')
+ * @param dimName - The actual dimension name from the dataset
+ * @param dimIndices - Optional dimension indices mapping
+ * @returns The resolved SelectorSpec or undefined if not found
+ */
+export function resolveSelectorValue(
+  selector: NormalizedSelector,
+  dimKey: string,
+  dimName?: string,
+  dimIndices?: DimIndicesProps
+): SelectorSpec | undefined {
+  // Try canonical key first (e.g., 'time', 'lat')
+  if (selector[dimKey] !== undefined) {
+    return selector[dimKey]
+  }
+
+  // Try the actual dimension name from the dataset
+  if (dimName && selector[dimName] !== undefined) {
+    return selector[dimName]
+  }
+
+  // Try the name stored in dimIndices for this key
+  if (dimIndices && dimIndices[dimKey]?.name) {
+    const indexedName = dimIndices[dimKey].name
+    if (selector[indexedName] !== undefined) {
+      return selector[indexedName]
+    }
+  }
+
+  return undefined
 }
