@@ -252,6 +252,10 @@ export class TiledMode implements ZarrMode {
     return this.maxZoom
   }
 
+  updateClim(clim: [number, number]): void {
+    this.tileCache?.updateClim(clim)
+  }
+
   private emitLoadingState(): void {
     if (!this.loadingCallback) return
     const chunksLoading = this.pendingChunks.size > 0

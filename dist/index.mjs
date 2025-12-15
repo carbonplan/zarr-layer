@@ -4857,6 +4857,7 @@ uniform float opacity;
 uniform float fillValue;
 uniform float u_scaleFactor;
 uniform float u_addOffset;
+uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
@@ -4870,14 +4871,21 @@ out vec4 color;
 
 void main() {
   ${FRAGMENT_SHADER_REPROJECT}
-  
-  float raw = texture(tex, sample_coord).r;
-  float value = raw * u_scaleFactor + u_addOffset;
-  
-  if (raw == fillValue || isnan(raw) || isnan(value)) {
+
+  float texVal = texture(tex, sample_coord).r;
+
+  // NaN check (fill values converted to NaN during normalization)
+  if (isnan(texVal)) {
     discard;
   }
-  
+
+  float raw = texVal * u_dataScale;
+  float value = raw * u_scaleFactor + u_addOffset;
+
+  if (isnan(value)) {
+    discard;
+  }
+
   float rescaled = (value - clim.x) / (clim.y - clim.x);
   vec4 c = texture(cmap, vec2(rescaled, 0.5));
   color = vec4(c.rgb, opacity);
@@ -4902,13 +4910,12 @@ function createFragmentShaderSource(options) {
   processedFragBody = processedFragBody.replace(UNIFORM_REGEX, "");
   const extraUniformsDecl = extractedUniforms.join("\n");
   const bandReads = bands.map(
-    (name) => `  float ${name}_raw = texture(${name}, sample_coord).r;
+    (name) => `  float ${name}_tex = texture(${name}, sample_coord).r;
+  float ${name}_raw = ${name}_tex * u_dataScale;
   float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
   ).join("\n");
   const bandAliases = bands.map((name) => `  float ${name} = ${name}_val;`).join("\n");
-  const fillValueChecks = bands.map(
-    (name) => `(${name}_raw == fillValue || isnan(${name}_raw) || isnan(${name}_val))`
-  ).join(" || ");
+  const fillValueChecks = bands.map((name) => `(isnan(${name}_tex) || isnan(${name}_val))`).join(" || ");
   const commonDiscardChecks = hasBands ? `
   if (${fillValueChecks}) {
     discard;
@@ -4922,6 +4929,7 @@ uniform vec2 clim;
 uniform float fillValue;
 uniform float u_scaleFactor;
 uniform float u_addOffset;
+uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
@@ -4942,14 +4950,11 @@ ${bandAliases}
 ${processedFragBody ? `
 ${commonDiscardChecks}
 ${processedFragBody.replace(/gl_FragColor/g, "fragColor")}` : bands.length === 1 ? `
-  float value = ${bands[0]};
-  float raw = ${bands[0]}_raw;
-  
-  if (raw == fillValue || isnan(raw) || isnan(value)) {
+  if (isnan(${bands[0]}_tex) || isnan(${bands[0]})) {
     discard;
   }
-  
-  float rescaled = (value - clim.x) / (clim.y - clim.x);
+
+  float rescaled = (${bands[0]} - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
@@ -4957,9 +4962,8 @@ ${processedFragBody.replace(/gl_FragColor/g, "fragColor")}` : bands.length === 1
   if (${fillValueChecks}) {
     discard;
   }
-  
-  float value = ${bands[0]};
-  float rescaled = (value - clim.x) / (clim.y - clim.x);
+
+  float rescaled = (${bands[0]} - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
@@ -4969,6 +4973,7 @@ ${processedFragBody.replace(/gl_FragColor/g, "fragColor")}` : bands.length === 1
 }
 function createMapboxGlobeVertexShaderSource() {
   return `#version 300 es
+
 uniform float scale;
 uniform float scale_x;
 uniform float scale_y;
@@ -5090,6 +5095,19 @@ function computeTexOverride(cropScale, cropOffset, baseScale, baseOffset) {
       baseScale[1] * cropOffset[1] + baseOffset[1] * (1 - cropScale[1])
     ]
   };
+}
+function normalizeDataForTexture(data, fillValue, clim) {
+  const scale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1);
+  const normalized = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (fillValue !== null && v === fillValue || v !== v) {
+      normalized[i] = NaN;
+    } else {
+      normalized[i] = v / scale;
+    }
+  }
+  return { normalized, scale };
 }
 function createSubdividedQuad(subdivisions) {
   const vertices = [];
@@ -5304,7 +5322,8 @@ function createShaderProgram(gl, options) {
     tileRenderLoc: projectionMode === "mapbox-globe" ? gl.getUniformLocation(program, "u_tile_render") : null,
     isEquirectangularLoc: gl.getUniformLocation(program, "u_isEquirectangular"),
     latMinLoc: gl.getUniformLocation(program, "u_latMin"),
-    latMaxLoc: gl.getUniformLocation(program, "u_latMax")
+    latMaxLoc: gl.getUniformLocation(program, "u_latMax"),
+    dataScaleLoc: gl.getUniformLocation(program, "u_dataScale")
   };
   gl.deleteShader(vertexShader);
   gl.deleteShader(fragmentShader);
@@ -5376,11 +5395,14 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
     geometryVersion,
     dataVersion,
     texScale: baseTexScale = [1, 1],
-    texOffset: baseTexOffset = [0, 0]
+    texOffset: baseTexOffset = [0, 0],
+    fillValue = null,
+    clim
   } = params;
   let uploaded = state.uploaded;
   let currentGeometryVersion = state.geometryVersion;
   let currentDataVersion = state.dataVersion;
+  let normalizedData = state.normalizedData;
   const geometryChanged = currentGeometryVersion === null || currentGeometryVersion !== geometryVersion;
   const dataChanged = currentDataVersion === null || currentDataVersion !== dataVersion;
   if (geometryChanged) {
@@ -5391,8 +5413,12 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
     return {
       uploaded,
       geometryVersion: currentGeometryVersion,
-      dataVersion: currentDataVersion
+      dataVersion: currentDataVersion,
+      normalizedData
     };
+  }
+  if (dataChanged || !normalizedData) {
+    normalizedData = normalizeDataForTexture(data, fillValue, clim).normalized;
   }
   const scaleX = tileOverride?.scaleX !== void 0 ? tileOverride.scaleX : (bounds.x1 - bounds.x0) / 2;
   const scaleY = tileOverride?.scaleY !== void 0 ? tileOverride.scaleY : (bounds.y1 - bounds.y0) / 2;
@@ -5439,7 +5465,7 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
       0,
       format,
       gl.FLOAT,
-      data
+      normalizedData
     );
     currentDataVersion = dataVersion;
   }
@@ -5457,7 +5483,8 @@ function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, s
   return {
     uploaded,
     geometryVersion: currentGeometryVersion,
-    dataVersion: currentDataVersion
+    dataVersion: currentDataVersion,
+    normalizedData
   };
 }
 
@@ -5895,7 +5922,8 @@ var ZarrRenderer = class _ZarrRenderer {
     this.singleImageState = {
       uploaded: false,
       geometryVersion: null,
-      dataVersion: null
+      dataVersion: null,
+      normalizedData: null
     };
     this.customShaderConfig = null;
     this._gl = _ZarrRenderer.resolveGl(gl);
@@ -5973,6 +6001,10 @@ var ZarrRenderer = class _ZarrRenderer {
     }
     if (shaderProgram.addOffsetLoc) {
       gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset);
+    }
+    if (shaderProgram.dataScaleLoc) {
+      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1);
+      gl.uniform1f(shaderProgram.dataScaleLoc, dataScale);
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1, 1);
     gl.uniform2f(shaderProgram.texOffsetLoc, 0, 0);
@@ -6844,6 +6876,7 @@ var Tiles = class {
     store,
     selector,
     fillValue,
+    clim = [0, 1],
     dimIndices,
     coordinates,
     maxCachedTiles = 64,
@@ -6854,6 +6887,7 @@ var Tiles = class {
     this.store = store;
     this.selector = selector;
     this.fillValue = fillValue;
+    this.clim = clim;
     this.dimIndices = dimIndices;
     this.coordinates = coordinates;
     this.maxCachedTiles = maxCachedTiles;
@@ -6870,6 +6904,9 @@ var Tiles = class {
   }
   updateSelector(selector) {
     this.selector = selector;
+  }
+  updateClim(clim) {
+    this.clim = clim;
   }
   getDimKeyForName(dimName) {
     const lower = dimName.toLowerCase();
@@ -7066,6 +7103,23 @@ var Tiles = class {
     return { data: paddedData, channels, bandData };
   }
   /**
+   * Apply normalization to tile data for half-float precision safety.
+   * Updates tile.data, tile.bandData with normalized values and stores scale factors.
+   */
+  applyNormalization(tile, sliced) {
+    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim);
+    tile.data = normalized;
+    tile.dataScale = scale;
+    tile.channels = sliced.channels;
+    tile.bandData = /* @__PURE__ */ new Map();
+    tile.bandDataScales = /* @__PURE__ */ new Map();
+    for (const [bandName, bandData] of sliced.bandData) {
+      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim);
+      tile.bandData.set(bandName, bandResult.normalized);
+      tile.bandDataScales.set(bandName, bandResult.scale);
+    }
+  }
+  /**
    * Get or create a tile entry, using Map's insertion order for LRU tracking.
    * O(1) for both access and eviction.
    */
@@ -7085,6 +7139,8 @@ var Tiles = class {
       channels: 1,
       selectorHash: null,
       loading: false,
+      dataScale: 1,
+      bandDataScales: /* @__PURE__ */ new Map(),
       tileTexture: this.gl ? mustCreateTexture(this.gl) : null,
       bandTextures: /* @__PURE__ */ new Map(),
       bandTexturesUploaded: /* @__PURE__ */ new Set(),
@@ -7172,9 +7228,7 @@ var Tiles = class {
           levelArray,
           desiredChunkIndices
         );
-        tile.data = sliced.data;
-        tile.channels = sliced.channels;
-        tile.bandData = sliced.bandData;
+        this.applyNormalization(tile, sliced);
         tile.selectorHash = selectorHash;
         tile.textureUploaded = false;
         tile.bandTexturesUploaded.clear();
@@ -7212,9 +7266,7 @@ var Tiles = class {
           levelArray,
           chunkIndices
         );
-        tile.data = sliced2.data;
-        tile.channels = sliced2.channels;
-        tile.bandData = sliced2.bandData;
+        this.applyNormalization(tile, sliced2);
         tile.selectorHash = selectorHash;
         tile.textureUploaded = false;
         tile.bandTexturesUploaded.clear();
@@ -7233,9 +7285,7 @@ var Tiles = class {
         levelArray,
         chunkIndices
       );
-      tile.data = sliced.data;
-      tile.channels = sliced.channels;
-      tile.bandData = sliced.bandData;
+      this.applyNormalization(tile, sliced);
       tile.selectorHash = selectorHash;
       tile.textureUploaded = false;
       tile.bandTexturesUploaded.clear();
@@ -7850,6 +7900,9 @@ var TiledMode = class {
   getMaxZoom() {
     return this.maxZoom;
   }
+  updateClim(clim) {
+    this.tileCache?.updateClim(clim);
+  }
   emitLoadingState() {
     if (!this.loadingCallback) return;
     const chunksLoading = this.pendingChunks.size > 0;
@@ -8027,6 +8080,7 @@ var SingleImageMode = class {
     this.latIsAscending = null;
     this.texScale = [1, 1];
     this.texOffset = [0, 0];
+    this.clim = [0, 1];
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -8149,7 +8203,8 @@ var SingleImageMode = class {
         geometryVersion: this.geometryVersion,
         dataVersion: this.dataVersion,
         texScale: this.texScale,
-        texOffset: this.texOffset
+        texOffset: this.texOffset,
+        clim: this.clim
       },
       vertexArr: this.vertexArr
     };
@@ -8177,6 +8232,9 @@ var SingleImageMode = class {
   }
   getMaxZoom() {
     return 0;
+  }
+  updateClim(clim) {
+    this.clim = clim;
   }
   emitLoadingState() {
     if (!this.loadingCallback) return;
@@ -8593,6 +8651,7 @@ var ZarrLayer = class {
   }
   setClim(clim) {
     this.clim = clim;
+    this.mode?.updateClim(clim);
     this.invalidate();
   }
   setColormap(colormap) {
@@ -8729,6 +8788,7 @@ var ZarrLayer = class {
     }
     this.mode.setLoadingCallback(this.handleChunkLoadingChange);
     await this.mode.initialize();
+    this.mode.updateClim(this.clim);
     if (this.map && this.gl) {
       this.mode.update(this.map, this.gl);
     }

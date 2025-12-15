@@ -28,6 +28,8 @@ export interface SingleImageParams {
   dataVersion: number
   texScale?: [number, number]
   texOffset?: [number, number]
+  fillValue?: number | null
+  clim: [number, number]
 }
 
 export interface MapboxGlobeParams {

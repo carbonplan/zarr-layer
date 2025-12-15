@@ -27,6 +27,7 @@ export class ZarrRenderer {
     uploaded: false,
     geometryVersion: null,
     dataVersion: null,
+    normalizedData: null,
   }
   private customShaderConfig: CustomShaderConfig | null = null
 
@@ -141,6 +142,11 @@ export class ZarrRenderer {
     }
     if (shaderProgram.addOffsetLoc) {
       gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset)
+    }
+    if (shaderProgram.dataScaleLoc) {
+      // Compute data scale from clim (same formula used in normalizeDataForTexture)
+      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1)
+      gl.uniform1f(shaderProgram.dataScaleLoc, dataScale)
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
     gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)

@@ -202,6 +202,7 @@ export class ZarrLayer {
 
   setClim(clim: [number, number]) {
     this.clim = clim
+    this.mode?.updateClim(clim)
     this.invalidate()
   }
 
@@ -364,6 +365,7 @@ export class ZarrLayer {
 
     this.mode.setLoadingCallback(this.handleChunkLoadingChange)
     await this.mode.initialize()
+    this.mode.updateClim(this.clim)
 
     if (this.map && this.gl) {
       this.mode.update(this.map, this.gl)

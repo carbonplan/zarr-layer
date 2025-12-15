@@ -8,7 +8,11 @@ import type {
 } from './types'
 import { ZarrStore } from './zarr-store'
 import { resolveSelectorValue } from './zarr-utils'
-import { mustCreateBuffer, mustCreateTexture } from './webgl-utils'
+import {
+  mustCreateBuffer,
+  mustCreateTexture,
+  normalizeDataForTexture,
+} from './webgl-utils'
 
 /**
  * Tile cache entry containing raw data and WebGL resources.
@@ -23,6 +27,10 @@ export interface TileData {
   channels: number
   selectorHash: string | null
   loading: boolean
+
+  // Data normalization (for half-float precision on mobile GPUs)
+  dataScale: number // Scale factor applied to data (1.0 = no normalization)
+  bandDataScales: Map<string, number> // Scale factors per band
 
   // WebGL resources
   tileTexture: WebGLTexture | null
@@ -40,6 +48,7 @@ interface TilesOptions {
   store: ZarrStore
   selector: NormalizedSelector
   fillValue: number
+  clim?: [number, number]
   dimIndices: DimIndicesProps
   coordinates: Record<string, (string | number)[]>
   maxCachedTiles?: number
@@ -54,6 +63,7 @@ export class Tiles {
   private store: ZarrStore
   private selector: NormalizedSelector
   private fillValue: number
+  private clim: [number, number]
   private dimIndices: DimIndicesProps
   private coordinates: Record<string, (string | number)[]>
   private maxCachedTiles: number
@@ -65,6 +75,7 @@ export class Tiles {
     store,
     selector,
     fillValue,
+    clim = [0, 1],
     dimIndices,
     coordinates,
     maxCachedTiles = 64,
@@ -73,6 +84,7 @@ export class Tiles {
     this.store = store
     this.selector = selector
     this.fillValue = fillValue
+    this.clim = clim
     this.dimIndices = dimIndices
     this.coordinates = coordinates
     this.maxCachedTiles = maxCachedTiles
@@ -92,6 +104,10 @@ export class Tiles {
 
   updateSelector(selector: NormalizedSelector) {
     this.selector = selector
+  }
+
+  updateClim(clim: [number, number]) {
+    this.clim = clim
   }
 
   private getDimKeyForName(dimName: string): string {
@@ -356,6 +372,30 @@ export class Tiles {
   }
 
   /**
+   * Apply normalization to tile data for half-float precision safety.
+   * Updates tile.data, tile.bandData with normalized values and stores scale factors.
+   */
+  private applyNormalization(
+    tile: TileData,
+    sliced: { data: Float32Array; channels: number; bandData: Map<string, Float32Array> }
+  ): void {
+    // Normalize main data using clim to determine scale
+    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim)
+    tile.data = normalized
+    tile.dataScale = scale
+    tile.channels = sliced.channels
+
+    // Normalize each band's data (use same scale for consistency)
+    tile.bandData = new Map()
+    tile.bandDataScales = new Map()
+    for (const [bandName, bandData] of sliced.bandData) {
+      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim)
+      tile.bandData.set(bandName, bandResult.normalized)
+      tile.bandDataScales.set(bandName, bandResult.scale)
+    }
+  }
+
+  /**
    * Get or create a tile entry, using Map's insertion order for LRU tracking.
    * O(1) for both access and eviction.
    */
@@ -379,6 +419,8 @@ export class Tiles {
       channels: 1,
       selectorHash: null,
       loading: false,
+      dataScale: 1.0,
+      bandDataScales: new Map(),
       tileTexture: this.gl ? mustCreateTexture(this.gl) : null,
       bandTextures: new Map(),
       bandTexturesUploaded: new Set(),
@@ -484,9 +526,7 @@ export class Tiles {
           levelArray,
           desiredChunkIndices
         )
-        tile.data = sliced.data
-        tile.channels = sliced.channels
-        tile.bandData = sliced.bandData
+        this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
         // Mark textures as needing re-upload
         tile.textureUploaded = false
@@ -537,9 +577,7 @@ export class Tiles {
           levelArray,
           chunkIndices
         )
-        tile.data = sliced.data
-        tile.channels = sliced.channels
-        tile.bandData = sliced.bandData
+        this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
         tile.textureUploaded = false
         tile.bandTexturesUploaded.clear()
@@ -563,9 +601,7 @@ export class Tiles {
         levelArray,
         chunkIndices
       )
-      tile.data = sliced.data
-      tile.channels = sliced.channels
-      tile.bandData = sliced.bandData
+      this.applyNormalization(tile, sliced)
       tile.selectorHash = selectorHash
       tile.textureUploaded = false
       tile.bandTexturesUploaded.clear()

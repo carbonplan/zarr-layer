@@ -68,6 +68,7 @@ export interface ZarrMode {
   getMaxZoom(): number
   getTiledState?(): TiledRenderState | null
   getSingleImageState?(): SingleImageRenderState | null
+  updateClim(clim: [number, number]): void
 
   // Query methods (optional)
   queryData?(

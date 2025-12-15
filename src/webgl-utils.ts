@@ -172,6 +172,40 @@ export function computeTexOverride(
   }
 }
 
+/**
+ * Normalize data for texture upload to ensure half-float safe range on mobile GPUs.
+ * Uses clim to determine scale (avoids scanning all data).
+ * Fill values are converted to NaN for reliable detection.
+ *
+ * @param data - Raw float data to normalize
+ * @param fillValue - Fill value to convert to NaN
+ * @param clim - Color limits [min, max] used to determine normalization scale
+ * @returns Object with normalized data and scale factor
+ */
+export function normalizeDataForTexture(
+  data: Float32Array,
+  fillValue: number | null,
+  clim: [number, number]
+): { normalized: Float32Array; scale: number } {
+  // Use clim to determine scale
+  const scale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
+
+  const normalized = new Float32Array(data.length)
+
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i]
+    // Convert fill values to NaN (fill values may exceed half-float range on mobile GPUs)
+    // NaN is preserved through texture reads and caught by the shader's NaN check
+    if ((fillValue !== null && v === fillValue) || v !== v) {
+      normalized[i] = NaN
+    } else {
+      normalized[i] = v / scale
+    }
+  }
+
+  return { normalized, scale }
+}
+
 export function createSubdividedQuad(subdivisions: number): {
   vertexArr: Float32Array
   texCoordArr: Float32Array

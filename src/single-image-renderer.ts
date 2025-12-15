@@ -1,11 +1,16 @@
 import type { SingleImageParams } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
-import { configureDataTexture, getTextureFormats } from './webgl-utils'
+import {
+  configureDataTexture,
+  getTextureFormats,
+  normalizeDataForTexture,
+} from './webgl-utils'
 
 export interface SingleImageState {
   uploaded: boolean
   geometryVersion: number | null
   dataVersion: number | null
+  normalizedData: Float32Array | null
 }
 
 export function renderSingleImage(
@@ -38,11 +43,14 @@ export function renderSingleImage(
     dataVersion,
     texScale: baseTexScale = [1, 1],
     texOffset: baseTexOffset = [0, 0],
+    fillValue = null,
+    clim,
   } = params
 
   let uploaded = state.uploaded
   let currentGeometryVersion = state.geometryVersion
   let currentDataVersion = state.dataVersion
+  let normalizedData = state.normalizedData
 
   const geometryChanged =
     currentGeometryVersion === null ||
@@ -60,7 +68,13 @@ export function renderSingleImage(
       uploaded,
       geometryVersion: currentGeometryVersion,
       dataVersion: currentDataVersion,
+      normalizedData,
     }
+  }
+
+  // Normalize data when it changes (use clim to determine scale)
+  if (dataChanged || !normalizedData) {
+    normalizedData = normalizeDataForTexture(data, fillValue, clim).normalized
   }
 
   const scaleX =
@@ -125,7 +139,7 @@ export function renderSingleImage(
       0,
       format,
       gl.FLOAT,
-      data
+      normalizedData
     )
     currentDataVersion = dataVersion
   }
@@ -149,5 +163,6 @@ export function renderSingleImage(
     uploaded,
     geometryVersion: currentGeometryVersion,
     dataVersion: currentDataVersion,
+    normalizedData,
   }
 }

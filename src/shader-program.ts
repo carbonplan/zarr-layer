@@ -52,6 +52,7 @@ export interface ShaderProgram {
   isEquirectangularLoc: WebGLUniformLocation | null
   latMinLoc: WebGLUniformLocation | null
   latMaxLoc: WebGLUniformLocation | null
+  dataScaleLoc: WebGLUniformLocation | null
 }
 
 export function resolveProjectionMode(
@@ -211,6 +212,7 @@ export function createShaderProgram(
     isEquirectangularLoc: gl.getUniformLocation(program, 'u_isEquirectangular'),
     latMinLoc: gl.getUniformLocation(program, 'u_latMin'),
     latMaxLoc: gl.getUniformLocation(program, 'u_latMax'),
+    dataScaleLoc: gl.getUniformLocation(program, 'u_dataScale'),
   }
 
   gl.deleteShader(vertexShader)

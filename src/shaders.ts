@@ -119,6 +119,7 @@ uniform float opacity;
 uniform float fillValue;
 uniform float u_scaleFactor;
 uniform float u_addOffset;
+uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
@@ -132,14 +133,21 @@ out vec4 color;
 
 void main() {
   ${FRAGMENT_SHADER_REPROJECT}
-  
-  float raw = texture(tex, sample_coord).r;
-  float value = raw * u_scaleFactor + u_addOffset;
-  
-  if (raw == fillValue || isnan(raw) || isnan(value)) {
+
+  float texVal = texture(tex, sample_coord).r;
+
+  // NaN check (fill values converted to NaN during normalization)
+  if (isnan(texVal)) {
     discard;
   }
-  
+
+  float raw = texVal * u_dataScale;
+  float value = raw * u_scaleFactor + u_addOffset;
+
+  if (isnan(value)) {
+    discard;
+  }
+
   float rescaled = (value - clim.x) / (clim.y - clim.x);
   vec4 c = texture(cmap, vec2(rescaled, 0.5));
   color = vec4(c.rgb, opacity);
@@ -189,7 +197,7 @@ export function createFragmentShaderSource(
   const bandReads = bands
     .map(
       (name) =>
-        `  float ${name}_raw = texture(${name}, sample_coord).r;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+        `  float ${name}_tex = texture(${name}, sample_coord).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
     )
     .join('\n')
 
@@ -198,10 +206,7 @@ export function createFragmentShaderSource(
     .join('\n')
 
   const fillValueChecks = bands
-    .map(
-      (name) =>
-        `(${name}_raw == fillValue || isnan(${name}_raw) || isnan(${name}_val))`
-    )
+    .map((name) => `(isnan(${name}_tex) || isnan(${name}_val))`)
     .join(' || ')
 
   const commonDiscardChecks = hasBands
@@ -220,6 +225,7 @@ uniform vec2 clim;
 uniform float fillValue;
 uniform float u_scaleFactor;
 uniform float u_addOffset;
+uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
@@ -244,14 +250,11 @@ ${commonDiscardChecks}
 ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
     : bands.length === 1
     ? `
-  float value = ${bands[0]};
-  float raw = ${bands[0]}_raw;
-  
-  if (raw == fillValue || isnan(raw) || isnan(value)) {
+  if (isnan(${bands[0]}_tex) || isnan(${bands[0]})) {
     discard;
   }
-  
-  float rescaled = (value - clim.x) / (clim.y - clim.x);
+
+  float rescaled = (${bands[0]} - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
@@ -260,9 +263,8 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
   if (${fillValueChecks}) {
     discard;
   }
-  
-  float value = ${bands[0]};
-  float rescaled = (value - clim.x) / (clim.y - clim.x);
+
+  float rescaled = (${bands[0]} - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(rescaled, 0.5));
   fragColor = vec4(c.rgb, opacity);
   fragColor.rgb *= fragColor.a;
@@ -280,6 +282,7 @@ ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
  */
 export function createMapboxGlobeVertexShaderSource(): string {
   return `#version 300 es
+
 uniform float scale;
 uniform float scale_x;
 uniform float scale_y;

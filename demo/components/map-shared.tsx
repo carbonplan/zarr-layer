@@ -20,7 +20,6 @@ export type MapProvider = 'maplibre' | 'mapbox'
 const backgroundColor = '#1b1e23'
 const mapLibreTheme = {
   ...namedFlavor('black'),
-  buildings: 'rgba(0, 0, 0, 0)',
   background: backgroundColor,
   earth: backgroundColor,
   park_a: backgroundColor,

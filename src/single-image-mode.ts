@@ -70,6 +70,7 @@ export class SingleImageMode implements ZarrMode {
   private latIsAscending: boolean | null = null
   private texScale: [number, number] = [1, 1]
   private texOffset: [number, number] = [0, 0]
+  private clim: [number, number] = [0, 1]
 
   constructor(
     store: ZarrStore,
@@ -222,6 +223,7 @@ export class SingleImageMode implements ZarrMode {
         dataVersion: this.dataVersion,
         texScale: this.texScale,
         texOffset: this.texOffset,
+        clim: this.clim,
       },
       vertexArr: this.vertexArr,
     }
@@ -254,6 +256,10 @@ export class SingleImageMode implements ZarrMode {
 
   getMaxZoom(): number {
     return 0
+  }
+
+  updateClim(clim: [number, number]): void {
+    this.clim = clim
   }
 
   private emitLoadingState(): void {
