@@ -8565,7 +8565,7 @@ var ZarrLayer = class {
     fillValue,
     customFrag,
     uniforms,
-    renderingMode = "2d",
+    renderingMode = "3d",
     onLoadingStateChange
   }) {
     this.type = "custom";

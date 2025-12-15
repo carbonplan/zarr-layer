@@ -136,7 +136,7 @@ export class ZarrLayer {
     fillValue,
     customFrag,
     uniforms,
-    renderingMode = '2d',
+    renderingMode = '3d',
     onLoadingStateChange,
   }: ZarrLayerOptions) {
     this.id = id
