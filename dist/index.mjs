@@ -4432,10 +4432,10 @@ var _ZarrStore = class _ZarrStore {
       latIsAscending: this.latIsAscending
     };
   }
-  async getChunk(level, chunkIndices) {
+  async getChunk(level, chunkIndices, options) {
     const key = `${level}/${this.variable}`;
     const array = await this._getArray(key);
-    return array.getChunk(chunkIndices);
+    return array.getChunk(chunkIndices, options);
   }
   async getLevelArray(level) {
     const key = `${level}/${this.variable}`;
@@ -7248,7 +7248,7 @@ var Tiles = class {
       }
     }
   }
-  async fetchTile(tileTuple, selectorHash, version) {
+  async fetchTile(tileTuple, selectorHash, version, signal) {
     const [z] = tileTuple;
     const levelPath = this.store.levels[z];
     if (!levelPath) return null;
@@ -7282,7 +7282,7 @@ var Tiles = class {
         tile.loading = false;
         return tile;
       }
-      const chunk = await this.store.getChunk(levelPath, chunkIndices);
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal });
       const chunkShape = chunk.shape.map((n) => Number(n));
       const chunkData = chunk.data instanceof Float32Array ? new Float32Array(chunk.data.buffer) : Float32Array.from(chunk.data);
       if (version < tile.selectorVersion) {
@@ -7306,8 +7306,11 @@ var Tiles = class {
       tile.loading = false;
       return tile;
     } catch (err) {
-      console.error("Error fetching tile data:", err);
       tile.loading = false;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return null;
+      }
+      console.error("Error fetching tile data:", err);
       return null;
     }
   }
@@ -7765,6 +7768,7 @@ var TiledMode = class {
     this.metadataLoading = false;
     this.currentLevel = null;
     this.selectorVersion = 0;
+    this.pendingControllers = /* @__PURE__ */ new Map();
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -8014,12 +8018,15 @@ var TiledMode = class {
     return bounds;
   }
   async prefetchTileData(tiles, selectorHash, version) {
+    const controller = new AbortController();
+    this.pendingControllers.set(version, controller);
     const fetchPromises = tiles.map(
-      (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version)
+      (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
     );
     await Promise.all(fetchPromises);
+    this.pendingControllers.delete(version);
   }
-  async fetchTileData(tileTuple, selectorHash, version) {
+  async fetchTileData(tileTuple, selectorHash, version, signal) {
     if (!this.tileCache) {
       const tileKey2 = tileToKey(tileTuple);
       this.pendingChunks.delete(tileKey2);
@@ -8028,19 +8035,31 @@ var TiledMode = class {
     }
     const tileKey = tileToKey(tileTuple);
     try {
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version);
+      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version, signal);
       this.pendingChunks.delete(tileKey);
       if (!tile) {
         this.emitLoadingState();
         return null;
       }
+      this.cancelOlderRequests(version);
       this.emitLoadingState();
       this.invalidate();
       return tile.data;
     } catch (err) {
       this.pendingChunks.delete(tileKey);
       this.emitLoadingState();
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return null;
+      }
       throw err;
+    }
+  }
+  cancelOlderRequests(completedVersion) {
+    for (const [version, controller] of this.pendingControllers) {
+      if (version < completedVersion) {
+        controller.abort();
+        this.pendingControllers.delete(version);
+      }
     }
   }
   /**
@@ -8103,6 +8122,7 @@ var SingleImageMode = class {
     this.metadataLoading = false;
     this.fetchRequestId = 0;
     this.lastRenderedRequestId = 0;
+    this.pendingControllers = /* @__PURE__ */ new Map();
     this.dimensionValues = {};
     this.latIsAscending = null;
     this.texScale = [1, 1];
@@ -8291,6 +8311,9 @@ var SingleImageMode = class {
   async fetchData() {
     if (!this.zarrArray || this.isRemoved) return;
     const requestId = ++this.fetchRequestId;
+    const controller = new AbortController();
+    this.pendingControllers.set(requestId, controller);
+    const signal = controller.signal;
     this.isLoadingData = true;
     this.emitLoadingState();
     try {
@@ -8368,10 +8391,13 @@ var SingleImageMode = class {
       this.multiValueDimNames = multiValueDims.map((d) => d.dimName);
       this.channelLabels = channelLabelCombinations;
       if (numChannels === 1) {
-        const data = await get2(this.zarrArray, baseSliceArgs);
+        const data = await get2(this.zarrArray, baseSliceArgs, {
+          opts: { signal }
+        });
         if (this.isRemoved) return;
         if (requestId < this.lastRenderedRequestId) return;
         this.lastRenderedRequestId = requestId;
+        this.cancelOlderRequests(requestId);
         this.data = new Float32Array(data.data.buffer);
         this.dataVersion++;
       } else {
@@ -8384,7 +8410,9 @@ var SingleImageMode = class {
           for (let i = 0; i < multiValueDims.length; i++) {
             sliceArgs[multiValueDims[i].dimIndex] = combo[i];
           }
-          const bandData = await get2(this.zarrArray, sliceArgs);
+          const bandData = await get2(this.zarrArray, sliceArgs, {
+            opts: { signal }
+          });
           if (this.isRemoved) return;
           const bandArray = new Float32Array(
             bandData.data.buffer
@@ -8395,16 +8423,28 @@ var SingleImageMode = class {
         }
         if (requestId < this.lastRenderedRequestId) return;
         this.lastRenderedRequestId = requestId;
+        this.cancelOlderRequests(requestId);
         this.data = packedData;
         this.dataVersion++;
       }
       this.invalidate();
     } catch (err) {
-      console.error("Error fetching single image data:", err);
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        console.error("Error fetching single image data:", err);
+      }
     } finally {
+      this.pendingControllers.delete(requestId);
       if (requestId === this.fetchRequestId) {
         this.isLoadingData = false;
         this.emitLoadingState();
+      }
+    }
+  }
+  cancelOlderRequests(completedRequestId) {
+    for (const [id, controller] of this.pendingControllers) {
+      if (id < completedRequestId) {
+        controller.abort();
+        this.pendingControllers.delete(id);
       }
     }
   }

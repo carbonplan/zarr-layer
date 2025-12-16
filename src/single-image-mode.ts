@@ -10,7 +10,11 @@ import { queryRegionSingleImage } from './query/region-query'
 import { mercatorBoundsToPixel } from './query/query-utils'
 import { setObjectValues } from './query/selector-utils'
 import { ZarrStore } from './zarr-store'
-import { boundsToMercatorNorm, MercatorBounds, type XYLimits } from './map-utils'
+import {
+  boundsToMercatorNorm,
+  MercatorBounds,
+  type XYLimits,
+} from './map-utils'
 import {
   mustCreateBuffer,
   mustCreateTexture,
@@ -63,6 +67,7 @@ export class SingleImageMode implements ZarrMode {
   private metadataLoading: boolean = false
   private fetchRequestId: number = 0
   private lastRenderedRequestId: number = 0
+  private pendingControllers: Map<number, AbortController> = new Map()
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
   private latIsAscending: boolean | null = null
   private texScale: [number, number] = [1, 1]
@@ -293,6 +298,12 @@ export class SingleImageMode implements ZarrMode {
     if (!this.zarrArray || this.isRemoved) return
 
     const requestId = ++this.fetchRequestId
+
+    // Create controller for this request
+    const controller = new AbortController()
+    this.pendingControllers.set(requestId, controller)
+    const signal = controller.signal
+
     this.isLoadingData = true
     this.emitLoadingState()
 
@@ -399,7 +410,9 @@ export class SingleImageMode implements ZarrMode {
       this.channelLabels = channelLabelCombinations
 
       if (numChannels === 1) {
-        const data = (await zarr.get(this.zarrArray, baseSliceArgs)) as {
+        const data = (await zarr.get(this.zarrArray, baseSliceArgs, {
+          opts: { signal },
+        })) as {
           data: ArrayLike<number>
         }
         if (this.isRemoved) return
@@ -407,6 +420,7 @@ export class SingleImageMode implements ZarrMode {
         // This ensures frames render in order when scrubbing through time
         if (requestId < this.lastRenderedRequestId) return
         this.lastRenderedRequestId = requestId
+        this.cancelOlderRequests(requestId)
         this.data = new Float32Array((data.data as Float32Array).buffer)
         this.dataVersion++
       } else {
@@ -422,7 +436,9 @@ export class SingleImageMode implements ZarrMode {
             sliceArgs[multiValueDims[i].dimIndex] = combo[i]
           }
 
-          const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
+          const bandData = (await zarr.get(this.zarrArray, sliceArgs, {
+            opts: { signal },
+          })) as {
             data: ArrayLike<number>
           }
           if (this.isRemoved) return
@@ -438,17 +454,31 @@ export class SingleImageMode implements ZarrMode {
         // Only render if this request is newer than what we've already shown
         if (requestId < this.lastRenderedRequestId) return
         this.lastRenderedRequestId = requestId
+        this.cancelOlderRequests(requestId)
         this.data = packedData
         this.dataVersion++
       }
 
       this.invalidate()
     } catch (err) {
-      console.error('Error fetching single image data:', err)
+      // AbortError is expected when requests are cancelled - don't log as error
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        console.error('Error fetching single image data:', err)
+      }
     } finally {
+      this.pendingControllers.delete(requestId)
       if (requestId === this.fetchRequestId) {
         this.isLoadingData = false
         this.emitLoadingState()
+      }
+    }
+  }
+
+  private cancelOlderRequests(completedRequestId: number) {
+    for (const [id, controller] of this.pendingControllers) {
+      if (id < completedRequestId) {
+        controller.abort()
+        this.pendingControllers.delete(id)
       }
     }
   }
@@ -486,7 +516,9 @@ export class SingleImageMode implements ZarrMode {
         if (coordIdx >= 0) return coordIdx
         throw new Error(
           `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
-            `Available values: [${(coords as (number | string)[]).slice(0, 10).join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
+            `Available values: [${(coords as (number | string)[])
+              .slice(0, 10)
+              .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
             `Use { selected: <index>, type: 'index' } to select by array index instead.`
         )
       }

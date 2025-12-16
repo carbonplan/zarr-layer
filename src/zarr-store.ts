@@ -271,11 +271,12 @@ export class ZarrStore {
 
   async getChunk(
     level: string,
-    chunkIndices: number[]
+    chunkIndices: number[],
+    options?: { signal?: AbortSignal }
   ): Promise<zarr.Chunk<zarr.DataType>> {
     const key = `${level}/${this.variable}`
     const array = await this._getArray(key)
-    return array.getChunk(chunkIndices)
+    return array.getChunk(chunkIndices, options)
   }
 
   async getLevelArray(

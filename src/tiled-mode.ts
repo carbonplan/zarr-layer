@@ -60,6 +60,7 @@ export class TiledMode implements ZarrMode {
   private metadataLoading: boolean = false
   private currentLevel: number | null = null
   private selectorVersion: number = 0
+  private pendingControllers: Map<number, AbortController> = new Map()
 
   constructor(
     store: ZarrStore,
@@ -379,16 +380,24 @@ export class TiledMode implements ZarrMode {
   }
 
   private async prefetchTileData(tiles: TileTuple[], selectorHash: string, version: number) {
+    // Create AbortController for this version's requests
+    const controller = new AbortController()
+    this.pendingControllers.set(version, controller)
+
     const fetchPromises = tiles.map((tiletuple) =>
-      this.fetchTileData(tiletuple, selectorHash, version)
+      this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
     )
     await Promise.all(fetchPromises)
+
+    // Clean up controller after all fetches complete
+    this.pendingControllers.delete(version)
   }
 
   private async fetchTileData(
     tileTuple: TileTuple,
     selectorHash: string,
-    version: number
+    version: number,
+    signal?: AbortSignal
   ): Promise<Float32Array | null> {
     if (!this.tileCache) {
       const tileKey = tileToKey(tileTuple)
@@ -401,7 +410,7 @@ export class TiledMode implements ZarrMode {
 
     try {
       // Unified cache handles both data fetching and WebGL resources
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version)
+      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version, signal)
 
       this.pendingChunks.delete(tileKey)
 
@@ -409,6 +418,9 @@ export class TiledMode implements ZarrMode {
         this.emitLoadingState()
         return null
       }
+
+      // Cancel all older pending requests since a newer version has completed
+      this.cancelOlderRequests(version)
 
       this.emitLoadingState()
 
@@ -420,7 +432,20 @@ export class TiledMode implements ZarrMode {
     } catch (err) {
       this.pendingChunks.delete(tileKey)
       this.emitLoadingState()
+      // AbortError is expected when requests are cancelled
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return null
+      }
       throw err
+    }
+  }
+
+  private cancelOlderRequests(completedVersion: number) {
+    for (const [version, controller] of this.pendingControllers) {
+      if (version < completedVersion) {
+        controller.abort()
+        this.pendingControllers.delete(version)
+      }
     }
   }
 

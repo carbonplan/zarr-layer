@@ -552,7 +552,8 @@ export class Tiles {
   async fetchTile(
     tileTuple: TileTuple,
     selectorHash: string,
-    version: number
+    version: number,
+    signal?: AbortSignal
   ): Promise<TileData | null> {
     const [z] = tileTuple
     const levelPath = this.store.levels[z]
@@ -597,7 +598,7 @@ export class Tiles {
         return tile
       }
 
-      const chunk = await this.store.getChunk(levelPath, chunkIndices)
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal })
       const chunkShape = (chunk.shape as number[]).map((n) => Number(n))
       const chunkData =
         chunk.data instanceof Float32Array
@@ -627,8 +628,12 @@ export class Tiles {
       tile.loading = false
       return tile
     } catch (err) {
-      console.error('Error fetching tile data:', err)
       tile.loading = false
+      // AbortError is expected when requests are cancelled - don't log as error
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return null
+      }
+      console.error('Error fetching tile data:', err)
       return null
     }
   }
