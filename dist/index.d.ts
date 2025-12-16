@@ -44,6 +44,12 @@ interface ZarrLayerOptions {
     uniforms?: Record<string, number>;
     renderingMode?: '2d' | '3d';
     onLoadingStateChange?: LoadingStateCallback;
+    /**
+     * Throttle interval in milliseconds for data fetching during rapid selector changes.
+     * Higher values reduce network requests when scrubbing through e.g. time sliders.
+     * Set to 0 to disable throttling. Default: 100ms.
+     */
+    throttleMs?: number;
 }
 interface BoundsLike {
     getWest(): number;
@@ -179,9 +185,10 @@ declare class ZarrLayer {
     private onLoadingStateChange;
     private metadataLoading;
     private chunksLoading;
+    private throttleMs;
     get fillValue(): number | null;
     private isGlobeProjection;
-    constructor({ id, source, variable, selector, colormap, clim, opacity, minzoom, maxzoom, zarrVersion, spatialDimensions, bounds, latIsAscending, fillValue, customFrag, uniforms, renderingMode, onLoadingStateChange, }: ZarrLayerOptions);
+    constructor({ id, source, variable, selector, colormap, clim, opacity, minzoom, maxzoom, zarrVersion, spatialDimensions, bounds, latIsAscending, fillValue, customFrag, uniforms, renderingMode, onLoadingStateChange, throttleMs, }: ZarrLayerOptions);
     private emitLoadingState;
     private handleChunkLoadingChange;
     setOpacity(opacity: number): void;

@@ -110,6 +110,7 @@ export class ZarrLayer {
   private onLoadingStateChange: LoadingStateCallback | undefined
   private metadataLoading: boolean = false
   private chunksLoading: boolean = false
+  private throttleMs: number
 
   get fillValue(): number | null {
     return this._fillValue
@@ -140,6 +141,7 @@ export class ZarrLayer {
     uniforms,
     renderingMode = '3d',
     onLoadingStateChange,
+    throttleMs = 100,
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -191,6 +193,7 @@ export class ZarrLayer {
 
     if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
+    this.throttleMs = throttleMs
   }
 
   private emitLoadingState(): void {
@@ -366,14 +369,16 @@ export class ZarrLayer {
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.invalidate
+        this.invalidate,
+        this.throttleMs
       )
     } else {
       this.mode = new SingleImageMode(
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.invalidate
+        this.invalidate,
+        this.throttleMs
       )
     }
 

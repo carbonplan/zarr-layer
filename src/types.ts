@@ -15,7 +15,6 @@ export type Selector = Record<string, SelectorValue | SelectorSpec>
 // Internal normalized form (object per dimension).
 export type NormalizedSelector = Record<string, SelectorSpec>
 
-
 /**
  * Override the names used to identify spatial dimensions (lat/lon).
  * Only needed if your dataset uses non-standard names that aren't auto-detected.
@@ -66,6 +65,12 @@ export interface ZarrLayerOptions {
   uniforms?: Record<string, number>
   renderingMode?: '2d' | '3d'
   onLoadingStateChange?: LoadingStateCallback
+  /**
+   * Throttle interval in milliseconds for data fetching during rapid selector changes.
+   * Higher values reduce network requests when scrubbing through e.g. time sliders.
+   * Set to 0 to disable throttling. Default: 100ms.
+   */
+  throttleMs?: number
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'

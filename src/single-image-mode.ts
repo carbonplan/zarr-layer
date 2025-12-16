@@ -68,6 +68,10 @@ export class SingleImageMode implements ZarrMode {
   private fetchRequestId: number = 0
   private lastRenderedRequestId: number = 0
   private pendingControllers: Map<number, AbortController> = new Map()
+  private lastFetchTime: number = 0
+  private throttleTimeout: ReturnType<typeof setTimeout> | null = null
+  private throttledFetchPromise: Promise<void> | null = null
+  private throttleMs: number
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
   private latIsAscending: boolean | null = null
   private texScale: [number, number] = [1, 1]
@@ -78,12 +82,14 @@ export class SingleImageMode implements ZarrMode {
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
-    invalidate: () => void
+    invalidate: () => void,
+    throttleMs: number = 100
   ) {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
     this.invalidate = invalidate
+    this.throttleMs = throttleMs
   }
 
   async initialize(): Promise<void> {
@@ -233,6 +239,16 @@ export class SingleImageMode implements ZarrMode {
 
   dispose(gl: WebGL2RenderingContext): void {
     this.isRemoved = true
+    if (this.throttleTimeout) {
+      clearTimeout(this.throttleTimeout)
+      this.throttleTimeout = null
+    }
+    this.throttledFetchPromise = null
+    // Cancel any pending requests
+    for (const controller of this.pendingControllers.values()) {
+      controller.abort()
+    }
+    this.pendingControllers.clear()
     if (this.texture) gl.deleteTexture(this.texture)
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer)
     if (this.pixCoordBuffer) gl.deleteBuffer(this.pixCoordBuffer)
@@ -296,6 +312,28 @@ export class SingleImageMode implements ZarrMode {
 
   private async fetchData(): Promise<void> {
     if (!this.zarrArray || this.isRemoved) return
+
+    // Throttle: if too soon since last fetch, schedule a trailing fetch (if not already scheduled)
+    const now = Date.now()
+    const timeSinceLastFetch = now - this.lastFetchTime
+    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+      // Set loading state even when throttled so callers know data is pending
+      this.isLoadingData = true
+      this.emitLoadingState()
+
+      // Only schedule if no timeout is already pending
+      if (!this.throttledFetchPromise) {
+        this.throttledFetchPromise = new Promise((resolve) => {
+          this.throttleTimeout = setTimeout(() => {
+            this.throttleTimeout = null
+            this.throttledFetchPromise = null
+            this.fetchData().then(resolve)
+          }, this.throttleMs - timeSinceLastFetch)
+        })
+      }
+      return this.throttledFetchPromise
+    }
+    this.lastFetchTime = now
 
     const requestId = ++this.fetchRequestId
 

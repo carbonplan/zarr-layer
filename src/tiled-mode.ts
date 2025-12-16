@@ -61,17 +61,23 @@ export class TiledMode implements ZarrMode {
   private currentLevel: number | null = null
   private selectorVersion: number = 0
   private pendingControllers: Map<number, AbortController> = new Map()
+  private lastFetchTime: number = 0
+  private throttleTimeout: ReturnType<typeof setTimeout> | null = null
+  private throttleMs: number
+  private hasThrottledPending: boolean = false
 
   constructor(
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
-    invalidate: () => void
+    invalidate: () => void,
+    throttleMs: number = 100
   ) {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
     this.invalidate = invalidate
+    this.throttleMs = throttleMs
   }
 
   async initialize(): Promise<void> {
@@ -139,6 +145,27 @@ export class TiledMode implements ZarrMode {
     }
 
     if (tilesToFetch.length > 0) {
+      // Throttle: if too soon since last fetch, schedule a trailing update (if not already scheduled)
+      const now = Date.now()
+      const timeSinceLastFetch = now - this.lastFetchTime
+      if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+        // Set loading state even when throttled so callers know data is pending
+        if (!this.hasThrottledPending) {
+          this.hasThrottledPending = true
+          this.emitLoadingState()
+        }
+        // Only schedule if no timeout is already pending
+        if (!this.throttleTimeout) {
+          this.throttleTimeout = setTimeout(() => {
+            this.throttleTimeout = null
+            this.hasThrottledPending = false
+            this.invalidate() // Trigger another update cycle
+          }, this.throttleMs - timeSinceLastFetch)
+        }
+        return
+      }
+      this.lastFetchTime = now
+
       const wasEmpty = this.pendingChunks.size === 0
       for (const tileTuple of tilesToFetch) {
         this.pendingChunks.add(tileToKey(tileTuple))
@@ -231,6 +258,16 @@ export class TiledMode implements ZarrMode {
   }
 
   dispose(_gl: WebGL2RenderingContext): void {
+    if (this.throttleTimeout) {
+      clearTimeout(this.throttleTimeout)
+      this.throttleTimeout = null
+    }
+    this.hasThrottledPending = false
+    // Cancel any pending requests
+    for (const controller of this.pendingControllers.values()) {
+      controller.abort()
+    }
+    this.pendingControllers.clear()
     this.tileCache?.clear()
     this.tileCache = null
     this.pendingChunks.clear()
@@ -263,7 +300,8 @@ export class TiledMode implements ZarrMode {
 
   private emitLoadingState(): void {
     if (!this.loadingCallback) return
-    const chunksLoading = this.pendingChunks.size > 0
+    const chunksLoading =
+      this.pendingChunks.size > 0 || this.hasThrottledPending
     this.loadingCallback({
       loading: this.metadataLoading || chunksLoading,
       metadata: this.metadataLoading,
@@ -379,18 +417,23 @@ export class TiledMode implements ZarrMode {
     return bounds
   }
 
-  private async prefetchTileData(tiles: TileTuple[], selectorHash: string, version: number) {
+  private async prefetchTileData(
+    tiles: TileTuple[],
+    selectorHash: string,
+    version: number
+  ) {
     // Create AbortController for this version's requests
     const controller = new AbortController()
     this.pendingControllers.set(version, controller)
 
-    const fetchPromises = tiles.map((tiletuple) =>
-      this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
-    )
-    await Promise.all(fetchPromises)
-
-    // Clean up controller after all fetches complete
-    this.pendingControllers.delete(version)
+    try {
+      const fetchPromises = tiles.map((tiletuple) =>
+        this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
+      )
+      await Promise.all(fetchPromises)
+    } finally {
+      this.pendingControllers.delete(version)
+    }
   }
 
   private async fetchTileData(
@@ -410,7 +453,12 @@ export class TiledMode implements ZarrMode {
 
     try {
       // Unified cache handles both data fetching and WebGL resources
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version, signal)
+      const tile = await this.tileCache.fetchTile(
+        tileTuple,
+        selectorHash,
+        version,
+        signal
+      )
 
       this.pendingChunks.delete(tileKey)
 

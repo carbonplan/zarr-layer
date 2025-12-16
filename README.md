@@ -77,6 +77,7 @@ map.on('load', () => {
 | customFrag | string | - | Custom fragment shader |
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
+| throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to 0 to disable. |
 
 ## methods
 

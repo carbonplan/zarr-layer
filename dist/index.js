@@ -7771,7 +7771,7 @@ function computeWorldOffsets(map, isGlobe) {
 
 // src/tiled-mode.ts
 var TiledMode = class {
-  constructor(store, variable, selector, invalidate) {
+  constructor(store, variable, selector, invalidate, throttleMs = 100) {
     this.isMultiscale = true;
     this.tileCache = null;
     this.vertexArr = new Float32Array();
@@ -7788,10 +7788,14 @@ var TiledMode = class {
     this.currentLevel = null;
     this.selectorVersion = 0;
     this.pendingControllers = /* @__PURE__ */ new Map();
+    this.lastFetchTime = 0;
+    this.throttleTimeout = null;
+    this.hasThrottledPending = false;
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
     this.invalidate = invalidate;
+    this.throttleMs = throttleMs;
   }
   async initialize() {
     this.metadataLoading = true;
@@ -7845,6 +7849,23 @@ var TiledMode = class {
       }
     }
     if (tilesToFetch.length > 0) {
+      const now = Date.now();
+      const timeSinceLastFetch = now - this.lastFetchTime;
+      if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+        if (!this.hasThrottledPending) {
+          this.hasThrottledPending = true;
+          this.emitLoadingState();
+        }
+        if (!this.throttleTimeout) {
+          this.throttleTimeout = setTimeout(() => {
+            this.throttleTimeout = null;
+            this.hasThrottledPending = false;
+            this.invalidate();
+          }, this.throttleMs - timeSinceLastFetch);
+        }
+        return;
+      }
+      this.lastFetchTime = now;
       const wasEmpty = this.pendingChunks.size === 0;
       for (const tileTuple of tilesToFetch) {
         this.pendingChunks.add(tileToKey(tileTuple));
@@ -7922,6 +7943,15 @@ var TiledMode = class {
     return null;
   }
   dispose(_gl) {
+    if (this.throttleTimeout) {
+      clearTimeout(this.throttleTimeout);
+      this.throttleTimeout = null;
+    }
+    this.hasThrottledPending = false;
+    for (const controller of this.pendingControllers.values()) {
+      controller.abort();
+    }
+    this.pendingControllers.clear();
     this.tileCache?.clear();
     this.tileCache = null;
     this.pendingChunks.clear();
@@ -7947,7 +7977,7 @@ var TiledMode = class {
   }
   emitLoadingState() {
     if (!this.loadingCallback) return;
-    const chunksLoading = this.pendingChunks.size > 0;
+    const chunksLoading = this.pendingChunks.size > 0 || this.hasThrottledPending;
     this.loadingCallback({
       loading: this.metadataLoading || chunksLoading,
       metadata: this.metadataLoading,
@@ -8039,11 +8069,14 @@ var TiledMode = class {
   async prefetchTileData(tiles, selectorHash, version) {
     const controller = new AbortController();
     this.pendingControllers.set(version, controller);
-    const fetchPromises = tiles.map(
-      (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
-    );
-    await Promise.all(fetchPromises);
-    this.pendingControllers.delete(version);
+    try {
+      const fetchPromises = tiles.map(
+        (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
+      );
+      await Promise.all(fetchPromises);
+    } finally {
+      this.pendingControllers.delete(version);
+    }
   }
   async fetchTileData(tileTuple, selectorHash, version, signal) {
     if (!this.tileCache) {
@@ -8054,7 +8087,12 @@ var TiledMode = class {
     }
     const tileKey = tileToKey(tileTuple);
     try {
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version, signal);
+      const tile = await this.tileCache.fetchTile(
+        tileTuple,
+        selectorHash,
+        version,
+        signal
+      );
       this.pendingChunks.delete(tileKey);
       if (!tile) {
         this.emitLoadingState();
@@ -8115,7 +8153,7 @@ var TiledMode = class {
 
 // src/single-image-mode.ts
 var SingleImageMode = class {
-  constructor(store, variable, selector, invalidate) {
+  constructor(store, variable, selector, invalidate, throttleMs = 100) {
     this.isMultiscale = false;
     this.data = null;
     this.width = 0;
@@ -8142,6 +8180,9 @@ var SingleImageMode = class {
     this.fetchRequestId = 0;
     this.lastRenderedRequestId = 0;
     this.pendingControllers = /* @__PURE__ */ new Map();
+    this.lastFetchTime = 0;
+    this.throttleTimeout = null;
+    this.throttledFetchPromise = null;
     this.dimensionValues = {};
     this.latIsAscending = null;
     this.texScale = [1, 1];
@@ -8151,6 +8192,7 @@ var SingleImageMode = class {
     this.variable = variable;
     this.selector = selector;
     this.invalidate = invalidate;
+    this.throttleMs = throttleMs;
   }
   async initialize() {
     this.metadataLoading = true;
@@ -8277,6 +8319,15 @@ var SingleImageMode = class {
   }
   dispose(gl) {
     this.isRemoved = true;
+    if (this.throttleTimeout) {
+      clearTimeout(this.throttleTimeout);
+      this.throttleTimeout = null;
+    }
+    this.throttledFetchPromise = null;
+    for (const controller of this.pendingControllers.values()) {
+      controller.abort();
+    }
+    this.pendingControllers.clear();
     if (this.texture) gl.deleteTexture(this.texture);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
     if (this.pixCoordBuffer) gl.deleteBuffer(this.pixCoordBuffer);
@@ -8329,6 +8380,23 @@ var SingleImageMode = class {
   }
   async fetchData() {
     if (!this.zarrArray || this.isRemoved) return;
+    const now = Date.now();
+    const timeSinceLastFetch = now - this.lastFetchTime;
+    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+      this.isLoadingData = true;
+      this.emitLoadingState();
+      if (!this.throttledFetchPromise) {
+        this.throttledFetchPromise = new Promise((resolve2) => {
+          this.throttleTimeout = setTimeout(() => {
+            this.throttleTimeout = null;
+            this.throttledFetchPromise = null;
+            this.fetchData().then(resolve2);
+          }, this.throttleMs - timeSinceLastFetch);
+        });
+      }
+      return this.throttledFetchPromise;
+    }
+    this.lastFetchTime = now;
     const requestId = ++this.fetchRequestId;
     const controller = new AbortController();
     this.pendingControllers.set(requestId, controller);
@@ -8771,7 +8839,8 @@ var ZarrLayer = class {
     customFrag,
     uniforms,
     renderingMode = "3d",
-    onLoadingStateChange
+    onLoadingStateChange,
+    throttleMs = 100
   }) {
     this.type = "custom";
     this.zarrVersion = null;
@@ -8849,6 +8918,7 @@ var ZarrLayer = class {
     }
     if (fillValue !== void 0) this._fillValue = fillValue;
     this.onLoadingStateChange = onLoadingStateChange;
+    this.throttleMs = throttleMs;
   }
   resolveGl(map, gl) {
     const isWebGL2 = gl && typeof gl.getUniformLocation === "function" && typeof gl.drawBuffers === "function";
@@ -9012,14 +9082,16 @@ var ZarrLayer = class {
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.invalidate
+        this.invalidate,
+        this.throttleMs
       );
     } else {
       this.mode = new SingleImageMode(
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.invalidate
+        this.invalidate,
+        this.throttleMs
       );
     }
     this.mode.setLoadingCallback(this.handleChunkLoadingChange);
