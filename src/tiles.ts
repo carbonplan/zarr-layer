@@ -26,6 +26,7 @@ export interface TileData {
   bandData: Map<string, Float32Array>
   channels: number
   selectorHash: string | null
+  selectorVersion: number
   loading: boolean
 
   // Data normalization (for half-float precision on mobile GPUs)
@@ -418,6 +419,7 @@ export class Tiles {
       bandData: new Map(),
       channels: 1,
       selectorHash: null,
+      selectorVersion: 0,
       loading: false,
       dataScale: 1.0,
       bandDataScales: new Map(),
@@ -502,7 +504,8 @@ export class Tiles {
 
   async reextractTileSlices(
     visibleTiles: TileTuple[],
-    selectorHash: string
+    selectorHash: string,
+    version: number
   ): Promise<void> {
     for (const tileTuple of visibleTiles) {
       const tileKey = tileToKey(tileTuple)
@@ -520,6 +523,8 @@ export class Tiles {
         tile.chunkShape &&
         this.arraysEqual(tile.chunkIndices, desiredChunkIndices)
       if (canReuseChunk) {
+        // Only update if this version is newer than what's already rendered
+        if (version < tile.selectorVersion) continue
         const sliced = this.extractSliceFromChunk(
           tile.chunkData!,
           tile.chunkShape!,
@@ -528,25 +533,26 @@ export class Tiles {
         )
         this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
+        tile.selectorVersion = version
         // Mark textures as needing re-upload
         tile.textureUploaded = false
         tile.bandTexturesUploaded.clear()
       } else {
-        tile.data = null
-        tile.bandData = new Map()
+        // Keep old data visible while new chunk loads - don't clear tile.data
+        // The stale selectorHash ensures a new fetch will be triggered,
+        // and the old data continues to render until replaced
         tile.selectorHash = null
         tile.chunkData = null
         tile.chunkShape = null
         tile.chunkIndices = undefined
-        tile.textureUploaded = false
-        tile.bandTexturesUploaded.clear()
       }
     }
   }
 
   async fetchTile(
     tileTuple: TileTuple,
-    selectorHash: string
+    selectorHash: string,
+    version: number
   ): Promise<TileData | null> {
     const [z] = tileTuple
     const levelPath = this.store.levels[z]
@@ -571,6 +577,11 @@ export class Tiles {
         this.arraysEqual(tile.chunkIndices, chunkIndices)
 
       if (canReuseChunk) {
+        // Only update if this version is newer than what's already rendered
+        if (version < tile.selectorVersion) {
+          tile.loading = false
+          return null
+        }
         const sliced = this.extractSliceFromChunk(
           tile.chunkData!,
           tile.chunkShape!,
@@ -579,6 +590,7 @@ export class Tiles {
         )
         this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
+        tile.selectorVersion = version
         tile.textureUploaded = false
         tile.bandTexturesUploaded.clear()
         tile.loading = false
@@ -592,6 +604,12 @@ export class Tiles {
           ? new Float32Array(chunk.data.buffer)
           : Float32Array.from(chunk.data as ArrayLike<number>)
 
+      // Only update if this version is newer than what's already rendered
+      if (version < tile.selectorVersion) {
+        tile.loading = false
+        return null
+      }
+
       tile.chunkData = chunkData
       tile.chunkShape = chunkShape
       tile.chunkIndices = chunkIndices
@@ -603,6 +621,7 @@ export class Tiles {
       )
       this.applyNormalization(tile, sliced)
       tile.selectorHash = selectorHash
+      tile.selectorVersion = version
       tile.textureUploaded = false
       tile.bandTexturesUploaded.clear()
       tile.loading = false

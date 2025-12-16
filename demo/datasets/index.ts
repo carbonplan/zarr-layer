@@ -21,7 +21,7 @@ export const DATASETS: Dataset<any>[] = [
     source:
       'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/noc-npd-era5-demo/npd-eorca1-era5v1/gn/T1y/tos_con',
     variable: 'tos_con',
-    clim: [0, 27],
+    clim: [0, 50],
     colormap: 'fire',
     zarrVersion: 3,
     info: 'Ocean temperature (v3 pyramid, EPSG:3857)',
@@ -82,7 +82,7 @@ export const DATASETS: Dataset<any>[] = [
 ]
 
 export const DATASET_MAP = Object.fromEntries(
-  DATASETS.map((d) => [d.id, d])
+  DATASETS.map((d) => [d.id, d]),
 ) as Record<string, Dataset<any>>
 
 export const DEFAULT_DATASET_ID = DATASETS[0].id

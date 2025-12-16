@@ -7162,6 +7162,7 @@ var Tiles = class {
       bandData: /* @__PURE__ */ new Map(),
       channels: 1,
       selectorHash: null,
+      selectorVersion: 0,
       loading: false,
       dataScale: 1,
       bandDataScales: /* @__PURE__ */ new Map(),
@@ -7232,7 +7233,7 @@ var Tiles = class {
   getTile(tileTuple) {
     return this.tiles.get(tileToKey(tileTuple));
   }
-  async reextractTileSlices(visibleTiles, selectorHash) {
+  async reextractTileSlices(visibleTiles, selectorHash, version) {
     for (const tileTuple of visibleTiles) {
       const tileKey = tileToKey(tileTuple);
       const tile = this.tiles.get(tileKey);
@@ -7246,6 +7247,7 @@ var Tiles = class {
       );
       const canReuseChunk = tile.chunkData && tile.chunkShape && this.arraysEqual(tile.chunkIndices, desiredChunkIndices);
       if (canReuseChunk) {
+        if (version < tile.selectorVersion) continue;
         const sliced = this.extractSliceFromChunk(
           tile.chunkData,
           tile.chunkShape,
@@ -7254,21 +7256,18 @@ var Tiles = class {
         );
         this.applyNormalization(tile, sliced);
         tile.selectorHash = selectorHash;
+        tile.selectorVersion = version;
         tile.textureUploaded = false;
         tile.bandTexturesUploaded.clear();
       } else {
-        tile.data = null;
-        tile.bandData = /* @__PURE__ */ new Map();
         tile.selectorHash = null;
         tile.chunkData = null;
         tile.chunkShape = null;
         tile.chunkIndices = void 0;
-        tile.textureUploaded = false;
-        tile.bandTexturesUploaded.clear();
       }
     }
   }
-  async fetchTile(tileTuple, selectorHash) {
+  async fetchTile(tileTuple, selectorHash, version) {
     const [z] = tileTuple;
     const levelPath = this.store.levels[z];
     if (!levelPath) return null;
@@ -7284,6 +7283,10 @@ var Tiles = class {
       const chunkIndices = this.computeChunkIndices(levelArray, tileTuple);
       const canReuseChunk = tile.chunkData && tile.chunkShape && this.arraysEqual(tile.chunkIndices, chunkIndices);
       if (canReuseChunk) {
+        if (version < tile.selectorVersion) {
+          tile.loading = false;
+          return null;
+        }
         const sliced2 = this.extractSliceFromChunk(
           tile.chunkData,
           tile.chunkShape,
@@ -7292,6 +7295,7 @@ var Tiles = class {
         );
         this.applyNormalization(tile, sliced2);
         tile.selectorHash = selectorHash;
+        tile.selectorVersion = version;
         tile.textureUploaded = false;
         tile.bandTexturesUploaded.clear();
         tile.loading = false;
@@ -7300,6 +7304,10 @@ var Tiles = class {
       const chunk = await this.store.getChunk(levelPath, chunkIndices);
       const chunkShape = chunk.shape.map((n) => Number(n));
       const chunkData = chunk.data instanceof Float32Array ? new Float32Array(chunk.data.buffer) : Float32Array.from(chunk.data);
+      if (version < tile.selectorVersion) {
+        tile.loading = false;
+        return null;
+      }
       tile.chunkData = chunkData;
       tile.chunkShape = chunkShape;
       tile.chunkIndices = chunkIndices;
@@ -7311,6 +7319,7 @@ var Tiles = class {
       );
       this.applyNormalization(tile, sliced);
       tile.selectorHash = selectorHash;
+      tile.selectorVersion = version;
       tile.textureUploaded = false;
       tile.bandTexturesUploaded.clear();
       tile.loading = false;
@@ -7774,6 +7783,7 @@ var TiledMode = class {
     this.pendingChunks = /* @__PURE__ */ new Set();
     this.metadataLoading = false;
     this.currentLevel = null;
+    this.selectorVersion = 0;
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -7838,7 +7848,8 @@ var TiledMode = class {
       if (wasEmpty) {
         this.emitLoadingState();
       }
-      this.prefetchTileData(tilesToFetch, currentHash).catch((err) => {
+      const version = this.selectorVersion;
+      this.prefetchTileData(tilesToFetch, currentHash, version).catch((err) => {
         console.error("Error prefetching tile data:", err);
         for (const tileTuple of tilesToFetch) {
           this.pendingChunks.delete(tileToKey(tileTuple));
@@ -7941,6 +7952,7 @@ var TiledMode = class {
   }
   async setSelector(selector) {
     this.selector = selector;
+    this.selectorVersion++;
     const bandNames = getBands(this.variable, selector);
     this.tileCache?.updateSelector(this.selector);
     this.tileCache?.updateBandNames(bandNames);
@@ -7948,7 +7960,8 @@ var TiledMode = class {
       const currentHash = JSON.stringify(this.selector);
       await this.tileCache.reextractTileSlices(
         this.visibleTiles,
-        currentHash
+        currentHash,
+        this.selectorVersion
       );
     }
     this.invalidate();
@@ -8019,13 +8032,13 @@ var TiledMode = class {
     }
     return bounds;
   }
-  async prefetchTileData(tiles, selectorHash) {
+  async prefetchTileData(tiles, selectorHash, version) {
     const fetchPromises = tiles.map(
-      (tiletuple) => this.fetchTileData(tiletuple, selectorHash)
+      (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version)
     );
     await Promise.all(fetchPromises);
   }
-  async fetchTileData(tileTuple, selectorHash) {
+  async fetchTileData(tileTuple, selectorHash, version) {
     if (!this.tileCache) {
       const tileKey2 = tileToKey(tileTuple);
       this.pendingChunks.delete(tileKey2);
@@ -8034,7 +8047,7 @@ var TiledMode = class {
     }
     const tileKey = tileToKey(tileTuple);
     try {
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash);
+      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version);
       this.pendingChunks.delete(tileKey);
       if (!tile) {
         this.emitLoadingState();
@@ -8108,6 +8121,7 @@ var SingleImageMode = class {
     this.isLoadingData = false;
     this.metadataLoading = false;
     this.fetchRequestId = 0;
+    this.lastRenderedRequestId = 0;
     this.dimensionValues = {};
     this.latIsAscending = null;
     this.texScale = [1, 1];
@@ -8282,7 +8296,6 @@ var SingleImageMode = class {
   async setSelector(selector) {
     this.selector = selector;
     await this.fetchData();
-    this.invalidate();
   }
   updateGeometryForProjection(isGlobe) {
     const targetSubdivisions = isGlobe ? SINGLE_IMAGE_TILE_SUBDIVISIONS : 1;
@@ -8375,7 +8388,9 @@ var SingleImageMode = class {
       this.channelLabels = channelLabelCombinations;
       if (numChannels === 1) {
         const data = await get2(this.zarrArray, baseSliceArgs);
-        if (this.isRemoved || requestId !== this.fetchRequestId) return;
+        if (this.isRemoved) return;
+        if (requestId < this.lastRenderedRequestId) return;
+        this.lastRenderedRequestId = requestId;
         this.data = new Float32Array(data.data.buffer);
         this.dataVersion++;
       } else {
@@ -8389,7 +8404,7 @@ var SingleImageMode = class {
             sliceArgs[multiValueDims[i].dimIndex] = combo[i];
           }
           const bandData = await get2(this.zarrArray, sliceArgs);
-          if (this.isRemoved || requestId !== this.fetchRequestId) return;
+          if (this.isRemoved) return;
           const bandArray = new Float32Array(
             bandData.data.buffer
           );
@@ -8397,6 +8412,8 @@ var SingleImageMode = class {
             packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
           }
         }
+        if (requestId < this.lastRenderedRequestId) return;
+        this.lastRenderedRequestId = requestId;
         this.data = packedData;
         this.dataVersion++;
       }

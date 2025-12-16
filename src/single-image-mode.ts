@@ -62,6 +62,7 @@ export class SingleImageMode implements ZarrMode {
   private isLoadingData: boolean = false
   private metadataLoading: boolean = false
   private fetchRequestId: number = 0
+  private lastRenderedRequestId: number = 0
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
   private latIsAscending: boolean | null = null
   private texScale: [number, number] = [1, 1]
@@ -274,7 +275,6 @@ export class SingleImageMode implements ZarrMode {
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
     await this.fetchData()
-    this.invalidate()
   }
 
   private updateGeometryForProjection(isGlobe: boolean) {
@@ -402,7 +402,11 @@ export class SingleImageMode implements ZarrMode {
         const data = (await zarr.get(this.zarrArray, baseSliceArgs)) as {
           data: ArrayLike<number>
         }
-        if (this.isRemoved || requestId !== this.fetchRequestId) return
+        if (this.isRemoved) return
+        // Only render if this request is newer than what we've already shown
+        // This ensures frames render in order when scrubbing through time
+        if (requestId < this.lastRenderedRequestId) return
+        this.lastRenderedRequestId = requestId
         this.data = new Float32Array((data.data as Float32Array).buffer)
         this.dataVersion++
       } else {
@@ -421,7 +425,7 @@ export class SingleImageMode implements ZarrMode {
           const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
             data: ArrayLike<number>
           }
-          if (this.isRemoved || requestId !== this.fetchRequestId) return
+          if (this.isRemoved) return
 
           const bandArray = new Float32Array(
             (bandData.data as Float32Array).buffer
@@ -431,6 +435,9 @@ export class SingleImageMode implements ZarrMode {
           }
         }
 
+        // Only render if this request is newer than what we've already shown
+        if (requestId < this.lastRenderedRequestId) return
+        this.lastRenderedRequestId = requestId
         this.data = packedData
         this.dataVersion++
       }

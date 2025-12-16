@@ -59,6 +59,7 @@ export class TiledMode implements ZarrMode {
   private pendingChunks: Set<string> = new Set()
   private metadataLoading: boolean = false
   private currentLevel: number | null = null
+  private selectorVersion: number = 0
 
   constructor(
     store: ZarrStore,
@@ -144,7 +145,8 @@ export class TiledMode implements ZarrMode {
       if (wasEmpty) {
         this.emitLoadingState()
       }
-      this.prefetchTileData(tilesToFetch, currentHash).catch((err) => {
+      const version = this.selectorVersion
+      this.prefetchTileData(tilesToFetch, currentHash, version).catch((err) => {
         console.error('Error prefetching tile data:', err)
         for (const tileTuple of tilesToFetch) {
           this.pendingChunks.delete(tileToKey(tileTuple))
@@ -270,6 +272,7 @@ export class TiledMode implements ZarrMode {
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
+    this.selectorVersion++
     const bandNames = getBands(this.variable, selector)
 
     this.tileCache?.updateSelector(this.selector)
@@ -280,7 +283,8 @@ export class TiledMode implements ZarrMode {
       // Unified cache handles both data and texture state
       await this.tileCache.reextractTileSlices(
         this.visibleTiles,
-        currentHash
+        currentHash,
+        this.selectorVersion
       )
     }
 
@@ -374,16 +378,17 @@ export class TiledMode implements ZarrMode {
     return bounds
   }
 
-  private async prefetchTileData(tiles: TileTuple[], selectorHash: string) {
+  private async prefetchTileData(tiles: TileTuple[], selectorHash: string, version: number) {
     const fetchPromises = tiles.map((tiletuple) =>
-      this.fetchTileData(tiletuple, selectorHash)
+      this.fetchTileData(tiletuple, selectorHash, version)
     )
     await Promise.all(fetchPromises)
   }
 
   private async fetchTileData(
     tileTuple: TileTuple,
-    selectorHash: string
+    selectorHash: string,
+    version: number
   ): Promise<Float32Array | null> {
     if (!this.tileCache) {
       const tileKey = tileToKey(tileTuple)
@@ -396,7 +401,7 @@ export class TiledMode implements ZarrMode {
 
     try {
       // Unified cache handles both data fetching and WebGL resources
-      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash)
+      const tile = await this.tileCache.fetchTile(tileTuple, selectorHash, version)
 
       this.pendingChunks.delete(tileKey)
 
@@ -406,6 +411,9 @@ export class TiledMode implements ZarrMode {
       }
 
       this.emitLoadingState()
+
+      // Always invalidate to show data as it arrives - this allows
+      // intermediate frames to render when scrubbing through time
       this.invalidate()
 
       return tile.data
