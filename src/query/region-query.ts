@@ -71,7 +71,7 @@ export async function queryRegionTiled(
   zarrStore: ZarrStore,
   crs: CRS,
   xyLimits: XYLimits,
-  maxZoom: number,
+  maxLevelIndex: number,
   tileSize: number,
   transforms?: QueryTransformOptions
 ): Promise<QueryResult> {
@@ -152,7 +152,7 @@ export async function queryRegionTiled(
   }
 
   // Get tiles that intersect the polygon
-  const tiles = getTilesForPolygon(geometry, maxZoom, crs, xyLimits)
+  const tiles = getTilesForPolygon(geometry, maxLevelIndex, crs, xyLimits)
   if (tiles.length === 0) {
     // Return empty result in carbonplan/maps format
     const result = {
@@ -164,9 +164,9 @@ export async function queryRegionTiled(
   }
 
   // Get level path for chunk fetching
-  const levelPath = zarrStore.levels[maxZoom]
+  const levelPath = zarrStore.levels[maxLevelIndex]
   if (!levelPath) {
-    throw new Error(`No level path found for zoom ${maxZoom}`)
+    throw new Error(`No level path found for level index ${maxLevelIndex}`)
   }
 
   // For each tile, determine which chunks we need based on selector and fetch them

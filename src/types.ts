@@ -50,7 +50,8 @@ export interface ZarrLayerOptions {
   colormap: ColormapArray
   clim: [number, number]
   opacity?: number
-  minRenderZoom?: number
+  minzoom?: number
+  maxzoom?: number
   zarrVersion?: 2 | 3
   spatialDimensions?: SpatialDimensions
   /**

@@ -28,7 +28,8 @@ interface ZarrLayerOptions {
     colormap: ColormapArray;
     clim: [number, number];
     opacity?: number;
-    minRenderZoom?: number;
+    minzoom?: number;
+    maxzoom?: number;
     zarrVersion?: 2 | 3;
     spatialDimensions?: SpatialDimensions;
     /**
@@ -150,7 +151,8 @@ declare class ZarrLayer {
     private colormap;
     private clim;
     private opacity;
-    private minRenderZoom;
+    private minzoom;
+    private maxzoom;
     private selectorHash;
     private isMultiscale;
     private _fillValue;
@@ -179,7 +181,7 @@ declare class ZarrLayer {
     private chunksLoading;
     get fillValue(): number | null;
     private isGlobeProjection;
-    constructor({ id, source, variable, selector, colormap, clim, opacity, minRenderZoom, zarrVersion, spatialDimensions, bounds, latIsAscending, fillValue, customFrag, uniforms, renderingMode, onLoadingStateChange, }: ZarrLayerOptions);
+    constructor({ id, source, variable, selector, colormap, clim, opacity, minzoom, maxzoom, zarrVersion, spatialDimensions, bounds, latIsAscending, fillValue, customFrag, uniforms, renderingMode, onLoadingStateChange, }: ZarrLayerOptions);
     private emitLoadingState;
     private handleChunkLoadingChange;
     setOpacity(opacity: number): void;
@@ -193,6 +195,7 @@ declare class ZarrLayer {
     private initializeMode;
     private initialize;
     private loadInitialDimensionValues;
+    private isZoomInRange;
     prerender(_gl: WebGL2RenderingContext, _params: unknown): void;
     render(_gl: WebGL2RenderingContext, params: unknown, projection?: {
         name: string;

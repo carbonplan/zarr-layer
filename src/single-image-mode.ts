@@ -254,7 +254,7 @@ export class SingleImageMode implements ZarrMode {
     return this.xyLimits
   }
 
-  getMaxZoom(): number {
+  getMaxLevelIndex(): number {
     return 0
   }
 

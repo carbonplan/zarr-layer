@@ -4366,7 +4366,7 @@ var _ZarrStore = class _ZarrStore {
     this.fill_value = null;
     this.dtype = null;
     this.levels = [];
-    this.maxZoom = 0;
+    this.maxLevelIndex = 0;
     this.tileSize = 128;
     this.crs = "EPSG:4326";
     this.dimIndices = {};
@@ -4453,7 +4453,7 @@ var _ZarrStore = class _ZarrStore {
       fill_value: this.fill_value,
       dtype: this.dtype,
       levels: this.levels,
-      maxZoom: this.maxZoom,
+      maxLevelIndex: this.maxLevelIndex,
       tileSize: this.tileSize,
       crs: this.crs,
       dimIndices: this.dimIndices,
@@ -4542,7 +4542,7 @@ var _ZarrStore = class _ZarrStore {
     if (rootAttrs?.multiscales) {
       const pyramid = this._getPyramidMetadata(rootAttrs.multiscales);
       this.levels = pyramid.levels;
-      this.maxZoom = pyramid.maxZoom;
+      this.maxLevelIndex = pyramid.maxLevelIndex;
       this.tileSize = pyramid.tileSize;
       this.crs = pyramid.crs;
     }
@@ -4592,7 +4592,7 @@ var _ZarrStore = class _ZarrStore {
     if (metadata.attributes?.multiscales) {
       const pyramid = this._getPyramidMetadata(metadata.attributes.multiscales);
       this.levels = pyramid.levels;
-      this.maxZoom = pyramid.maxZoom;
+      this.maxLevelIndex = pyramid.maxLevelIndex;
       this.tileSize = pyramid.tileSize;
       this.crs = pyramid.crs;
     }
@@ -4744,17 +4744,17 @@ var _ZarrStore = class _ZarrStore {
     if (!multiscales || !multiscales[0]?.datasets?.length) {
       return {
         levels: [],
-        maxZoom: 0,
+        maxLevelIndex: 0,
         tileSize: 128,
         crs: "EPSG:4326"
       };
     }
     const datasets = multiscales[0].datasets;
     const levels = datasets.map((dataset) => String(dataset.path));
-    const maxZoom = levels.length - 1;
+    const maxLevelIndex = levels.length - 1;
     const tileSize = datasets[0].pixels_per_tile || 128;
     const crs = datasets[0].crs === "EPSG:4326" ? "EPSG:4326" : "EPSG:3857";
-    return { levels, maxZoom, tileSize, crs };
+    return { levels, maxLevelIndex, tileSize, crs };
   }
   static clearCache() {
     _ZarrStore._cache.clear();
@@ -5615,8 +5615,8 @@ function tileToScale(tile) {
   const shiftY = (2 * y + 1) * scale;
   return [scale, shiftX, shiftY];
 }
-function zoomToLevel(zoom, maxZoom) {
-  if (maxZoom) return Math.min(Math.max(0, Math.floor(zoom)), maxZoom);
+function zoomToLevel(zoom, maxLevelIndex) {
+  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex);
   return Math.max(0, Math.floor(zoom));
 }
 function lonToMercatorNorm(lon) {
@@ -6532,7 +6532,7 @@ function transformValue(value, transforms) {
   }
   return result;
 }
-async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xyLimits, maxZoom, tileSize, transforms) {
+async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xyLimits, maxLevelIndex, tileSize, transforms) {
   const desc = zarrStore.describe();
   const dimensions = desc.dimensions;
   const coordinates = desc.coordinates;
@@ -6591,7 +6591,7 @@ async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xy
     }
     return coords;
   };
-  const tiles = getTilesForPolygon(geometry, maxZoom, crs, xyLimits);
+  const tiles = getTilesForPolygon(geometry, maxLevelIndex, crs, xyLimits);
   if (tiles.length === 0) {
     const result2 = {
       [variable]: results,
@@ -6600,9 +6600,9 @@ async function queryRegionTiled(variable, geometry, selector, zarrStore, crs, xy
     };
     return result2;
   }
-  const levelPath = zarrStore.levels[maxZoom];
+  const levelPath = zarrStore.levels[maxLevelIndex];
   if (!levelPath) {
-    throw new Error(`No level path found for zoom ${maxZoom}`);
+    throw new Error(`No level path found for level index ${maxLevelIndex}`);
   }
   const tileChunkData = /* @__PURE__ */ new Map();
   for (const tileTuple of tiles) {
@@ -7549,14 +7549,14 @@ function renderMapboxTile({
   );
   const crs = mode.getCRS();
   const xyLimits = mode.getXYLimits();
-  const maxZoom = mode.getMaxZoom();
+  const maxLevelIndex = mode.getMaxLevelIndex();
   if (crs === "EPSG:4326" && xyLimits) {
     const mapboxGeoBounds = mercatorTileToGeoBounds(
       tileId.z,
       tileId.x,
       tileId.y
     );
-    const pyramidLevel = zoomToLevel(tileId.z, maxZoom);
+    const pyramidLevel = zoomToLevel(tileId.z, maxLevelIndex);
     const overlappingZarrTiles = getOverlapping4326Tiles(
       mapboxGeoBounds,
       xyLimits,
@@ -7762,14 +7762,13 @@ function computeWorldOffsets(map, isGlobe) {
 
 // src/tiled-mode.ts
 var TiledMode = class {
-  constructor(store, variable, selector, minRenderZoom, invalidate) {
+  constructor(store, variable, selector, invalidate) {
     this.isMultiscale = true;
     this.tileCache = null;
     this.vertexArr = new Float32Array();
     this.pixCoordArr = new Float32Array();
     this.currentSubdivisions = 0;
-    this.maxZoom = 4;
-    this.minRenderZoom = 3;
+    this.maxLevelIndex = 0;
     this.tileSize = DEFAULT_TILE_SIZE;
     this.visibleTiles = [];
     this.crs = "EPSG:4326";
@@ -7781,7 +7780,6 @@ var TiledMode = class {
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
-    this.minRenderZoom = minRenderZoom;
     this.invalidate = invalidate;
   }
   async initialize() {
@@ -7789,7 +7787,7 @@ var TiledMode = class {
     this.emitLoadingState();
     try {
       const desc = this.zarrStore.describe();
-      this.maxZoom = desc.levels.length - 1;
+      this.maxLevelIndex = desc.levels.length - 1;
       this.tileSize = desc.tileSize || DEFAULT_TILE_SIZE;
       this.crs = desc.crs;
       this.xyLimits = desc.xyLimits;
@@ -7926,8 +7924,8 @@ var TiledMode = class {
   getXYLimits() {
     return this.xyLimits;
   }
-  getMaxZoom() {
-    return this.maxZoom;
+  getMaxLevelIndex() {
+    return this.maxLevelIndex;
   }
   updateClim(clim) {
     this.tileCache?.updateClim(clim);
@@ -7969,10 +7967,7 @@ var TiledMode = class {
       return { tiles: [], pyramidLevel: null, mapZoom: null, bounds: null };
     }
     const mapZoom = map.getZoom();
-    if (mapZoom < this.minRenderZoom) {
-      return { tiles: [], pyramidLevel: null, mapZoom, bounds: null };
-    }
-    const pyramidLevel = zoomToLevel(mapZoom, this.maxZoom);
+    const pyramidLevel = zoomToLevel(mapZoom, this.maxLevelIndex);
     const bounds = map.getBounds()?.toArray();
     if (!bounds) {
       return { tiles: [], pyramidLevel, mapZoom, bounds: null };
@@ -8064,7 +8059,7 @@ var TiledMode = class {
       };
     }
     const querySelector = selector ? normalizeSelector(selector) : this.selector;
-    const level = this.currentLevel ?? this.maxZoom;
+    const level = this.currentLevel ?? this.maxLevelIndex;
     const desc = this.zarrStore.describe();
     return queryRegionTiled(
       this.variable,
@@ -8265,7 +8260,7 @@ var SingleImageMode = class {
   getXYLimits() {
     return this.xyLimits;
   }
-  getMaxZoom() {
+  getMaxLevelIndex() {
     return 0;
   }
   updateClim(clim) {
@@ -8704,7 +8699,8 @@ var ZarrLayer = class {
     colormap,
     clim,
     opacity = 1,
-    minRenderZoom = 0,
+    minzoom = 0,
+    maxzoom = Infinity,
     zarrVersion,
     spatialDimensions = {},
     bounds,
@@ -8777,7 +8773,8 @@ var ZarrLayer = class {
     this.colormap = new ColormapState(colormap);
     this.clim = clim;
     this.opacity = opacity;
-    this.minRenderZoom = minRenderZoom;
+    this.minzoom = minzoom;
+    this.maxzoom = maxzoom;
     this.customFrag = customFrag;
     this.customUniforms = uniforms || {};
     this.bandNames = getBands(variable, this.normalizedSelector);
@@ -8953,7 +8950,6 @@ var ZarrLayer = class {
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.minRenderZoom,
         this.invalidate
       );
     } else {
@@ -9034,12 +9030,21 @@ var ZarrLayer = class {
       }
     }
   }
+  isZoomInRange() {
+    if (!this.map?.getZoom) return true;
+    const zoom = this.map.getZoom();
+    return zoom >= this.minzoom && zoom <= this.maxzoom;
+  }
   prerender(_gl, _params) {
     if (this.isRemoved || !this.gl || !this.mode || !this.map) return;
+    if (!this.isZoomInRange()) return;
     this.mode.update(this.map, this.gl);
   }
   render(_gl, params, projection, projectionToMercatorMatrix, projectionToMercatorTransition, _centerInMercator, _pixelsPerMeterRatio) {
     if (this.isRemoved || !this.renderer || !this.gl || !this.mode || !this.map) {
+      return;
+    }
+    if (!this.isZoomInRange()) {
       return;
     }
     const projectionParams = resolveProjectionParams(

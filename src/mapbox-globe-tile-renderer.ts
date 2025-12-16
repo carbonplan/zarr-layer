@@ -304,7 +304,7 @@ export function renderMapboxTile({
 
   const crs = mode.getCRS()
   const xyLimits = mode.getXYLimits()
-  const maxZoom = mode.getMaxZoom()
+  const maxLevelIndex = mode.getMaxLevelIndex()
 
   if (crs === 'EPSG:4326' && xyLimits) {
     const mapboxGeoBounds = mercatorTileToGeoBounds(
@@ -312,7 +312,7 @@ export function renderMapboxTile({
       tileId.x,
       tileId.y
     )
-    const pyramidLevel = zoomToLevel(tileId.z, maxZoom)
+    const pyramidLevel = zoomToLevel(tileId.z, maxLevelIndex)
     const overlappingZarrTiles = getOverlapping4326Tiles(
       mapboxGeoBounds,
       xyLimits,

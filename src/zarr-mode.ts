@@ -65,7 +65,7 @@ export interface ZarrMode {
   setLoadingCallback(callback: LoadingStateCallback | undefined): void
   getCRS(): CRS
   getXYLimits(): XYLimits | null
-  getMaxZoom(): number
+  getMaxLevelIndex(): number
   getTiledState?(): TiledRenderState | null
   getSingleImageState?(): SingleImageRenderState | null
   updateClim(clim: [number, number]): void

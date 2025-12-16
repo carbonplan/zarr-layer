@@ -205,14 +205,14 @@ export function tileToScale(tile: TileTuple): [number, number, number] {
 }
 
 /**
- * Converts map zoom level to pyramid/multiscale level.
+ * Converts map zoom level to pyramid/multiscale level index.
  * Clamps zoom to valid range for the dataset.
  * @param zoom - Map zoom level.
- * @param maxZoom - Maximum zoom level available in dataset.
- * @returns Pyramid level (integer).
+ * @param maxLevelIndex - Maximum level index available in dataset.
+ * @returns Pyramid level index (integer).
  */
-export function zoomToLevel(zoom: number, maxZoom: number): number {
-  if (maxZoom) return Math.min(Math.max(0, Math.floor(zoom)), maxZoom)
+export function zoomToLevel(zoom: number, maxLevelIndex: number): number {
+  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex)
   return Math.max(0, Math.floor(zoom))
 }
 

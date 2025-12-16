@@ -44,8 +44,7 @@ export class TiledMode implements ZarrMode {
   private vertexArr: Float32Array = new Float32Array()
   private pixCoordArr: Float32Array = new Float32Array()
   private currentSubdivisions: number = 0
-  private maxZoom: number = 4
-  private minRenderZoom: number = 3
+  private maxLevelIndex: number = 0
   private tileSize: number = DEFAULT_TILE_SIZE
   private variable: string
   private selector: NormalizedSelector
@@ -64,13 +63,11 @@ export class TiledMode implements ZarrMode {
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
-    minRenderZoom: number,
     invalidate: () => void
   ) {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
-    this.minRenderZoom = minRenderZoom
     this.invalidate = invalidate
   }
 
@@ -80,7 +77,7 @@ export class TiledMode implements ZarrMode {
 
     try {
       const desc = this.zarrStore.describe()
-      this.maxZoom = desc.levels.length - 1
+      this.maxLevelIndex = desc.levels.length - 1
       this.tileSize = desc.tileSize || DEFAULT_TILE_SIZE
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
@@ -248,8 +245,8 @@ export class TiledMode implements ZarrMode {
     return this.xyLimits
   }
 
-  getMaxZoom(): number {
-    return this.maxZoom
+  getMaxLevelIndex(): number {
+    return this.maxLevelIndex
   }
 
   updateClim(clim: [number, number]): void {
@@ -307,10 +304,7 @@ export class TiledMode implements ZarrMode {
     }
 
     const mapZoom = map.getZoom()
-    if (mapZoom < this.minRenderZoom) {
-      return { tiles: [], pyramidLevel: null, mapZoom, bounds: null }
-    }
-    const pyramidLevel = zoomToLevel(mapZoom, this.maxZoom)
+    const pyramidLevel = zoomToLevel(mapZoom, this.maxLevelIndex)
     const bounds = map.getBounds()?.toArray()
     if (!bounds) {
       return { tiles: [], pyramidLevel, mapZoom, bounds: null }
@@ -428,7 +422,7 @@ export class TiledMode implements ZarrMode {
     }
 
     const querySelector = selector ? normalizeSelector(selector) : this.selector
-    const level = this.currentLevel ?? this.maxZoom
+    const level = this.currentLevel ?? this.maxLevelIndex
     const desc = this.zarrStore.describe()
 
     return queryRegionTiled(

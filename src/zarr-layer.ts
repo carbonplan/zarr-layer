@@ -53,7 +53,8 @@ export class ZarrLayer {
   private colormap: ColormapState
   private clim: [number, number]
   private opacity: number
-  private minRenderZoom: number
+  private minzoom: number
+  private maxzoom: number
   private selectorHash: string = ''
 
   private isMultiscale: boolean = true
@@ -128,7 +129,8 @@ export class ZarrLayer {
     colormap,
     clim,
     opacity = 1,
-    minRenderZoom = 0,
+    minzoom = 0,
+    maxzoom = Infinity,
     zarrVersion,
     spatialDimensions = {},
     bounds,
@@ -172,7 +174,8 @@ export class ZarrLayer {
     this.colormap = new ColormapState(colormap)
     this.clim = clim
     this.opacity = opacity
-    this.minRenderZoom = minRenderZoom
+    this.minzoom = minzoom
+    this.maxzoom = maxzoom
 
     this.customFrag = customFrag
     this.customUniforms = uniforms || {}
@@ -363,7 +366,6 @@ export class ZarrLayer {
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
-        this.minRenderZoom,
         this.invalidate
       )
     } else {
@@ -464,8 +466,15 @@ export class ZarrLayer {
     }
   }
 
+  private isZoomInRange(): boolean {
+    if (!this.map?.getZoom) return true
+    const zoom = this.map.getZoom()
+    return zoom >= this.minzoom && zoom <= this.maxzoom
+  }
+
   prerender(_gl: WebGL2RenderingContext, _params: unknown) {
     if (this.isRemoved || !this.gl || !this.mode || !this.map) return
+    if (!this.isZoomInRange()) return
 
     this.mode.update(this.map, this.gl)
   }
@@ -486,6 +495,10 @@ export class ZarrLayer {
       !this.mode ||
       !this.map
     ) {
+      return
+    }
+
+    if (!this.isZoomInRange()) {
       return
     }
 

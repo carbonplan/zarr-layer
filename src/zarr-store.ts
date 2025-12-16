@@ -13,7 +13,7 @@ const decodeJSON = (bytes: Uint8Array | undefined): unknown => {
 
 interface PyramidMetadata {
   levels: string[]
-  maxZoom: number
+  maxLevelIndex: number
   tileSize: number
   crs: CRS
 }
@@ -110,7 +110,7 @@ interface StoreDescription {
   fill_value: number | null
   dtype: string | null
   levels: string[]
-  maxZoom: number
+  maxLevelIndex: number
   tileSize: number
   crs: CRS
   dimIndices: DimIndicesProps
@@ -143,7 +143,7 @@ export class ZarrStore {
   fill_value: number | null = null
   dtype: string | null = null
   levels: string[] = []
-  maxZoom: number = 0
+  maxLevelIndex: number = 0
   tileSize: number = 128
   crs: CRS = 'EPSG:4326'
   dimIndices: DimIndicesProps = {}
@@ -257,7 +257,7 @@ export class ZarrStore {
       fill_value: this.fill_value,
       dtype: this.dtype,
       levels: this.levels,
-      maxZoom: this.maxZoom,
+      maxLevelIndex: this.maxLevelIndex,
       tileSize: this.tileSize,
       crs: this.crs,
       dimIndices: this.dimIndices,
@@ -375,7 +375,7 @@ export class ZarrStore {
     if (rootAttrs?.multiscales) {
       const pyramid = this._getPyramidMetadata(rootAttrs.multiscales)
       this.levels = pyramid.levels
-      this.maxZoom = pyramid.maxZoom
+      this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
       this.crs = pyramid.crs
     }
@@ -444,7 +444,7 @@ export class ZarrStore {
     if (metadata.attributes?.multiscales) {
       const pyramid = this._getPyramidMetadata(metadata.attributes.multiscales)
       this.levels = pyramid.levels
-      this.maxZoom = pyramid.maxZoom
+      this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
       this.crs = pyramid.crs
     }
@@ -651,7 +651,7 @@ export class ZarrStore {
     if (!multiscales || !multiscales[0]?.datasets?.length) {
       return {
         levels: [],
-        maxZoom: 0,
+        maxLevelIndex: 0,
         tileSize: 128,
         crs: 'EPSG:4326',
       }
@@ -659,14 +659,14 @@ export class ZarrStore {
 
     const datasets = multiscales[0].datasets
     const levels = datasets.map((dataset) => String(dataset.path))
-    const maxZoom = levels.length - 1
+    const maxLevelIndex = levels.length - 1
     const tileSize = datasets[0].pixels_per_tile || 128
     // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
     // Explicitly handle EPSG:4326 pyramids so we can reproject to mercator on the fly.
     const crs: CRS =
       (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
 
-    return { levels, maxZoom, tileSize, crs }
+    return { levels, maxLevelIndex, tileSize, crs }
   }
 
   static clearCache() {
