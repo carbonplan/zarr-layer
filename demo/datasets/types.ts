@@ -14,7 +14,6 @@ export type DatasetCommonConfig = {
   latIsAscending?: boolean
   center?: [number, number]
   zoom?: number
-  minRenderZoom?: number
   spatialDimensions?: {
     lat?: string
     lon?: string

@@ -214,7 +214,6 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       opacity: opacity,
       selector: currentLayerConfig.selector,
       zarrVersion: datasetModule.zarrVersion,
-      minRenderZoom: datasetModule.minRenderZoom ?? 0,
       fillValue: datasetModule.fillValue,
       spatialDimensions: datasetModule.spatialDimensions,
       bounds: datasetModule.bounds,
