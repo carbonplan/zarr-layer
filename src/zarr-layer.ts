@@ -93,7 +93,7 @@ export class ZarrLayer {
       painterGl: describe(map?.painter?.context?.gl),
       rendererGl: describe(map?.renderer?.getContext?.()),
     })
-    throw new Error('MapLibre did not provide a valid WebGL2 context')
+    throw new Error('`map` did not provide a valid WebGL2 context')
   }
 
   private zarrStore: ZarrStore | null = null
