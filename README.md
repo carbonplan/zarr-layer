@@ -46,7 +46,8 @@ const layer = new ZarrLayer({
 })
 map.on('load', () => {
   map.addLayer(layer)
-  // optionally add before id to slot data into map layer stack. (map.addLayer(layer, 'beforeID'))
+  // optionally add before id to slot data into map layer stack.
+  // map.addLayer(layer, 'beforeID')
 })
 ```
 
@@ -101,7 +102,7 @@ Selectors specify which slice of your multidimensional data to render. Dimension
 { time: 5 }
 { time: '2024-01-15' }
 
-// Explicit index - uses array index directly (faster, no coordinate lookup)
+// Explicit index - uses array index directly (no coordinate lookup)
 { time: { selected: 5, type: 'index' } }
 
 // Explicit value - same as simple syntax, matches exact value
@@ -142,7 +143,7 @@ const result = await layer.queryData(
 
 ## custom shaders and uniforms
 
-Custom shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Note that in order to access different bands/time slices etc., the data needs to be in the same chunk. You can pass in uniforms to allow user interaction to influence the custom shader code.
+Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Note that in order to access different bands/time slices etc., the data need to be in the same chunk. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
 
 ```ts
 new ZarrLayer({
@@ -160,7 +161,7 @@ new ZarrLayer({
 
 ## queries
 
-Supports `Point`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the layer's current selection.
+Supports `Point`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
 
 ```ts
 // Point query
@@ -188,7 +189,7 @@ const result = await layer.queryData({
 
 ## thanks
 
-This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. LLMs of several makes aided in the coding and debugging of this library as well.
+This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. LLMs of several makes aided in the coding and debugging of this library.
 
 ## license
 
