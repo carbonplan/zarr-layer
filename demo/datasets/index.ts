@@ -91,7 +91,7 @@ export const DATASETS: Dataset<any>[] = [
     zarrVersion: 3,
     info: 'Burn Probability over CONUS',
     sourceInfo:
-      '30m resolution 1 level multiscale Zarr pyramid created from resampling and reprojecting the  \n \n "Wildfire Risk to Communities: Spatial datasets of landscape-wide wildfire risk components for the United States (2nd Edition)" dataset. \n DOI: https://doi.org/10.2737/RDS-2020-0016-2',
+      '30m resolution untiled multiscale dataset created by resampling and reprojecting the "Wildfire Risk to Communities: Spatial datasets of landscape-wide wildfire risk components for the United States (2nd Edition)" dataset.'
   }),
 ]
 
