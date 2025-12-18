@@ -1010,6 +1010,11 @@ export class UntiledMode implements ZarrMode {
     // Cache gl context for use in setSelector
     this.cachedGl = gl
 
+    // Don't proceed if metadata is still loading
+    if (this.loadingManager.metadataLoading) {
+      return
+    }
+
     // For multi-level datasets, select/switch levels based on zoom
     if (this.isMultiscale && this.levels.length > 0) {
       const mapZoom = map.getZoom?.() ?? 0
@@ -1139,7 +1144,8 @@ export class UntiledMode implements ZarrMode {
       levelResolutions.push({ index: i, effectivePixels })
     }
 
-    if (levelResolutions.length === 0) return 0
+    // If no levels have shape data yet, return last index (lowest res for untiled)
+    if (levelResolutions.length === 0) return this.levels.length - 1
 
     // Sort by resolution ascending (lowest res first)
     levelResolutions.sort((a, b) => a.effectivePixels - b.effectivePixels)
