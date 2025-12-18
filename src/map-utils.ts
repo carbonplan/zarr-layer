@@ -3,11 +3,13 @@
  *
  * Utility functions for custom layer integration.
  * Provides tile management, zoom level conversion,
- * and coordinate transformations.
+ * coordinate transformations, and projection handling.
  * adapted from zarr-cesium/src/map-utils.ts
  */
 
 import { MERCATOR_LAT_LIMIT } from './constants'
+import type { ProjectionData, ShaderData } from './shaders'
+import type { MapLike } from './types'
 
 export type TileTuple = [number, number, number]
 
@@ -212,7 +214,8 @@ export function tileToScale(tile: TileTuple): [number, number, number] {
  * @returns Pyramid level index (integer).
  */
 export function zoomToLevel(zoom: number, maxLevelIndex: number): number {
-  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex)
+  if (maxLevelIndex)
+    return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex)
   return Math.max(0, Math.floor(zoom))
 }
 
@@ -223,7 +226,10 @@ export function zoomToLevel(zoom: number, maxLevelIndex: number): number {
  * @param fallback - Fallback value if path can't be parsed as a number.
  * @returns The parsed zoom number.
  */
-export function parseLevelZoom(levelPath: string, fallback: number = 0): number {
+export function parseLevelZoom(
+  levelPath: string,
+  fallback: number = 0
+): number {
   // Try to parse the path directly as a number
   const parsed = parseInt(levelPath, 10)
   if (!isNaN(parsed)) return parsed
@@ -440,4 +446,297 @@ export function boundsToMercatorNorm(
     latMin: yMin,
     latMax: yMax,
   }
+}
+
+// === Untiled mode utilities ===
+
+/**
+ * Convert a geographic coordinate to an array index.
+ * Used for mapping viewport bounds to array pixel coordinates.
+ * @param geo - Geographic coordinate value (lon or lat).
+ * @param geoMin - Minimum geographic extent.
+ * @param geoMax - Maximum geographic extent.
+ * @param arraySize - Size of the array in this dimension.
+ * @returns Array index (integer).
+ */
+export function geoToArrayIndex(
+  geo: number,
+  geoMin: number,
+  geoMax: number,
+  arraySize: number
+): number {
+  const normalized = (geo - geoMin) / (geoMax - geoMin)
+  return Math.floor(
+    Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
+  )
+}
+
+/**
+ * Convert an array index to a geographic coordinate.
+ * Used for computing chunk bounds in geographic space.
+ * @param index - Array index.
+ * @param geoMin - Minimum geographic extent.
+ * @param geoMax - Maximum geographic extent.
+ * @param arraySize - Size of the array in this dimension.
+ * @returns Geographic coordinate value.
+ */
+export function arrayIndexToGeo(
+  index: number,
+  geoMin: number,
+  geoMax: number,
+  arraySize: number
+): number {
+  return geoMin + (index / arraySize) * (geoMax - geoMin)
+}
+
+/**
+ * Convert an array index to a chunk index.
+ * @param arrayIndex - Array index.
+ * @param chunkSize - Size of each chunk.
+ * @returns Chunk index.
+ */
+export function arrayIndexToChunkIndex(
+  arrayIndex: number,
+  chunkSize: number
+): number {
+  return Math.floor(arrayIndex / chunkSize)
+}
+
+/**
+ * Get the array index range covered by a chunk.
+ * @param chunkIndex - Chunk index.
+ * @param chunkSize - Size of each chunk.
+ * @param arraySize - Total size of the array.
+ * @returns [startIndex, endIndex] (exclusive end).
+ */
+export function chunkIndexToArrayRange(
+  chunkIndex: number,
+  chunkSize: number,
+  arraySize: number
+): [number, number] {
+  const startIndex = chunkIndex * chunkSize
+  const endIndex = Math.min((chunkIndex + 1) * chunkSize, arraySize)
+  return [startIndex, endIndex]
+}
+
+// === Texture coordinate warping utilities ===
+
+/** Latitude bounds in degrees (for texture coordinate warping) */
+export interface LatBounds {
+  latMin: number
+  latMax: number
+  lonMin?: number
+  lonMax?: number
+}
+
+/**
+ * Create warped texture coordinates for EPSG:4326 data displayed on a mercator map.
+ *
+ * The texture is in linear lat/lon space, but the geometry is in mercator space.
+ * This function computes the texture V coordinate for each vertex based on the
+ * mercator Y position, accounting for the non-linear relationship between
+ * latitude and mercator Y.
+ *
+ * @param vertexArr - Subdivided quad vertices in [-1, 1] range
+ * @param texCoordArr - Linear texture coordinates [0, 1] for each vertex
+ * @param mercatorBounds - Mercator normalized bounds for the geometry
+ * @param latBounds - Latitude bounds in degrees
+ * @param latIsAscending - If false, texture row 0 is north (latMax); if true/null, row 0 is south
+ */
+export function createWarpedTexCoords(
+  vertexArr: Float32Array,
+  texCoordArr: Float32Array,
+  mercatorBounds: MercatorBounds,
+  latBounds: LatBounds,
+  latIsAscending: boolean | null
+): Float32Array {
+  const warped = new Float32Array(texCoordArr.length)
+  const { y0, y1 } = mercatorBounds
+  const { latMin, latMax } = latBounds
+  const latRange = latMax - latMin
+
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const u = texCoordArr[i]
+    const normY = vertexArr[i + 1] // vertex Y in [-1, 1]
+
+    // Compute mercator Y for this vertex
+    // vertex y=-1 maps to y1 (south), y=1 maps to y0 (north)
+    const mercY = y0 + ((1 - normY) / 2) * (y1 - y0)
+
+    // Convert mercator Y to latitude
+    const lat = mercatorNormToLat(mercY)
+
+    // Compute texture V for this latitude
+    let v = (lat - latMin) / latRange
+
+    // Handle latIsAscending (only flip if explicitly false, not null)
+    if (latIsAscending === false) {
+      // Data row 0 = north (latMax), so flip V
+      v = 1 - v
+    }
+
+    // Clamp to valid range
+    v = Math.max(0, Math.min(1, v))
+
+    warped[i] = u
+    warped[i + 1] = v
+  }
+  return warped
+}
+
+/**
+ * Flip texture V coordinates (for EPSG:3857 data with latIsAscending=true).
+ */
+export function flipTexCoordV(texCoords: Float32Array): Float32Array {
+  const flipped = new Float32Array(texCoords.length)
+  for (let i = 0; i < texCoords.length; i += 2) {
+    flipped[i] = texCoords[i]
+    flipped[i + 1] = 1 - texCoords[i + 1]
+  }
+  return flipped
+}
+
+// === Projection utilities ===
+
+/**
+ * Detects if the given projection is a globe projection.
+ * Works with both Mapbox (projection.name) and MapLibre (projection.type).
+ */
+export function isGlobeProjection(
+  projection: { type?: string; name?: string } | null | undefined
+): boolean {
+  return projection?.type === 'globe' || projection?.name === 'globe'
+}
+
+interface ProjectionResolution {
+  matrix: number[] | Float32Array | Float64Array | null
+  shaderData?: ShaderData
+  projectionData?: ProjectionData
+  mapboxGlobe?:
+    | {
+        projection: { name: string }
+        globeToMercatorMatrix: number[] | Float32Array | Float64Array
+        transition: number
+      }
+    | undefined
+}
+
+export function resolveProjectionParams(
+  params: unknown,
+  projection?: { name: string },
+  projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
+  projectionToMercatorTransition?: number
+): ProjectionResolution {
+  type MatrixLike = number[] | Float32Array | Float64Array
+  type ProjectionParams = {
+    shaderData?: ShaderData
+    defaultProjectionData?: {
+      mainMatrix?: MatrixLike
+      fallbackMatrix?: MatrixLike
+      tileMercatorCoords?: number[]
+      clippingPlane?: number[]
+      projectionTransition?: number
+    }
+    modelViewProjectionMatrix?: MatrixLike
+    projectionMatrix?: MatrixLike
+  }
+
+  const paramsObj =
+    params &&
+    typeof params === 'object' &&
+    !Array.isArray(params) &&
+    !ArrayBuffer.isView(params)
+      ? (params as ProjectionParams)
+      : null
+
+  const shaderData = paramsObj?.shaderData
+  let projectionData: ProjectionData | undefined
+  const defaultProj = paramsObj?.defaultProjectionData
+  if (
+    defaultProj &&
+    defaultProj.mainMatrix &&
+    defaultProj.fallbackMatrix &&
+    defaultProj.tileMercatorCoords &&
+    defaultProj.clippingPlane &&
+    typeof defaultProj.projectionTransition === 'number'
+  ) {
+    projectionData = {
+      mainMatrix: defaultProj.mainMatrix,
+      fallbackMatrix: defaultProj.fallbackMatrix,
+      tileMercatorCoords: defaultProj.tileMercatorCoords as [
+        number,
+        number,
+        number,
+        number
+      ],
+      clippingPlane: defaultProj.clippingPlane as [
+        number,
+        number,
+        number,
+        number
+      ],
+      projectionTransition: defaultProj.projectionTransition,
+    }
+  }
+  let matrix: number[] | Float32Array | Float64Array | null = null
+  if (projectionData?.mainMatrix && projectionData.mainMatrix.length) {
+    matrix = projectionData.mainMatrix
+  } else if (
+    Array.isArray(params) ||
+    params instanceof Float32Array ||
+    params instanceof Float64Array
+  ) {
+    matrix = params as number[] | Float32Array | Float64Array
+  } else if (paramsObj?.modelViewProjectionMatrix) {
+    matrix = paramsObj.modelViewProjectionMatrix
+  } else if (paramsObj?.projectionMatrix) {
+    matrix = paramsObj.projectionMatrix
+  }
+
+  const mapboxGlobe =
+    projection && projectionToMercatorMatrix !== undefined
+      ? {
+          projection,
+          globeToMercatorMatrix: projectionToMercatorMatrix,
+          transition:
+            typeof projectionToMercatorTransition === 'number'
+              ? projectionToMercatorTransition
+              : 0,
+        }
+      : undefined
+
+  return { matrix, shaderData, projectionData, mapboxGlobe }
+}
+
+export function computeWorldOffsets(
+  map: MapLike | null,
+  isGlobe: boolean
+): number[] {
+  if (!map) return [0]
+
+  const bounds = map.getBounds ? map.getBounds() : null
+  if (!bounds) return [0]
+
+  const renderWorldCopies =
+    typeof map.getRenderWorldCopies === 'function'
+      ? map.getRenderWorldCopies()
+      : true
+  if (isGlobe || !renderWorldCopies) return [0]
+
+  const west = bounds.getWest()
+  const east = bounds.getEast()
+
+  let effectiveEast = east
+  if (west > east) {
+    effectiveEast = east + 360
+  }
+
+  const minWorld = Math.floor((west + 180) / 360)
+  const maxWorld = Math.floor((effectiveEast + 180) / 360)
+
+  const worldOffsets: number[] = []
+  for (let i = minWorld; i <= maxWorld; i++) {
+    worldOffsets.push(i)
+  }
+  return worldOffsets.length > 0 ? worldOffsets : [0]
 }

@@ -17,13 +17,10 @@ export function BandSelector<T extends string>({
   onChange,
   label = 'Band',
 }: BandSelectorProps<T>) {
-  const values = options.reduce(
-    (acc, opt) => {
-      acc[opt] = opt === value
-      return acc
-    },
-    {} as Record<T, boolean>
-  )
+  const values = options.reduce((acc, opt) => {
+    acc[opt] = opt === value
+    return acc
+  }, {} as Record<T, boolean>)
 
   return (
     <Row columns={[4, 4, 4, 4]} sx={{ mb: 3, alignItems: 'baseline' }}>

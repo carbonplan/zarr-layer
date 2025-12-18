@@ -11,36 +11,24 @@ import type {
   MapboxGlobeParams,
   RendererUniforms,
 } from './renderer-types'
-import {
-  renderSingleImage,
-  type SingleImageState,
-} from './single-image-renderer'
 import { renderTiles } from './tile-renderer'
+import type { TileTuple, MercatorBounds } from './map-utils'
+import type { Tiles } from './tiles'
 
 export { type ShaderProgram } from './shader-program'
 
 export class ZarrRenderer {
-  private _gl: WebGL2RenderingContext
+  readonly gl: WebGL2RenderingContext
   private fragmentShaderSource: string
   private shaderCache: Map<string, ShaderProgram> = new Map()
-  private singleImageState: SingleImageState = {
-    uploaded: false,
-    geometryVersion: null,
-    dataVersion: null,
-    normalizedData: null,
-  }
   private customShaderConfig: CustomShaderConfig | null = null
-
-  get gl(): WebGL2RenderingContext {
-    return this._gl
-  }
 
   constructor(
     gl: WebGL2RenderingContext,
     fragmentShaderSource: string,
     customShaderConfig?: CustomShaderConfig
   ) {
-    this._gl = ZarrRenderer.resolveGl(gl)
+    this.gl = ZarrRenderer.resolveGl(gl)
     this.fragmentShaderSource = fragmentShaderSource
     this.customShaderConfig = customShaderConfig || null
     this.getProgram(undefined, customShaderConfig)
@@ -93,7 +81,7 @@ export class ZarrRenderer {
       return cached
     }
 
-    const { shaderProgram } = createShaderProgram(this._gl, {
+    const { shaderProgram } = createShaderProgram(this.gl, {
       fragmentShaderSource: this.fragmentShaderSource,
       shaderData,
       customShaderConfig: config,
@@ -115,7 +103,7 @@ export class ZarrRenderer {
     matrix?: number[] | Float32Array | Float64Array,
     isGlobeTileRender: boolean = false
   ): void {
-    const gl = this._gl
+    const gl = this.gl
 
     gl.enable(gl.BLEND)
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
@@ -145,7 +133,11 @@ export class ZarrRenderer {
     }
     if (shaderProgram.dataScaleLoc) {
       // Compute data scale from clim (same formula used in normalizeDataForTexture)
-      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1)
+      const dataScale = Math.max(
+        Math.abs(uniforms.clim[0]),
+        Math.abs(uniforms.clim[1]),
+        1
+      )
       gl.uniform1f(shaderProgram.dataScaleLoc, dataScale)
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
@@ -176,13 +168,14 @@ export class ZarrRenderer {
 
   renderTiles(
     shaderProgram: ShaderProgram,
-    visibleTiles: import('./map-utils').TileTuple[],
+    visibleTiles: TileTuple[],
     worldOffsets: number[],
-    tileCache: import('./tiles').Tiles,
+    tileCache: Tiles,
     tileSize: number,
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
-    tileBounds?: Record<string, import('./map-utils').MercatorBounds>,
+    latIsAscending: boolean | null,
+    tileBounds?: Record<string, MercatorBounds>,
     customShaderConfig?: CustomShaderConfig,
     isGlobeTileRender: boolean = false,
     tileTexOverrides?: Record<
@@ -191,7 +184,7 @@ export class ZarrRenderer {
     >
   ): void {
     renderTiles(
-      this._gl,
+      this.gl,
       shaderProgram,
       visibleTiles,
       worldOffsets,
@@ -199,6 +192,7 @@ export class ZarrRenderer {
       tileSize,
       vertexArr,
       pixCoordArr,
+      latIsAscending,
       tileBounds,
       customShaderConfig,
       isGlobeTileRender,
@@ -206,40 +200,11 @@ export class ZarrRenderer {
     )
   }
 
-  renderSingleImage(
-    shaderProgram: ShaderProgram,
-    worldOffsets: number[],
-    params: import('./renderer-types').SingleImageParams,
-    vertexArr: Float32Array,
-    tileOverride?: {
-      scaleX: number
-      scaleY: number
-      shiftX: number
-      shiftY: number
-      texScale: [number, number]
-      texOffset: [number, number]
-    }
-  ): void {
-    this.singleImageState = renderSingleImage(
-      this._gl,
-      shaderProgram,
-      worldOffsets,
-      params,
-      vertexArr,
-      this.singleImageState,
-      tileOverride
-    )
-  }
-
   dispose() {
-    const gl = this._gl
+    const gl = this.gl
     for (const [, shader] of this.shaderCache) {
       gl.deleteProgram(shader.program)
     }
     this.shaderCache.clear()
-  }
-
-  resetSingleImageGeometry() {
-    this.singleImageState.uploaded = false
   }
 }

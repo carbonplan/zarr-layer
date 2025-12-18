@@ -4356,12 +4356,16 @@ var _ZarrStore = class _ZarrStore {
     this.maxLevelIndex = 0;
     this.tileSize = 128;
     this.crs = "EPSG:4326";
+    this.multiscaleType = "none";
+    this.untiledLevels = [];
     this.dimIndices = {};
     this.xyLimits = null;
     this.scaleFactor = 1;
     this.addOffset = 0;
     this.coordinates = {};
     this.latIsAscending = null;
+    this._crsFromMetadata = false;
+    // Track if CRS was explicitly set from metadata
     this.store = null;
     this.root = null;
     this._arrayHandles = /* @__PURE__ */ new Map();
@@ -4443,6 +4447,8 @@ var _ZarrStore = class _ZarrStore {
       maxLevelIndex: this.maxLevelIndex,
       tileSize: this.tileSize,
       crs: this.crs,
+      multiscaleType: this.multiscaleType,
+      untiledLevels: this.untiledLevels,
       dimIndices: this.dimIndices,
       xyLimits: this.xyLimits,
       scaleFactor: this.scaleFactor,
@@ -4462,6 +4468,17 @@ var _ZarrStore = class _ZarrStore {
   }
   async getArray() {
     return this._getArray(this.variable);
+  }
+  /**
+   * Get metadata (shape, chunks) for a specific untiled level.
+   * Used by UntiledMode to determine chunk boundaries for viewport-based loading.
+   */
+  async getUntiledLevelMetadata(levelAsset) {
+    const array = await this.getLevelArray(levelAsset);
+    return {
+      shape: array.shape,
+      chunks: array.chunks
+    };
   }
   async _getArray(key) {
     if (!this.root) {
@@ -4726,9 +4743,18 @@ var _ZarrStore = class _ZarrStore {
         this.latIsAscending = null;
       }
     }
+    if (this.multiscaleType === "untiled" && !this._crsFromMetadata && this.xyLimits) {
+      const maxAbsX = Math.max(
+        Math.abs(this.xyLimits.xMin),
+        Math.abs(this.xyLimits.xMax)
+      );
+      if (maxAbsX > 360) {
+        this.crs = "EPSG:3857";
+      }
+    }
   }
   _getPyramidMetadata(multiscales) {
-    if (!multiscales || !multiscales[0]?.datasets?.length) {
+    if (!multiscales) {
       return {
         levels: [],
         maxLevelIndex: 0,
@@ -4736,12 +4762,64 @@ var _ZarrStore = class _ZarrStore {
         crs: "EPSG:4326"
       };
     }
-    const datasets = multiscales[0].datasets;
-    const levels = datasets.map((dataset) => String(dataset.path));
+    if ("layout" in multiscales && Array.isArray(multiscales.layout)) {
+      return this._parseUntiledMultiscale(multiscales);
+    }
+    if (Array.isArray(multiscales) && multiscales[0]?.datasets?.length) {
+      const datasets = multiscales[0].datasets;
+      const levels = datasets.map((dataset) => String(dataset.path));
+      const maxLevelIndex = levels.length - 1;
+      const tileSize = datasets[0].pixels_per_tile;
+      const crs = datasets[0].crs === "EPSG:4326" ? "EPSG:4326" : "EPSG:3857";
+      if (tileSize) {
+        this.multiscaleType = "tiled";
+        return { levels, maxLevelIndex, tileSize, crs };
+      } else {
+        this.untiledLevels = levels.map((level) => ({
+          asset: level,
+          scale: [1, 1],
+          translation: [0, 0]
+        }));
+        this.multiscaleType = "untiled";
+        return { levels, maxLevelIndex, tileSize: 128, crs };
+      }
+    }
+    return {
+      levels: [],
+      maxLevelIndex: 0,
+      tileSize: 128,
+      crs: "EPSG:4326"
+    };
+  }
+  _parseUntiledMultiscale(metadata) {
+    const layout = metadata.layout;
+    if (!layout || layout.length === 0) {
+      return {
+        levels: [],
+        maxLevelIndex: 0,
+        tileSize: 128,
+        crs: "EPSG:4326"
+      };
+    }
+    const levels = layout.map((entry) => entry.asset);
     const maxLevelIndex = levels.length - 1;
-    const tileSize = datasets[0].pixels_per_tile || 128;
-    const crs = datasets[0].crs === "EPSG:4326" ? "EPSG:4326" : "EPSG:3857";
-    return { levels, maxLevelIndex, tileSize, crs };
+    this.untiledLevels = layout.map((entry) => ({
+      asset: entry.asset,
+      scale: entry.transform?.scale ?? [1, 1],
+      translation: entry.transform?.translation ?? [0, 0]
+    }));
+    this.multiscaleType = "untiled";
+    const crs = metadata.crs ?? "EPSG:4326";
+    if (metadata.crs) {
+      this._crsFromMetadata = true;
+    }
+    return {
+      levels,
+      maxLevelIndex,
+      tileSize: 128,
+      // Will be overridden by chunk shape
+      crs
+    };
   }
   static clearCache() {
     _ZarrStore._cache.clear();
@@ -5386,119 +5464,10 @@ function applyProjectionUniforms(gl, shaderProgram, matrix, projectionData, mapb
   }
 }
 
-// src/single-image-renderer.ts
-function renderSingleImage(gl, shaderProgram, worldOffsets, params, vertexArr, state, tileOverride) {
-  const {
-    data,
-    bounds,
-    texture,
-    vertexBuffer,
-    pixCoordBuffer,
-    width,
-    height,
-    channels = 1,
-    pixCoordArr,
-    geometryVersion,
-    dataVersion,
-    texScale: baseTexScale = [1, 1],
-    texOffset: baseTexOffset = [0, 0],
-    fillValue = null,
-    clim
-  } = params;
-  let uploaded = state.uploaded;
-  let currentGeometryVersion = state.geometryVersion;
-  let currentDataVersion = state.dataVersion;
-  let normalizedData = state.normalizedData;
-  const geometryChanged = currentGeometryVersion === null || currentGeometryVersion !== geometryVersion;
-  const dataChanged = currentDataVersion === null || currentDataVersion !== dataVersion;
-  if (geometryChanged) {
-    uploaded = false;
-    currentGeometryVersion = geometryVersion;
-  }
-  if (!data || !bounds || !texture || !vertexBuffer || !pixCoordBuffer) {
-    return {
-      uploaded,
-      geometryVersion: currentGeometryVersion,
-      dataVersion: currentDataVersion,
-      normalizedData
-    };
-  }
-  if (dataChanged || !normalizedData) {
-    normalizedData = normalizeDataForTexture(data, fillValue, clim).normalized;
-  }
-  const scaleX = tileOverride?.scaleX !== void 0 ? tileOverride.scaleX : (bounds.x1 - bounds.x0) / 2;
-  const scaleY = tileOverride?.scaleY !== void 0 ? tileOverride.scaleY : (bounds.y1 - bounds.y0) / 2;
-  const shiftX = tileOverride?.shiftX !== void 0 ? tileOverride.shiftX : (bounds.x0 + bounds.x1) / 2;
-  const shiftY = tileOverride?.shiftY !== void 0 ? tileOverride.shiftY : (bounds.y0 + bounds.y1) / 2;
-  gl.uniform1f(shaderProgram.scaleLoc, 0);
-  gl.uniform1f(shaderProgram.scaleXLoc, scaleX);
-  gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
-  gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
-  gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
-  const overrideScale = tileOverride?.texScale ?? [1, 1];
-  const overrideOffset = tileOverride?.texOffset ?? [0, 0];
-  const texScale = [
-    baseTexScale[0] * overrideScale[0],
-    baseTexScale[1] * overrideScale[1]
-  ];
-  const texOffset = [
-    baseTexOffset[0] * overrideScale[0] + overrideOffset[0],
-    baseTexOffset[1] * overrideScale[1] + overrideOffset[1]
-  ];
-  gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
-  gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-  if (!uploaded) {
-    gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW);
-  }
-  gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer);
-  if (!uploaded) {
-    gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW);
-    uploaded = true;
-  }
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.uniform1i(shaderProgram.texLoc, 0);
-  configureDataTexture(gl);
-  if (dataChanged) {
-    const { format, internalFormat } = getTextureFormats(gl, channels);
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      internalFormat,
-      width,
-      height,
-      0,
-      format,
-      gl.FLOAT,
-      normalizedData
-    );
-    currentDataVersion = dataVersion;
-  }
-  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-  gl.enableVertexAttribArray(shaderProgram.vertexLoc);
-  gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0);
-  gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer);
-  gl.enableVertexAttribArray(shaderProgram.pixCoordLoc);
-  gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0);
-  const vertexCount = vertexArr.length / 2;
-  for (const worldOffset of worldOffsets) {
-    gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
-  }
-  return {
-    uploaded,
-    geometryVersion: currentGeometryVersion,
-    dataVersion: currentDataVersion,
-    normalizedData
-  };
-}
-
 // src/constants.ts
 var DEFAULT_TILE_SIZE = 128;
 var MAX_CACHED_TILES = 64;
 var TILE_SUBDIVISIONS = 32;
-var SINGLE_IMAGE_TILE_SUBDIVISIONS = 256;
 var MERCATOR_LAT_LIMIT = 85.05112878;
 
 // src/map-utils.ts
@@ -5603,7 +5572,8 @@ function tileToScale(tile) {
   return [scale, shiftX, shiftY];
 }
 function zoomToLevel(zoom, maxLevelIndex) {
-  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex);
+  if (maxLevelIndex)
+    return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex);
   return Math.max(0, Math.floor(zoom));
 }
 function parseLevelZoom(levelPath, fallback = 0) {
@@ -5729,202 +5699,391 @@ function boundsToMercatorNorm(xyLimits, crs) {
     latMax: yMax
   };
 }
+function geoToArrayIndex(geo, geoMin, geoMax, arraySize) {
+  const normalized = (geo - geoMin) / (geoMax - geoMin);
+  return Math.floor(
+    Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
+  );
+}
+function createWarpedTexCoords(vertexArr, texCoordArr, mercatorBounds, latBounds, latIsAscending) {
+  const warped = new Float32Array(texCoordArr.length);
+  const { y0, y1 } = mercatorBounds;
+  const { latMin, latMax } = latBounds;
+  const latRange = latMax - latMin;
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const u = texCoordArr[i];
+    const normY = vertexArr[i + 1];
+    const mercY = y0 + (1 - normY) / 2 * (y1 - y0);
+    const lat = mercatorNormToLat(mercY);
+    let v = (lat - latMin) / latRange;
+    if (latIsAscending === false) {
+      v = 1 - v;
+    }
+    v = Math.max(0, Math.min(1, v));
+    warped[i] = u;
+    warped[i + 1] = v;
+  }
+  return warped;
+}
+function flipTexCoordV(texCoords) {
+  const flipped = new Float32Array(texCoords.length);
+  for (let i = 0; i < texCoords.length; i += 2) {
+    flipped[i] = texCoords[i];
+    flipped[i + 1] = 1 - texCoords[i + 1];
+  }
+  return flipped;
+}
+function isGlobeProjection(projection) {
+  return projection?.type === "globe" || projection?.name === "globe";
+}
+function resolveProjectionParams(params, projection, projectionToMercatorMatrix, projectionToMercatorTransition) {
+  const paramsObj = params && typeof params === "object" && !Array.isArray(params) && !ArrayBuffer.isView(params) ? params : null;
+  const shaderData = paramsObj?.shaderData;
+  let projectionData;
+  const defaultProj = paramsObj?.defaultProjectionData;
+  if (defaultProj && defaultProj.mainMatrix && defaultProj.fallbackMatrix && defaultProj.tileMercatorCoords && defaultProj.clippingPlane && typeof defaultProj.projectionTransition === "number") {
+    projectionData = {
+      mainMatrix: defaultProj.mainMatrix,
+      fallbackMatrix: defaultProj.fallbackMatrix,
+      tileMercatorCoords: defaultProj.tileMercatorCoords,
+      clippingPlane: defaultProj.clippingPlane,
+      projectionTransition: defaultProj.projectionTransition
+    };
+  }
+  let matrix = null;
+  if (projectionData?.mainMatrix && projectionData.mainMatrix.length) {
+    matrix = projectionData.mainMatrix;
+  } else if (Array.isArray(params) || params instanceof Float32Array || params instanceof Float64Array) {
+    matrix = params;
+  } else if (paramsObj?.modelViewProjectionMatrix) {
+    matrix = paramsObj.modelViewProjectionMatrix;
+  } else if (paramsObj?.projectionMatrix) {
+    matrix = paramsObj.projectionMatrix;
+  }
+  const mapboxGlobe = projection && projectionToMercatorMatrix !== void 0 ? {
+    projection,
+    globeToMercatorMatrix: projectionToMercatorMatrix,
+    transition: typeof projectionToMercatorTransition === "number" ? projectionToMercatorTransition : 0
+  } : void 0;
+  return { matrix, shaderData, projectionData, mapboxGlobe };
+}
+function computeWorldOffsets(map, isGlobe) {
+  if (!map) return [0];
+  const bounds = map.getBounds ? map.getBounds() : null;
+  if (!bounds) return [0];
+  const renderWorldCopies = typeof map.getRenderWorldCopies === "function" ? map.getRenderWorldCopies() : true;
+  if (isGlobe || !renderWorldCopies) return [0];
+  const west = bounds.getWest();
+  const east = bounds.getEast();
+  let effectiveEast = east;
+  if (west > east) {
+    effectiveEast = east + 360;
+  }
+  const minWorld = Math.floor((west + 180) / 360);
+  const maxWorld = Math.floor((effectiveEast + 180) / 360);
+  const worldOffsets = [];
+  for (let i = minWorld; i <= maxWorld; i++) {
+    worldOffsets.push(i);
+  }
+  return worldOffsets.length > 0 ? worldOffsets : [0];
+}
 
-// src/tile-renderer.ts
-function renderTiles(gl, shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, tileBounds, customShaderConfig, isGlobeTileRender = false, tileTexOverrides) {
-  if (shaderProgram.useCustomShader && customShaderConfig) {
-    let textureUnit = 2;
-    for (const bandName of customShaderConfig.bands) {
-      const loc = shaderProgram.bandTexLocs.get(bandName);
-      if (loc) {
-        gl.uniform1i(loc, textureUnit);
+// src/render-helpers.ts
+function setupBandTextureUniforms(gl, shaderProgram, customShaderConfig) {
+  if (!shaderProgram.useCustomShader || !customShaderConfig) return;
+  let textureUnit = 2;
+  for (const bandName of customShaderConfig.bands) {
+    const loc = shaderProgram.bandTexLocs.get(bandName);
+    if (loc) {
+      gl.uniform1i(loc, textureUnit);
+    }
+    textureUnit++;
+  }
+}
+function bindBandTextures(gl, options) {
+  const {
+    bandData,
+    bandTextures,
+    bandTexturesUploaded,
+    bandTexturesConfigured,
+    customShaderConfig,
+    width,
+    height,
+    ensureTexture
+  } = options;
+  let textureUnit = 2;
+  for (const bandName of customShaderConfig.bands) {
+    const data = bandData.get(bandName);
+    if (!data) {
+      return false;
+    }
+    let bandTex = bandTextures.get(bandName);
+    if (!bandTex) {
+      if (ensureTexture) {
+        const newTex = ensureTexture(bandName);
+        if (newTex) {
+          bandTex = newTex;
+          bandTextures.set(bandName, bandTex);
+        }
+      } else {
+        bandTex = gl.createTexture();
+        if (bandTex) {
+          bandTextures.set(bandName, bandTex);
+        }
       }
-      textureUnit++;
+    }
+    if (!bandTex) {
+      return false;
+    }
+    gl.activeTexture(gl.TEXTURE0 + textureUnit);
+    gl.bindTexture(gl.TEXTURE_2D, bandTex);
+    if (!bandTexturesConfigured.has(bandName)) {
+      configureDataTexture(gl);
+      bandTexturesConfigured.add(bandName);
+    }
+    if (!bandTexturesUploaded.has(bandName)) {
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.R32F,
+        width,
+        height,
+        0,
+        gl.RED,
+        gl.FLOAT,
+        data
+      );
+      bandTexturesUploaded.add(bandName);
+    }
+    textureUnit++;
+  }
+  return true;
+}
+function bindGeometryBuffers(gl, shaderProgram, vertexBuffer, pixCoordBuffer) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.enableVertexAttribArray(shaderProgram.vertexLoc);
+  gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer);
+  gl.enableVertexAttribArray(shaderProgram.pixCoordLoc);
+  gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0);
+}
+function uploadDataTexture(gl, options) {
+  const { texture, data, width, height, channels, configured } = options;
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  if (!configured) {
+    configureDataTexture(gl);
+  }
+  const { format, internalFormat } = getTextureFormats(gl, channels);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    internalFormat,
+    width,
+    height,
+    0,
+    format,
+    gl.FLOAT,
+    data
+  );
+  return { configured: true, uploaded: true };
+}
+
+// src/renderable-region.ts
+function renderRegion(gl, shaderProgram, region, worldOffsets, customShaderConfig) {
+  const bounds = region.mercatorBounds;
+  const scaleX = (bounds.x1 - bounds.x0) / 2;
+  const scaleY = (bounds.y1 - bounds.y0) / 2;
+  const shiftX = (bounds.x0 + bounds.x1) / 2;
+  const shiftY = (bounds.y0 + bounds.y1) / 2;
+  gl.uniform1f(shaderProgram.scaleLoc, 0);
+  gl.uniform1f(shaderProgram.scaleXLoc, scaleX);
+  gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
+  gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
+  gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
+  const texScale = region.texScale ?? [1, 1];
+  const texOffset = region.texOffset ?? [0, 0];
+  gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
+  gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
+  bindGeometryBuffers(
+    gl,
+    shaderProgram,
+    region.vertexBuffer,
+    region.pixCoordBuffer
+  );
+  if (shaderProgram.useCustomShader && customShaderConfig) {
+    const bandsBound = bindBandTextures(gl, {
+      bandData: region.bandData,
+      bandTextures: region.bandTextures,
+      bandTexturesUploaded: region.bandTexturesUploaded,
+      bandTexturesConfigured: region.bandTexturesConfigured,
+      customShaderConfig,
+      width: region.width,
+      height: region.height,
+      ensureTexture: region.ensureBandTexture
+    });
+    if (!bandsBound) {
+      return false;
+    }
+  } else {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, region.texture);
+    if (shaderProgram.texLoc !== null) {
+      gl.uniform1i(shaderProgram.texLoc, 0);
     }
   }
-  const vertexCount = vertexArr.length / 2;
   for (const worldOffset of worldOffsets) {
-    gl.uniform1f(
-      shaderProgram.worldXOffsetLoc,
-      isGlobeTileRender ? 0 : worldOffset
+    gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, region.vertexCount);
+  }
+  return true;
+}
+
+// src/tile-renderer.ts
+function prepareTileGeometry(gl, tile, vertexArr, pixCoordArr, bounds, latIsAscending, isGlobeTileRender) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, tile.vertexBuffer);
+  if (!tile.geometryUploaded) {
+    gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW);
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, tile.pixCoordBuffer);
+  if (!tile.geometryUploaded) {
+    gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW);
+    tile.geometryUploaded = true;
+  }
+  const useWarpedCoords = !isGlobeTileRender && tile.latBounds && bounds?.latMin !== void 0 && tile.warpedPixCoordBuffer;
+  if (useWarpedCoords && !tile.warpedGeometryUploaded) {
+    const warpedCoords = createWarpedTexCoords(
+      vertexArr,
+      pixCoordArr,
+      {
+        x0: bounds.x0,
+        x1: bounds.x1,
+        y0: bounds.y0,
+        y1: bounds.y1
+      },
+      {
+        latMin: tile.latBounds.min,
+        latMax: tile.latBounds.max
+      },
+      latIsAscending
     );
-    for (const tileTuple of visibleTiles) {
-      const [z, x, y] = tileTuple;
-      const tileKey = tileToKey(tileTuple);
-      const tile = tileCache.get(tileKey);
-      const bounds = tileBounds?.[tileKey];
-      let tileToRender = null;
-      let renderTileKey = tileKey;
-      let texScale = [1, 1];
-      let texOffset = [0, 0];
-      if (tile && tile.data) {
-        tileToRender = tile;
-      } else {
-        const parent = findBestParentTile(tileCache, z, x, y);
-        if (parent) {
-          tileToRender = parent.tile;
-          renderTileKey = tileToKey([
-            parent.ancestorZ,
-            parent.ancestorX,
-            parent.ancestorY
-          ]);
-          const levelDiff = z - parent.ancestorZ;
-          const divisor = Math.pow(2, levelDiff);
-          const localX = x % divisor;
-          const localY = y % divisor;
-          texScale = [1 / divisor, 1 / divisor];
-          texOffset = [localX / divisor, localY / divisor];
-        }
+    gl.bindBuffer(gl.ARRAY_BUFFER, tile.warpedPixCoordBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, warpedCoords, gl.STATIC_DRAW);
+    tile.warpedGeometryUploaded = true;
+  }
+  return useWarpedCoords && tile.warpedGeometryUploaded ? tile.warpedPixCoordBuffer : tile.pixCoordBuffer;
+}
+function tileToRenderable(tile, bounds, pixCoordBuffer, vertexCount, tileSize, texScale, texOffset, tileCache, renderTileKey) {
+  return {
+    mercatorBounds: bounds,
+    vertexBuffer: tile.vertexBuffer,
+    pixCoordBuffer,
+    vertexCount,
+    texture: tile.tileTexture,
+    bandData: tile.bandData,
+    bandTextures: tile.bandTextures,
+    bandTexturesUploaded: tile.bandTexturesUploaded,
+    bandTexturesConfigured: tile.bandTexturesConfigured,
+    width: tileSize,
+    height: tileSize,
+    texScale,
+    texOffset,
+    ensureBandTexture: (bandName) => tileCache.ensureBandTexture(renderTileKey, bandName)
+  };
+}
+function renderTiles(gl, shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, latIsAscending, tileBounds, customShaderConfig, isGlobeTileRender = false, tileTexOverrides) {
+  setupBandTextureUniforms(gl, shaderProgram, customShaderConfig);
+  const vertexCount = vertexArr.length / 2;
+  for (const tileTuple of visibleTiles) {
+    const [z, x, y] = tileTuple;
+    const tileKey = tileToKey(tileTuple);
+    const tile = tileCache.get(tileKey);
+    const bounds = tileBounds?.[tileKey];
+    let tileToRender = null;
+    let renderTileKey = tileKey;
+    let texScale = [1, 1];
+    let texOffset = [0, 0];
+    if (tile && tile.data) {
+      tileToRender = tile;
+    } else {
+      const parent = findBestParentTile(tileCache, z, x, y);
+      if (parent) {
+        tileToRender = parent.tile;
+        renderTileKey = tileToKey([
+          parent.ancestorZ,
+          parent.ancestorX,
+          parent.ancestorY
+        ]);
+        const levelDiff = z - parent.ancestorZ;
+        const divisor = Math.pow(2, levelDiff);
+        const localX = x % divisor;
+        const localY = y % divisor;
+        texScale = [1 / divisor, 1 / divisor];
+        texOffset = [localX / divisor, localY / divisor];
       }
-      if (!tileToRender || !tileToRender.data || !tileToRender.vertexBuffer || !tileToRender.pixCoordBuffer || !tileToRender.tileTexture) {
-        continue;
-      }
-      if (bounds) {
-        const scaleX = (bounds.x1 - bounds.x0) / 2;
-        const scaleY = (bounds.y1 - bounds.y0) / 2;
-        const shiftX = (bounds.x0 + bounds.x1) / 2;
-        const shiftY = (bounds.y0 + bounds.y1) / 2;
-        gl.uniform1f(shaderProgram.scaleLoc, 0);
-        gl.uniform1f(shaderProgram.scaleXLoc, scaleX);
-        gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
-        gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
-        gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
-        if (shaderProgram.isEquirectangularLoc) {
-          gl.uniform1i(
-            shaderProgram.isEquirectangularLoc,
-            bounds.latMin !== void 0 ? 1 : 0
-          );
-        }
-        if (shaderProgram.latMinLoc && bounds.latMin !== void 0) {
-          gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin);
-        }
-        if (shaderProgram.latMaxLoc && bounds.latMax !== void 0) {
-          gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax);
-        }
-      } else {
-        const [scale, shiftX, shiftY] = tileToScale(tileTuple);
-        gl.uniform1f(shaderProgram.scaleLoc, scale);
-        gl.uniform1f(shaderProgram.scaleXLoc, 0);
-        gl.uniform1f(shaderProgram.scaleYLoc, 0);
-        gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
-        gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
-        if (shaderProgram.isEquirectangularLoc) {
-          gl.uniform1i(shaderProgram.isEquirectangularLoc, 0);
-        }
-      }
-      if (isGlobeTileRender && tileTexOverrides?.[tileKey]) {
-        const override = tileTexOverrides[tileKey];
-        gl.uniform2f(
-          shaderProgram.texScaleLoc,
-          override.texScale[0],
-          override.texScale[1]
-        );
-        gl.uniform2f(
-          shaderProgram.texOffsetLoc,
-          override.texOffset[0],
-          override.texOffset[1]
-        );
-      } else {
-        gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
-        gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer);
-      if (!tileToRender.geometryUploaded) {
-        gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW);
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.pixCoordBuffer);
-      if (!tileToRender.geometryUploaded) {
-        gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW);
-        tileToRender.geometryUploaded = true;
-      }
-      if (shaderProgram.useCustomShader && customShaderConfig) {
-        let textureUnit = 2;
-        let missingBandData = false;
-        for (const bandName of customShaderConfig.bands) {
-          const bandData = tileToRender.bandData.get(bandName);
-          if (!bandData) {
-            missingBandData = true;
-            break;
-          }
-          let bandTex = tileToRender.bandTextures.get(bandName);
-          if (!bandTex) {
-            const newTex = tileCache.ensureBandTexture(renderTileKey, bandName);
-            if (newTex) {
-              bandTex = newTex;
-              tileToRender.bandTextures.set(bandName, bandTex);
-            }
-          }
-          if (!bandTex) {
-            missingBandData = true;
-            break;
-          }
-          gl.activeTexture(gl.TEXTURE0 + textureUnit);
-          gl.bindTexture(gl.TEXTURE_2D, bandTex);
-          if (!tileToRender.bandTexturesConfigured.has(bandName)) {
-            configureDataTexture(gl);
-            tileToRender.bandTexturesConfigured.add(bandName);
-          }
-          if (!tileToRender.bandTexturesUploaded.has(bandName)) {
-            gl.texImage2D(
-              gl.TEXTURE_2D,
-              0,
-              gl.R32F,
-              tileSize,
-              tileSize,
-              0,
-              gl.RED,
-              gl.FLOAT,
-              bandData
-            );
-            tileToRender.bandTexturesUploaded.add(bandName);
-          }
-          textureUnit++;
-        }
-        if (missingBandData) {
-          continue;
-        }
-      } else {
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, tileToRender.tileTexture);
-        if (shaderProgram.texLoc) {
-          gl.uniform1i(shaderProgram.texLoc, 0);
-        }
-        if (!tileToRender.textureConfigured) {
-          configureDataTexture(gl);
-          tileToRender.textureConfigured = true;
-        }
-        const channels = tileToRender.channels ?? 1;
-        const { format, internalFormat } = getTextureFormats(gl, channels);
-        if (!tileToRender.textureUploaded) {
-          gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            internalFormat,
-            tileSize,
-            tileSize,
-            0,
-            format,
-            gl.FLOAT,
-            tileToRender.data
-          );
-          tileToRender.textureUploaded = true;
-        }
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.vertexBuffer);
-      gl.enableVertexAttribArray(shaderProgram.vertexLoc);
-      gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, tileToRender.pixCoordBuffer);
-      gl.enableVertexAttribArray(shaderProgram.pixCoordLoc);
-      gl.vertexAttribPointer(
-        shaderProgram.pixCoordLoc,
-        2,
-        gl.FLOAT,
-        false,
-        0,
-        0
-      );
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount);
     }
+    if (!tileToRender || !tileToRender.data || !tileToRender.vertexBuffer || !tileToRender.pixCoordBuffer || !tileToRender.tileTexture) {
+      continue;
+    }
+    if (shaderProgram.isEquirectangularLoc) {
+      const useShaderReproject = isGlobeTileRender && bounds?.latMin !== void 0;
+      gl.uniform1i(
+        shaderProgram.isEquirectangularLoc,
+        useShaderReproject ? 1 : 0
+      );
+    }
+    if (isGlobeTileRender) {
+      if (tileTexOverrides?.[tileKey]) {
+        const override = tileTexOverrides[tileKey];
+        texScale = override.texScale;
+        texOffset = override.texOffset;
+      }
+      if (bounds?.latMin !== void 0 && shaderProgram.latMinLoc) {
+        gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin);
+      }
+      if (bounds?.latMax !== void 0 && shaderProgram.latMaxLoc) {
+        gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax);
+      }
+    }
+    const pixCoordBuffer = prepareTileGeometry(
+      gl,
+      tileToRender,
+      vertexArr,
+      pixCoordArr,
+      bounds,
+      latIsAscending,
+      isGlobeTileRender
+    );
+    let mercatorBounds;
+    if (bounds) {
+      mercatorBounds = bounds;
+    } else {
+      const [scale, shiftX, shiftY] = tileToScale(tileTuple);
+      mercatorBounds = {
+        x0: shiftX - scale,
+        x1: shiftX + scale,
+        y0: shiftY - scale,
+        y1: shiftY + scale
+      };
+    }
+    const renderable = tileToRenderable(
+      tileToRender,
+      mercatorBounds,
+      pixCoordBuffer,
+      vertexCount,
+      tileSize,
+      texScale,
+      texOffset,
+      tileCache,
+      renderTileKey
+    );
+    renderRegion(
+      gl,
+      shaderProgram,
+      renderable,
+      isGlobeTileRender ? [0] : worldOffsets,
+      customShaderConfig
+    );
   }
 }
 
@@ -5932,20 +6091,11 @@ function renderTiles(gl, shaderProgram, visibleTiles, worldOffsets, tileCache, t
 var ZarrRenderer = class _ZarrRenderer {
   constructor(gl, fragmentShaderSource, customShaderConfig) {
     this.shaderCache = /* @__PURE__ */ new Map();
-    this.singleImageState = {
-      uploaded: false,
-      geometryVersion: null,
-      dataVersion: null,
-      normalizedData: null
-    };
     this.customShaderConfig = null;
-    this._gl = _ZarrRenderer.resolveGl(gl);
+    this.gl = _ZarrRenderer.resolveGl(gl);
     this.fragmentShaderSource = fragmentShaderSource;
     this.customShaderConfig = customShaderConfig || null;
     this.getProgram(void 0, customShaderConfig);
-  }
-  get gl() {
-    return this._gl;
   }
   updateMultiBandConfig(config) {
     if (config && this.customShaderConfig) {
@@ -5980,7 +6130,7 @@ var ZarrRenderer = class _ZarrRenderer {
     if (cached) {
       return cached;
     }
-    const { shaderProgram } = createShaderProgram(this._gl, {
+    const { shaderProgram } = createShaderProgram(this.gl, {
       fragmentShaderSource: this.fragmentShaderSource,
       shaderData,
       customShaderConfig: config,
@@ -5991,7 +6141,7 @@ var ZarrRenderer = class _ZarrRenderer {
     return shaderProgram;
   }
   applyCommonUniforms(shaderProgram, colormapTexture, uniforms, customShaderConfig, projectionData, mapboxGlobe, matrix, isGlobeTileRender = false) {
-    const gl = this._gl;
+    const gl = this.gl;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.activeTexture(gl.TEXTURE1);
@@ -6016,7 +6166,11 @@ var ZarrRenderer = class _ZarrRenderer {
       gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset);
     }
     if (shaderProgram.dataScaleLoc) {
-      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1);
+      const dataScale = Math.max(
+        Math.abs(uniforms.clim[0]),
+        Math.abs(uniforms.clim[1]),
+        1
+      );
       gl.uniform1f(shaderProgram.dataScaleLoc, dataScale);
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1, 1);
@@ -6042,9 +6196,9 @@ var ZarrRenderer = class _ZarrRenderer {
       );
     }
   }
-  renderTiles(shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, tileBounds, customShaderConfig, isGlobeTileRender = false, tileTexOverrides) {
+  renderTiles(shaderProgram, visibleTiles, worldOffsets, tileCache, tileSize, vertexArr, pixCoordArr, latIsAscending, tileBounds, customShaderConfig, isGlobeTileRender = false, tileTexOverrides) {
     renderTiles(
-      this._gl,
+      this.gl,
       shaderProgram,
       visibleTiles,
       worldOffsets,
@@ -6052,32 +6206,19 @@ var ZarrRenderer = class _ZarrRenderer {
       tileSize,
       vertexArr,
       pixCoordArr,
+      latIsAscending,
       tileBounds,
       customShaderConfig,
       isGlobeTileRender,
       tileTexOverrides
     );
   }
-  renderSingleImage(shaderProgram, worldOffsets, params, vertexArr, tileOverride) {
-    this.singleImageState = renderSingleImage(
-      this._gl,
-      shaderProgram,
-      worldOffsets,
-      params,
-      vertexArr,
-      this.singleImageState,
-      tileOverride
-    );
-  }
   dispose() {
-    const gl = this._gl;
+    const gl = this.gl;
     for (const [, shader] of this.shaderCache) {
       gl.deleteProgram(shader.program);
     }
     this.shaderCache.clear();
-  }
-  resetSingleImageGeometry() {
-    this.singleImageState.uploaded = false;
   }
 };
 
@@ -6121,6 +6262,53 @@ function computeBoundingBox(geometry) {
     geometry.coordinates.forEach((polygon) => polygon.forEach(processRing));
   }
   return { west, east, south, north };
+}
+function computePixelBoundsFromGeometry(geometry, bounds, width, height, crs, latIsAscending) {
+  const bbox = computeBoundingBox(geometry);
+  const polyX0 = lonToMercatorNorm(bbox.west);
+  const polyX1 = lonToMercatorNorm(bbox.east);
+  const polyY0 = latToMercatorNorm(bbox.north);
+  const polyY1 = latToMercatorNorm(bbox.south);
+  const overlapX0 = Math.max(bounds.x0, Math.min(polyX0, polyX1));
+  const overlapX1 = Math.min(bounds.x1, Math.max(polyX0, polyX1));
+  let xStart;
+  let xEnd;
+  let yStart;
+  let yEnd;
+  if (crs === "EPSG:4326" && bounds.latMin !== void 0 && bounds.latMax !== void 0) {
+    const latMax = bounds.latMax;
+    const latMin = bounds.latMin;
+    const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax);
+    const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax);
+    const latRange = latMax - latMin;
+    if (latRange === 0) return null;
+    const toFrac = (latVal) => latIsAscending ? (latVal - latMin) / latRange : (latMax - latVal) / latRange;
+    const yStartFracRaw = toFrac(clampedNorth);
+    const yEndFracRaw = toFrac(clampedSouth);
+    const yFracMin = Math.min(yStartFracRaw, yEndFracRaw);
+    const yFracMax = Math.max(yStartFracRaw, yEndFracRaw);
+    if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) return null;
+    const minX = (overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0) * width;
+    const maxX = (overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0) * width;
+    xStart = Math.max(0, Math.floor(minX));
+    xEnd = Math.min(width, Math.ceil(maxX));
+    yStart = Math.max(0, Math.floor(yFracMin * height));
+    yEnd = Math.min(height, Math.ceil(yFracMax * height));
+  } else {
+    const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1));
+    const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1));
+    if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) return null;
+    const minX = (overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0) * width;
+    const maxX = (overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0) * width;
+    const minY = (overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0) * height;
+    const maxY = (overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0) * height;
+    xStart = Math.max(0, Math.floor(minX));
+    xEnd = Math.min(width, Math.ceil(maxX));
+    yStart = Math.max(0, Math.floor(minY));
+    yEnd = Math.min(height, Math.ceil(maxY));
+  }
+  if (xEnd <= xStart || yEnd <= yStart) return null;
+  return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd };
 }
 function pointInPolygon(point, polygon) {
   let inside = false;
@@ -6894,6 +7082,90 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
   return result;
 }
 
+// src/mode-utils.ts
+function createThrottleState() {
+  return {
+    lastFetchTime: 0,
+    throttleTimeout: null,
+    throttledPending: false
+  };
+}
+function getThrottleWaitTime(state, throttleMs) {
+  if (throttleMs <= 0) return 0;
+  const now = Date.now();
+  const timeSinceLastFetch = now - state.lastFetchTime;
+  if (timeSinceLastFetch < throttleMs) {
+    return throttleMs - timeSinceLastFetch;
+  }
+  return 0;
+}
+function scheduleThrottledUpdate(state, waitTime, invalidate) {
+  if (state.throttleTimeout) return;
+  state.throttledPending = true;
+  state.throttleTimeout = setTimeout(() => {
+    state.throttleTimeout = null;
+    state.throttledPending = false;
+    invalidate();
+  }, waitTime);
+}
+function markFetchStart(state) {
+  state.lastFetchTime = Date.now();
+}
+function clearThrottle(state) {
+  if (state.throttleTimeout) {
+    clearTimeout(state.throttleTimeout);
+    state.throttleTimeout = null;
+  }
+  state.throttledPending = false;
+}
+function createRequestCanceller() {
+  return {
+    controllers: /* @__PURE__ */ new Map(),
+    currentVersion: 0
+  };
+}
+function cancelOlderRequests(canceller, completedVersion) {
+  for (const [version, controller] of canceller.controllers) {
+    if (version < completedVersion) {
+      controller.abort();
+      canceller.controllers.delete(version);
+    }
+  }
+}
+function cancelAllRequests(canceller) {
+  for (const controller of canceller.controllers.values()) {
+    controller.abort();
+  }
+  canceller.controllers.clear();
+}
+function hasActiveRequests(canceller) {
+  for (const controller of canceller.controllers.values()) {
+    if (!controller.signal.aborted) {
+      return true;
+    }
+  }
+  return false;
+}
+function createLoadingManager() {
+  return {
+    callback: void 0,
+    metadataLoading: false,
+    chunksLoading: false
+  };
+}
+function setLoadingCallback(manager, callback) {
+  manager.callback = callback;
+}
+function emitLoadingState(manager) {
+  if (!manager.callback) return;
+  const state = {
+    loading: manager.metadataLoading || manager.chunksLoading,
+    metadata: manager.metadataLoading,
+    chunks: manager.chunksLoading
+  };
+  manager.callback(state);
+}
+
 // src/tiles.ts
 var Tiles = class {
   constructor({
@@ -7127,21 +7399,60 @@ var Tiles = class {
     return { data: paddedData, channels, bandData };
   }
   /**
-   * Apply normalization to tile data for half-float precision safety.
+   * Apply normalization to tile data and upload texture.
    * Updates tile.data, tile.bandData with normalized values and stores scale factors.
    */
   applyNormalization(tile, sliced) {
-    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim);
+    const { normalized, scale } = normalizeDataForTexture(
+      sliced.data,
+      this.fillValue,
+      this.clim
+    );
     tile.data = normalized;
     tile.dataScale = scale;
     tile.channels = sliced.channels;
+    if (this.gl && tile.tileTexture) {
+      this.uploadTileTexture(tile);
+    }
     tile.bandData = /* @__PURE__ */ new Map();
     tile.bandDataScales = /* @__PURE__ */ new Map();
+    tile.bandTexturesUploaded.clear();
     for (const [bandName, bandData] of sliced.bandData) {
-      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim);
+      const bandResult = normalizeDataForTexture(
+        bandData,
+        this.fillValue,
+        this.clim
+      );
       tile.bandData.set(bandName, bandResult.normalized);
       tile.bandDataScales.set(bandName, bandResult.scale);
     }
+  }
+  /**
+   * Upload tile data to its texture.
+   */
+  uploadTileTexture(tile) {
+    if (!this.gl || !tile.tileTexture || !tile.data) return;
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tile.tileTexture);
+    if (!tile.textureConfigured) {
+      configureDataTexture(gl);
+      tile.textureConfigured = true;
+    }
+    const { format, internalFormat } = getTextureFormats(gl, tile.channels);
+    const tileSize = this.store.tileSize;
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      internalFormat,
+      tileSize,
+      tileSize,
+      0,
+      format,
+      gl.FLOAT,
+      tile.data
+    );
+    tile.textureUploaded = true;
   }
   /**
    * Get or create a tile entry, using Map's insertion order for LRU tracking.
@@ -7166,6 +7477,7 @@ var Tiles = class {
       loading: false,
       dataScale: 1,
       bandDataScales: /* @__PURE__ */ new Map(),
+      latBounds: null,
       tileTexture: this.gl ? mustCreateTexture(this.gl) : null,
       bandTextures: /* @__PURE__ */ new Map(),
       bandTexturesUploaded: /* @__PURE__ */ new Set(),
@@ -7174,7 +7486,9 @@ var Tiles = class {
       textureConfigured: false,
       vertexBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
       pixCoordBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
-      geometryUploaded: false
+      warpedPixCoordBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
+      geometryUploaded: false,
+      warpedGeometryUploaded: false
     };
     this.tiles.set(tileKey, tile);
     this.evictOldTiles();
@@ -7196,6 +7510,8 @@ var Tiles = class {
         }
         if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer);
         if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer);
+        if (tile.warpedPixCoordBuffer)
+          this.gl.deleteBuffer(tile.warpedPixCoordBuffer);
       }
       this.tiles.delete(oldestKey);
     }
@@ -7233,6 +7549,18 @@ var Tiles = class {
   getTile(tileTuple) {
     return this.tiles.get(tileToKey(tileTuple));
   }
+  /**
+   * Set latitude bounds for a tile (used for coordinate warping in EPSG:4326 mode).
+   * If bounds change, marks warped geometry as needing re-upload.
+   */
+  setTileLatBounds(tileKey, latBounds) {
+    const tile = this.tiles.get(tileKey);
+    if (!tile) return;
+    if (tile.latBounds?.min !== latBounds.min || tile.latBounds?.max !== latBounds.max) {
+      tile.latBounds = latBounds;
+      tile.warpedGeometryUploaded = false;
+    }
+  }
   async reextractTileSlices(visibleTiles, selectorHash, version) {
     for (const tileTuple of visibleTiles) {
       const tileKey = tileToKey(tileTuple);
@@ -7257,8 +7585,6 @@ var Tiles = class {
         this.applyNormalization(tile, sliced);
         tile.selectorHash = selectorHash;
         tile.selectorVersion = version;
-        tile.textureUploaded = false;
-        tile.bandTexturesUploaded.clear();
       } else {
         tile.selectorHash = null;
         tile.chunkData = null;
@@ -7296,12 +7622,12 @@ var Tiles = class {
         this.applyNormalization(tile, sliced2);
         tile.selectorHash = selectorHash;
         tile.selectorVersion = version;
-        tile.textureUploaded = false;
-        tile.bandTexturesUploaded.clear();
         tile.loading = false;
         return tile;
       }
-      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal });
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, {
+        signal
+      });
       const chunkShape = chunk.shape.map((n) => Number(n));
       const chunkData = chunk.data instanceof Float32Array ? new Float32Array(chunk.data.buffer) : Float32Array.from(chunk.data);
       if (version < tile.selectorVersion) {
@@ -7320,8 +7646,6 @@ var Tiles = class {
       this.applyNormalization(tile, sliced);
       tile.selectorHash = selectorHash;
       tile.selectorVersion = version;
-      tile.textureUploaded = false;
-      tile.bandTexturesUploaded.clear();
       tile.loading = false;
       return tile;
     } catch (err) {
@@ -7339,6 +7663,7 @@ var Tiles = class {
   markGeometryDirty() {
     for (const tile of this.tiles.values()) {
       tile.geometryUploaded = false;
+      tile.warpedGeometryUploaded = false;
     }
   }
   /**
@@ -7353,6 +7678,8 @@ var Tiles = class {
         }
         if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer);
         if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer);
+        if (tile.warpedPixCoordBuffer)
+          this.gl.deleteBuffer(tile.warpedPixCoordBuffer);
       }
     }
     this.tiles.clear();
@@ -7360,6 +7687,24 @@ var Tiles = class {
 };
 
 // src/mapbox-globe-tile-renderer.ts
+var linearBufferCache = /* @__PURE__ */ new WeakMap();
+function getLinearPixCoordBuffer(gl, region) {
+  let buffer = linearBufferCache.get(region);
+  if (buffer) return buffer;
+  const vertexArr = region.vertexArr;
+  const linearCoords = new Float32Array(vertexArr.length);
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const x = vertexArr[i];
+    const y = vertexArr[i + 1];
+    linearCoords[i] = (x + 1) / 2;
+    linearCoords[i + 1] = (1 - y) / 2;
+  }
+  buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, linearCoords, gl.STATIC_DRAW);
+  linearBufferCache.set(region, buffer);
+  return buffer;
+}
 var IDENTITY_MATRIX = new Float32Array([
   1,
   0,
@@ -7378,6 +7723,46 @@ var IDENTITY_MATRIX = new Float32Array([
   0,
   1
 ]);
+function drawRegion(params) {
+  const {
+    gl,
+    shaderProgram,
+    vertexBuffer,
+    pixCoordBuffer,
+    texture,
+    vertexArr,
+    scaleX,
+    scaleY,
+    shiftX,
+    shiftY,
+    texScale,
+    texOffset,
+    skipBaseTexture
+  } = params;
+  gl.uniform1f(shaderProgram.scaleLoc, 0);
+  gl.uniform1f(shaderProgram.scaleXLoc, scaleX);
+  gl.uniform1f(shaderProgram.scaleYLoc, scaleY);
+  gl.uniform1f(shaderProgram.shiftXLoc, shiftX);
+  gl.uniform1f(shaderProgram.shiftYLoc, shiftY);
+  gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1]);
+  gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1]);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.enableVertexAttribArray(shaderProgram.vertexLoc);
+  gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer);
+  gl.enableVertexAttribArray(shaderProgram.pixCoordLoc);
+  gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0);
+  if (!skipBaseTexture) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    if (shaderProgram.texLoc !== null) {
+      gl.uniform1i(shaderProgram.texLoc, 0);
+    }
+    configureDataTexture(gl);
+  }
+  gl.uniform1f(shaderProgram.worldXOffsetLoc, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexArr.length / 2);
+}
 function createTileMatrix(tileX0, tileY0, tileX1, tileY1) {
   const x0 = Math.max(0, tileX0);
   const x1 = Math.min(1, tileX1);
@@ -7404,8 +7789,9 @@ function createTileMatrix(tileX0, tileY0, tileX1, tileY1) {
     1
   ]);
 }
-function renderSingleImageToTile(renderer, context, tileId, singleImage, vertexArr, bounds) {
+function renderRegionToTile(renderer, context, tileId, region) {
   const { colormapTexture, uniforms, customShaderConfig } = context;
+  const { bounds, vertexBuffer, pixCoordBuffer, texture, vertexArr } = region;
   const tilesPerSide = 2 ** tileId.z;
   const tileX0 = tileId.x / tilesPerSide;
   const tileX1 = (tileId.x + 1) / tilesPerSide;
@@ -7436,8 +7822,28 @@ function renderSingleImageToTile(renderer, context, tileId, singleImage, vertexA
     tileMatrix,
     true
   );
-  const baseTexScale = singleImage.texScale ?? [1, 1];
-  const baseTexOffset = singleImage.texOffset ?? [0, 0];
+  const baseTexScale = region.texScale ?? [1, 1];
+  const baseTexOffset = region.texOffset ?? [0, 0];
+  const gl = renderer.gl;
+  let skipBaseTexture = false;
+  if (shaderProgram.useCustomShader && customShaderConfig) {
+    setupBandTextureUniforms(gl, shaderProgram, customShaderConfig);
+    if (region.bandData && region.bandTextures && region.bandTexturesUploaded && region.bandTexturesConfigured) {
+      const bandsBound = bindBandTextures(gl, {
+        bandData: region.bandData,
+        bandTextures: region.bandTextures,
+        bandTexturesUploaded: region.bandTexturesUploaded,
+        bandTexturesConfigured: region.bandTexturesConfigured,
+        customShaderConfig,
+        width: region.width,
+        height: region.height
+      });
+      if (!bandsBound) {
+        return false;
+      }
+      skipBaseTexture = true;
+    }
+  }
   const isEquirectangular = bounds.latMin !== void 0 && bounds.latMax !== void 0;
   if (isEquirectangular) {
     const cropLatNorth = mercatorNormToLat(overlapY0);
@@ -7447,17 +7853,24 @@ function renderSingleImageToTile(renderer, context, tileId, singleImage, vertexA
     const shiftX = (overlapX0 + overlapX1) / 2;
     const shiftY = (overlapY0 + overlapY1) / 2;
     if (shaderProgram.isEquirectangularLoc) {
-      renderer.gl.uniform1i(shaderProgram.isEquirectangularLoc, 1);
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 1);
     }
     if (shaderProgram.latMinLoc) {
-      renderer.gl.uniform1f(shaderProgram.latMinLoc, cropLatSouth);
+      gl.uniform1f(shaderProgram.latMinLoc, cropLatSouth);
     }
     if (shaderProgram.latMaxLoc) {
-      renderer.gl.uniform1f(shaderProgram.latMaxLoc, cropLatNorth);
+      gl.uniform1f(shaderProgram.latMaxLoc, cropLatNorth);
     }
     const fullLatRange = bounds.latMax - bounds.latMin;
-    const vNorth = (bounds.latMax - cropLatNorth) / fullLatRange;
-    const vSouth = (bounds.latMax - cropLatSouth) / fullLatRange;
+    let vNorth;
+    let vSouth;
+    if (region.latIsAscending === false) {
+      vNorth = (bounds.latMax - cropLatNorth) / fullLatRange;
+      vSouth = (bounds.latMax - cropLatSouth) / fullLatRange;
+    } else {
+      vNorth = (cropLatNorth - bounds.latMin) / fullLatRange;
+      vSouth = (cropLatSouth - bounds.latMin) / fullLatRange;
+    }
     const imgWidth = bounds.x1 - bounds.x0;
     const texScaleX = imgWidth > 0 ? (overlapX1 - overlapX0) / imgWidth : 1;
     const texOffsetX = imgWidth > 0 ? (overlapX0 - bounds.x0) / imgWidth : 0;
@@ -7467,27 +7880,28 @@ function renderSingleImageToTile(renderer, context, tileId, singleImage, vertexA
       baseTexScale,
       baseTexOffset
     );
-    renderer.renderSingleImage(shaderProgram, [0], singleImage, vertexArr, {
+    drawRegion({
+      gl,
+      shaderProgram,
+      vertexBuffer,
+      pixCoordBuffer,
+      texture,
+      vertexArr,
       scaleX,
       scaleY,
       shiftX,
       shiftY,
-      ...texOverride
+      ...texOverride,
+      skipBaseTexture
     });
   } else {
-    const tileSizeNorm = 1 / tilesPerSide;
-    const localX0 = (overlapX0 - tileX0) / tileSizeNorm;
-    const localX1 = (overlapX1 - tileX0) / tileSizeNorm;
-    const localY0 = (overlapY0 - tileY0) / tileSizeNorm;
-    const localY1 = (overlapY1 - tileY0) / tileSizeNorm;
-    const clipX0 = localX0 * 2 - 1;
-    const clipX1 = localX1 * 2 - 1;
-    const clipY0 = localY0 * 2 - 1;
-    const clipY1 = localY1 * 2 - 1;
-    const scaleX = (clipX1 - clipX0) / 2;
-    const scaleY = (clipY1 - clipY0) / 2;
-    const shiftX = (clipX0 + clipX1) / 2;
-    const shiftY = (clipY0 + clipY1) / 2;
+    if (shaderProgram.isEquirectangularLoc) {
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 0);
+    }
+    const scaleX = (overlapX1 - overlapX0) / 2;
+    const scaleY = (overlapY1 - overlapY0) / 2;
+    const shiftX = (overlapX0 + overlapX1) / 2;
+    const shiftY = (overlapY0 + overlapY1) / 2;
     const imgWidth = bounds.x1 - bounds.x0;
     const imgHeight = bounds.y1 - bounds.y0;
     const texScaleX = imgWidth > 0 ? (overlapX1 - overlapX0) / imgWidth : 1;
@@ -7500,49 +7914,74 @@ function renderSingleImageToTile(renderer, context, tileId, singleImage, vertexA
       baseTexScale,
       baseTexOffset
     );
-    renderer.renderSingleImage(shaderProgram, [0], singleImage, vertexArr, {
+    drawRegion({
+      gl,
+      shaderProgram,
+      vertexBuffer,
+      pixCoordBuffer,
+      texture,
+      vertexArr,
       scaleX,
       scaleY,
       shiftX,
       shiftY,
-      ...texOverride
+      ...texOverride,
+      skipBaseTexture
     });
   }
+  return true;
 }
 function renderMapboxTile({
   renderer,
   mode,
   tileId,
-  context
+  context,
+  regions
 }) {
   const { colormapTexture, uniforms, customShaderConfig } = context;
-  const singleImageState = mode.getSingleImageState?.();
-  if (!mode.isMultiscale && singleImageState) {
-    const { singleImage, vertexArr: vertexArr2 } = singleImageState;
-    const bounds = singleImage.bounds;
-    if (!bounds) return false;
+  if (regions) {
+    if (regions.length === 0) return true;
     const tilesPerSide2 = 2 ** tileId.z;
     const tileX0 = tileId.x / tilesPerSide2;
     const tileX1 = (tileId.x + 1) / tilesPerSide2;
     const tileY0 = tileId.y / tilesPerSide2;
     const tileY1 = (tileId.y + 1) / tilesPerSide2;
-    const intersects = bounds.x0 < tileX1 && bounds.x1 > tileX0 && bounds.y0 < tileY1 && bounds.y1 > tileY0;
-    if (!intersects) return false;
-    renderSingleImageToTile(
-      renderer,
-      context,
-      tileId,
-      singleImage,
-      vertexArr2,
-      bounds
-    );
-    return false;
+    let anyRendered = false;
+    for (const region of regions) {
+      const bounds = region.mercatorBounds;
+      const intersects = bounds.x0 < tileX1 && bounds.x1 > tileX0 && bounds.y0 < tileY1 && bounds.y1 > tileY0;
+      if (!intersects) continue;
+      const linearBuffer = getLinearPixCoordBuffer(context.gl, region);
+      const rendered = renderRegionToTile(renderer, context, tileId, {
+        vertexBuffer: region.vertexBuffer,
+        pixCoordBuffer: linearBuffer,
+        texture: region.texture,
+        vertexArr: region.vertexArr,
+        bounds,
+        latIsAscending: region.latIsAscending,
+        width: region.width,
+        height: region.height,
+        bandData: region.bandData,
+        bandTextures: region.bandTextures,
+        bandTexturesUploaded: region.bandTexturesUploaded,
+        bandTexturesConfigured: region.bandTexturesConfigured
+      });
+      if (rendered) anyRendered = true;
+    }
+    return !anyRendered;
   }
   const tiledState = mode.getTiledState?.();
   if (!tiledState?.tileCache) {
     return true;
   }
-  const { tileCache, vertexArr, pixCoordArr, tileSize, tileBounds } = tiledState;
+  const {
+    tileCache,
+    vertexArr,
+    pixCoordArr,
+    tileSize,
+    tileBounds,
+    latIsAscending
+  } = tiledState;
   const tilesPerSide = 2 ** tileId.z;
   const mapboxMercX0 = tileId.x / tilesPerSide;
   const mapboxMercX1 = (tileId.x + 1) / tilesPerSide;
@@ -7650,6 +8089,7 @@ function renderMapboxTile({
         tileSize,
         vertexArr,
         pixCoordArr,
+        latIsAscending,
         tileBoundsForRender,
         customShaderConfig,
         true,
@@ -7705,68 +8145,13 @@ function renderMapboxTile({
     tileSize,
     vertexArr,
     pixCoordArr,
+    latIsAscending,
     tileBoundsOverride,
     customShaderConfig,
     true
   );
   const tileHasData = tileCache.get(tileKey)?.data;
   return !tileHasData;
-}
-
-// src/render-utils.ts
-function isGlobeProjection(projection) {
-  return projection?.type === "globe" || projection?.name === "globe";
-}
-function resolveProjectionParams(params, projection, projectionToMercatorMatrix, projectionToMercatorTransition) {
-  const paramsObj = params && typeof params === "object" && !Array.isArray(params) && !ArrayBuffer.isView(params) ? params : null;
-  const shaderData = paramsObj?.shaderData;
-  let projectionData;
-  const defaultProj = paramsObj?.defaultProjectionData;
-  if (defaultProj && defaultProj.mainMatrix && defaultProj.fallbackMatrix && defaultProj.tileMercatorCoords && defaultProj.clippingPlane && typeof defaultProj.projectionTransition === "number") {
-    projectionData = {
-      mainMatrix: defaultProj.mainMatrix,
-      fallbackMatrix: defaultProj.fallbackMatrix,
-      tileMercatorCoords: defaultProj.tileMercatorCoords,
-      clippingPlane: defaultProj.clippingPlane,
-      projectionTransition: defaultProj.projectionTransition
-    };
-  }
-  let matrix = null;
-  if (projectionData?.mainMatrix && projectionData.mainMatrix.length) {
-    matrix = projectionData.mainMatrix;
-  } else if (Array.isArray(params) || params instanceof Float32Array || params instanceof Float64Array) {
-    matrix = params;
-  } else if (paramsObj?.modelViewProjectionMatrix) {
-    matrix = paramsObj.modelViewProjectionMatrix;
-  } else if (paramsObj?.projectionMatrix) {
-    matrix = paramsObj.projectionMatrix;
-  }
-  const mapboxGlobe = projection && projectionToMercatorMatrix !== void 0 ? {
-    projection,
-    globeToMercatorMatrix: projectionToMercatorMatrix,
-    transition: typeof projectionToMercatorTransition === "number" ? projectionToMercatorTransition : 0
-  } : void 0;
-  return { matrix, shaderData, projectionData, mapboxGlobe };
-}
-function computeWorldOffsets(map, isGlobe) {
-  if (!map) return [0];
-  const bounds = map.getBounds ? map.getBounds() : null;
-  if (!bounds) return [0];
-  const renderWorldCopies = typeof map.getRenderWorldCopies === "function" ? map.getRenderWorldCopies() : true;
-  if (isGlobe || !renderWorldCopies) return [0];
-  const west = bounds.getWest();
-  const east = bounds.getEast();
-  let effectiveEast = east;
-  if (west > east) {
-    effectiveEast = east + 360;
-  }
-  const minWorld = Math.floor((west + 180) / 360);
-  const maxWorld = Math.floor((effectiveEast + 180) / 360);
-  const worldOffsets = [];
-  for (let i = minWorld; i <= maxWorld; i++) {
-    worldOffsets.push(i);
-  }
-  return worldOffsets.length > 0 ? worldOffsets : [0];
 }
 
 // src/tiled-mode.ts
@@ -7784,13 +8169,12 @@ var TiledMode = class {
     this.xyLimits = null;
     this.tileBounds = {};
     this.pendingChunks = /* @__PURE__ */ new Set();
-    this.metadataLoading = false;
     this.currentLevel = null;
     this.selectorVersion = 0;
-    this.pendingControllers = /* @__PURE__ */ new Map();
-    this.lastFetchTime = 0;
-    this.throttleTimeout = null;
-    this.hasThrottledPending = false;
+    // Shared state managers
+    this.throttleState = createThrottleState();
+    this.requestCanceller = createRequestCanceller();
+    this.loadingManager = createLoadingManager();
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -7798,7 +8182,7 @@ var TiledMode = class {
     this.throttleMs = throttleMs;
   }
   async initialize() {
-    this.metadataLoading = true;
+    this.loadingManager.metadataLoading = true;
     this.emitLoadingState();
     try {
       const desc = this.zarrStore.describe();
@@ -7818,7 +8202,7 @@ var TiledMode = class {
       });
       this.updateGeometryForProjection(false);
     } finally {
-      this.metadataLoading = false;
+      this.loadingManager.metadataLoading = false;
       this.emitLoadingState();
     }
   }
@@ -7836,6 +8220,14 @@ var TiledMode = class {
     if (visibleInfo.pyramidLevel !== null) {
       this.currentLevel = visibleInfo.pyramidLevel;
     }
+    for (const [tileKey, bounds] of Object.entries(this.tileBounds)) {
+      if (bounds.latMin !== void 0 && bounds.latMax !== void 0) {
+        this.tileCache.setTileLatBounds(tileKey, {
+          min: bounds.latMin,
+          max: bounds.latMax
+        });
+      }
+    }
     const currentHash = JSON.stringify(this.selector);
     const tilesToFetch = [];
     for (const tileTuple of this.visibleTiles) {
@@ -7849,23 +8241,16 @@ var TiledMode = class {
       }
     }
     if (tilesToFetch.length > 0) {
-      const now = Date.now();
-      const timeSinceLastFetch = now - this.lastFetchTime;
-      if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
-        if (!this.hasThrottledPending) {
-          this.hasThrottledPending = true;
+      const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs);
+      if (waitTime > 0) {
+        if (!this.throttleState.throttledPending) {
+          this.throttleState.throttledPending = true;
           this.emitLoadingState();
         }
-        if (!this.throttleTimeout) {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null;
-            this.hasThrottledPending = false;
-            this.invalidate();
-          }, this.throttleMs - timeSinceLastFetch);
-        }
+        scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate);
         return;
       }
-      this.lastFetchTime = now;
+      markFetchStart(this.throttleState);
       const wasEmpty = this.pendingChunks.size === 0;
       for (const tileTuple of tilesToFetch) {
         this.pendingChunks.add(tileToKey(tileTuple));
@@ -7912,6 +8297,7 @@ var TiledMode = class {
       this.tileSize,
       this.vertexArr,
       this.pixCoordArr,
+      this.zarrStore.latIsAscending,
       Object.keys(this.tileBounds).length > 0 ? this.tileBounds : void 0,
       context.customShaderConfig,
       false
@@ -7936,29 +8322,23 @@ var TiledMode = class {
       tileSize: this.tileSize,
       vertexArr: this.vertexArr,
       pixCoordArr: this.pixCoordArr,
-      tileBounds: Object.keys(this.tileBounds).length > 0 ? this.tileBounds : void 0
+      tileBounds: Object.keys(this.tileBounds).length > 0 ? this.tileBounds : void 0,
+      latIsAscending: this.zarrStore.latIsAscending
     };
   }
   getSingleImageState() {
     return null;
   }
   dispose(_gl) {
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout);
-      this.throttleTimeout = null;
-    }
-    this.hasThrottledPending = false;
-    for (const controller of this.pendingControllers.values()) {
-      controller.abort();
-    }
-    this.pendingControllers.clear();
+    clearThrottle(this.throttleState);
+    cancelAllRequests(this.requestCanceller);
     this.tileCache?.clear();
     this.tileCache = null;
     this.pendingChunks.clear();
     this.emitLoadingState();
   }
   setLoadingCallback(callback) {
-    this.loadingCallback = callback;
+    setLoadingCallback(this.loadingManager, callback);
   }
   getCRS() {
     return this.crs;
@@ -7976,13 +8356,8 @@ var TiledMode = class {
     this.tileCache?.updateClim(clim);
   }
   emitLoadingState() {
-    if (!this.loadingCallback) return;
-    const chunksLoading = this.pendingChunks.size > 0 || this.hasThrottledPending;
-    this.loadingCallback({
-      loading: this.metadataLoading || chunksLoading,
-      metadata: this.metadataLoading,
-      chunks: chunksLoading
-    });
+    this.loadingManager.chunksLoading = this.pendingChunks.size > 0 || this.throttleState.throttledPending;
+    emitLoadingState(this.loadingManager);
   }
   async setSelector(selector) {
     this.selector = selector;
@@ -8068,14 +8443,14 @@ var TiledMode = class {
   }
   async prefetchTileData(tiles, selectorHash, version) {
     const controller = new AbortController();
-    this.pendingControllers.set(version, controller);
+    this.requestCanceller.controllers.set(version, controller);
     try {
       const fetchPromises = tiles.map(
         (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
       );
       await Promise.all(fetchPromises);
     } finally {
-      this.pendingControllers.delete(version);
+      this.requestCanceller.controllers.delete(version);
     }
   }
   async fetchTileData(tileTuple, selectorHash, version, signal) {
@@ -8098,7 +8473,7 @@ var TiledMode = class {
         this.emitLoadingState();
         return null;
       }
-      this.cancelOlderRequests(version);
+      cancelOlderRequests(this.requestCanceller, version);
       this.emitLoadingState();
       this.invalidate();
       return tile.data;
@@ -8109,14 +8484,6 @@ var TiledMode = class {
         return null;
       }
       throw err;
-    }
-  }
-  cancelOlderRequests(completedVersion) {
-    for (const [version, controller] of this.pendingControllers) {
-      if (version < completedVersion) {
-        controller.abort();
-        this.pendingControllers.delete(version);
-      }
     }
   }
   /**
@@ -8151,51 +8518,61 @@ var TiledMode = class {
   }
 };
 
-// src/single-image-mode.ts
-var SingleImageMode = class {
+// src/untiled-mode.ts
+var UntiledMode = class {
   constructor(store, variable, selector, invalidate, throttleMs = 100) {
     this.isMultiscale = false;
-    this.data = null;
+    // Data state (single-level mode)
     this.width = 0;
     this.height = 0;
     this.channels = 1;
-    this.channelLabels = [];
-    this.multiValueDimNames = [];
-    this.texture = null;
-    this.vertexBuffer = null;
-    this.pixCoordBuffer = null;
-    this.vertexArr = new Float32Array();
-    this.pixCoordArr = new Float32Array();
-    this.currentSubdivisions = 0;
-    this.geometryVersion = 0;
-    this.dataVersion = 0;
+    // Bounds
     this.mercatorBounds = null;
+    this.bandNames = [];
     this.dimIndices = {};
     this.xyLimits = null;
-    this.crs = null;
+    this.crs = "EPSG:4326";
     this.zarrArray = null;
-    this.isRemoved = false;
-    this.isLoadingData = false;
-    this.metadataLoading = false;
-    this.fetchRequestId = 0;
-    this.lastRenderedRequestId = 0;
-    this.pendingControllers = /* @__PURE__ */ new Map();
-    this.lastFetchTime = 0;
-    this.throttleTimeout = null;
-    this.throttledFetchPromise = null;
-    this.dimensionValues = {};
     this.latIsAscending = null;
-    this.texScale = [1, 1];
-    this.texOffset = [0, 0];
+    // Multi-level support
+    this.levels = [];
+    this.currentLevelIndex = 0;
+    // Loading state
+    this.isRemoved = false;
+    // Shared state managers
+    this.throttleState = createThrottleState();
+    this.requestCanceller = createRequestCanceller();
+    this.loadingManager = createLoadingManager();
+    // Dimension values cache
+    this.dimensionValues = {};
+    // Data processing
     this.clim = [0, 1];
+    // Region-based loading (for multi-level datasets with chunking/sharding)
+    this.regionCache = /* @__PURE__ */ new Map();
+    this.previousRegionCache = /* @__PURE__ */ new Map();
+    // Fallback during level transitions
+    this.regionSize = null;
+    // [height, width] of each region
+    this.lastViewportHash = "";
+    this.baseSliceArgs = [];
+    // Cached slice args for non-spatial dims
+    this.selectorVersion = 0;
+    // Incremented on selector change to track stale regions
+    // Multi-band support: track which dimensions have multiple selected values
+    this.baseMultiValueDims = [];
+    // Cached WebGL context for use in setSelector
+    this.cachedGl = null;
+    // Track if base slice args have been built (ready for region fetching)
+    this.baseSliceArgsReady = false;
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
+    this.bandNames = getBands(variable, selector);
     this.invalidate = invalidate;
     this.throttleMs = throttleMs;
   }
   async initialize() {
-    this.metadataLoading = true;
+    this.loadingManager.metadataLoading = true;
     this.emitLoadingState();
     try {
       const desc = this.zarrStore.describe();
@@ -8203,43 +8580,693 @@ var SingleImageMode = class {
       this.crs = desc.crs;
       this.xyLimits = desc.xyLimits;
       this.latIsAscending = desc.latIsAscending ?? null;
-      this.zarrArray = await this.zarrStore.getArray();
-      this.width = this.zarrArray.shape[this.dimIndices.lon.index];
-      this.height = this.zarrArray.shape[this.dimIndices.lat.index];
+      if (desc.untiledLevels && desc.untiledLevels.length > 0) {
+        this.levels = desc.untiledLevels;
+        this.isMultiscale = true;
+        await this.loadLevelMetadata();
+        this.currentLevelIndex = -1;
+      } else {
+        this.isMultiscale = false;
+        this.zarrArray = await this.zarrStore.getArray();
+        this.width = this.zarrArray.shape[this.dimIndices.lon.index];
+        this.height = this.zarrArray.shape[this.dimIndices.lat.index];
+      }
       if (this.xyLimits) {
         this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs);
       } else {
-        console.warn("SingleImageMode: No XY limits found");
+        console.warn("UntiledMode: No XY limits found");
       }
-      this.updateGeometryForProjection(false);
-      this.updateTexTransform();
     } finally {
-      this.metadataLoading = false;
+      this.loadingManager.metadataLoading = false;
       this.emitLoadingState();
     }
   }
-  update(map, gl) {
-    if (!this.texture) {
-      this.texture = mustCreateTexture(gl);
+  async loadLevelMetadata() {
+    for (let i = 0; i < this.levels.length; i++) {
+      const level = this.levels[i];
+      try {
+        const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset);
+        level.shape = meta.shape;
+        level.chunks = meta.chunks;
+      } catch (err) {
+        console.warn(`Failed to load metadata for level ${level.asset}:`, err);
+      }
     }
-    if (!this.vertexBuffer) {
-      this.vertexBuffer = mustCreateBuffer(gl);
+  }
+  /**
+   * Detect optimal region size from array metadata.
+   * For sharded arrays: use shard chunk_shape
+   * For standard chunked arrays: use array chunks
+   */
+  getRegionSize(array) {
+    const latIdx = this.dimIndices.lat?.index;
+    const lonIdx = this.dimIndices.lon?.index;
+    if (latIdx === void 0 || lonIdx === void 0) return null;
+    const codecs = array.codecs || [];
+    for (const codec of codecs) {
+      if (codec.name === "sharding_indexed" && codec.configuration?.chunk_shape) {
+        const shardShape = codec.configuration.chunk_shape;
+        return [shardShape[latIdx], shardShape[lonIdx]];
+      }
     }
-    if (!this.pixCoordBuffer) {
-      this.pixCoordBuffer = mustCreateBuffer(gl);
+    const chunks = array.chunks;
+    if (chunks && chunks.length > Math.max(latIdx, lonIdx)) {
+      const chunkH = chunks[latIdx];
+      const chunkW = chunks[lonIdx];
+      const shape = array.shape;
+      if (chunkH < shape[latIdx] || chunkW < shape[lonIdx]) {
+        return [chunkH, chunkW];
+      }
     }
-    const projection = map.getProjection ? map.getProjection() : null;
-    const isGlobe = isGlobeProjection(projection);
-    this.updateGeometryForProjection(isGlobe);
-    if (!this.data && !this.isLoadingData) {
-      this.fetchData().then(() => {
-        this.invalidate();
+    return null;
+  }
+  /**
+   * Clear region cache and dispose WebGL resources.
+   */
+  clearRegionCache(gl) {
+    this.disposeRegionCache(this.regionCache, gl);
+    this.regionCache.clear();
+    this.lastViewportHash = "";
+  }
+  /**
+   * Clear previous region cache (fallback during level transitions).
+   */
+  clearPreviousRegionCache(gl) {
+    this.disposeRegionCache(this.previousRegionCache, gl);
+    this.previousRegionCache.clear();
+  }
+  /**
+   * Dispose WebGL resources for a region cache.
+   */
+  disposeRegionCache(cache, gl) {
+    for (const region of cache.values()) {
+      if (region.texture) gl.deleteTexture(region.texture);
+      if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer);
+      if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer);
+      for (const tex of region.bandTextures.values()) {
+        gl.deleteTexture(tex);
+      }
+    }
+  }
+  /**
+   * Calculate which regions are visible in the current viewport.
+   */
+  getVisibleRegions(map) {
+    const bounds = map.getBounds?.()?.toArray?.();
+    if (!bounds || !this.xyLimits || !this.regionSize) return [];
+    const [[west, south], [east, north]] = bounds;
+    const { xMin, xMax, yMin, yMax } = this.xyLimits;
+    const [regionH, regionW] = this.regionSize;
+    const xMinIdx = geoToArrayIndex(west, xMin, xMax, this.width);
+    const xMaxIdx = geoToArrayIndex(east, xMin, xMax, this.width);
+    let ySouthIdx = geoToArrayIndex(south, yMin, yMax, this.height);
+    let yNorthIdx = geoToArrayIndex(north, yMin, yMax, this.height);
+    if (this.latIsAscending === false) {
+      ySouthIdx = this.height - 1 - ySouthIdx;
+      yNorthIdx = this.height - 1 - yNorthIdx;
+    }
+    const regionXMin = Math.floor(Math.min(xMinIdx, xMaxIdx) / regionW);
+    const regionXMax = Math.floor(Math.max(xMinIdx, xMaxIdx) / regionW);
+    const regionYMin = Math.floor(Math.min(ySouthIdx, yNorthIdx) / regionH);
+    const regionYMax = Math.floor(Math.max(ySouthIdx, yNorthIdx) / regionH);
+    const numRegionsX = Math.ceil(this.width / regionW);
+    const numRegionsY = Math.ceil(this.height / regionH);
+    const clampedXMin = Math.max(0, regionXMin);
+    const clampedXMax = Math.min(numRegionsX - 1, regionXMax);
+    const clampedYMin = Math.max(0, regionYMin);
+    const clampedYMax = Math.min(numRegionsY - 1, regionYMax);
+    const regions = [];
+    for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
+      for (let rx = clampedXMin; rx <= clampedXMax; rx++) {
+        regions.push({ regionX: rx, regionY: ry });
+      }
+    }
+    return regions;
+  }
+  /**
+   * Create a new region state entry.
+   */
+  createRegionState(regionX, regionY) {
+    return {
+      key: `${regionX},${regionY}`,
+      regionX,
+      regionY,
+      data: null,
+      width: 0,
+      height: 0,
+      loading: false,
+      channels: 1,
+      texture: null,
+      textureUploaded: false,
+      vertexBuffer: null,
+      pixCoordBuffer: null,
+      vertexArr: null,
+      pixCoordArr: null,
+      mercatorBounds: null,
+      selectorVersion: this.selectorVersion,
+      bandData: /* @__PURE__ */ new Map(),
+      bandTextures: /* @__PURE__ */ new Map(),
+      bandTexturesUploaded: /* @__PURE__ */ new Set(),
+      bandTexturesConfigured: /* @__PURE__ */ new Set()
+    };
+  }
+  /**
+   * Check if a region has all required data for rendering.
+   */
+  isRegionValid(region) {
+    return !!(region.data && region.textureUploaded && region.texture && region.vertexBuffer && region.pixCoordBuffer && region.vertexArr && region.mercatorBounds);
+  }
+  /**
+   * Get all loaded regions from both caches (previous first for fallback, then current).
+   */
+  getLoadedRegions() {
+    const regions = [];
+    for (const region of this.previousRegionCache.values()) {
+      if (this.isRegionValid(region)) regions.push(region);
+    }
+    for (const region of this.regionCache.values()) {
+      if (this.isRegionValid(region)) regions.push(region);
+    }
+    return regions;
+  }
+  /**
+   * Build all index combinations from multi-value dimensions.
+   * Returns cartesian product of all dimension value arrays.
+   */
+  buildChannelCombinations(multiValueDims) {
+    let combinations = [[]];
+    let labelCombinations = [[]];
+    for (const { values, labels } of multiValueDims) {
+      const nextCombos = [];
+      const nextLabels = [];
+      for (let idx = 0; idx < values.length; idx++) {
+        for (let c = 0; c < combinations.length; c++) {
+          nextCombos.push([...combinations[c], values[idx]]);
+          nextLabels.push([...labelCombinations[c], labels[idx]]);
+        }
+      }
+      combinations = nextCombos;
+      labelCombinations = nextLabels;
+    }
+    return { combinations, labelCombinations };
+  }
+  /**
+   * Get geographic bounds for a region.
+   * Accounts for data orientation (latIsAscending).
+   */
+  getRegionBounds(regionX, regionY) {
+    if (!this.xyLimits || !this.regionSize) {
+      return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
+    }
+    const [regionH, regionW] = this.regionSize;
+    const { xMin, xMax, yMin, yMax } = this.xyLimits;
+    const pxXStart = regionX * regionW;
+    const pxXEnd = Math.min(pxXStart + regionW, this.width);
+    const pxYStart = regionY * regionH;
+    const pxYEnd = Math.min(pxYStart + regionH, this.height);
+    const geoXMin = xMin + pxXStart / this.width * (xMax - xMin);
+    const geoXMax = xMin + pxXEnd / this.width * (xMax - xMin);
+    let geoYMin;
+    let geoYMax;
+    if (this.latIsAscending === false) {
+      geoYMax = yMax - pxYStart / this.height * (yMax - yMin);
+      geoYMin = yMax - pxYEnd / this.height * (yMax - yMin);
+    } else {
+      geoYMin = yMin + pxYStart / this.height * (yMax - yMin);
+      geoYMax = yMin + pxYEnd / this.height * (yMax - yMin);
+    }
+    return { xMin: geoXMin, xMax: geoXMax, yMin: geoYMin, yMax: geoYMax };
+  }
+  /**
+   * Create geometry (vertex positions and tex coords) for a region.
+   * Uses subdivided geometry for smooth globe rendering and pre-warped
+   * texture coordinates for mercator display.
+   */
+  createRegionGeometry(regionX, regionY, gl, region) {
+    const geoBounds = this.getRegionBounds(regionX, regionY);
+    const mercBounds = boundsToMercatorNorm(geoBounds, this.crs);
+    region.mercatorBounds = mercBounds;
+    const latSpan = Math.abs(geoBounds.yMax - geoBounds.yMin);
+    const subdivisions = Math.max(16, Math.min(128, Math.ceil(latSpan)));
+    const subdivided = createSubdividedQuad(subdivisions);
+    region.vertexArr = subdivided.vertexArr;
+    if (this.crs === "EPSG:4326") {
+      region.pixCoordArr = createWarpedTexCoords(
+        subdivided.vertexArr,
+        subdivided.texCoordArr,
+        mercBounds,
+        { latMin: geoBounds.yMin, latMax: geoBounds.yMax },
+        this.latIsAscending
+      );
+    } else {
+      region.pixCoordArr = this.latIsAscending ? flipTexCoordV(subdivided.texCoordArr) : subdivided.texCoordArr;
+    }
+    if (!region.vertexBuffer) {
+      region.vertexBuffer = gl.createBuffer();
+    }
+    if (!region.pixCoordBuffer) {
+      region.pixCoordBuffer = gl.createBuffer();
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW);
+  }
+  /**
+   * Classify a dimension by its name.
+   * Used to identify spatial (lat/lon) vs non-spatial dimensions.
+   */
+  classifyDimension(dimKey) {
+    const key = dimKey.toLowerCase();
+    if (key === "lon" || key === "x" || key === "lng" || key.includes("lon")) {
+      return "lon";
+    }
+    if (key === "lat" || key === "y" || key.includes("lat")) {
+      return "lat";
+    }
+    if (key.includes("time")) {
+      return "time";
+    }
+    return "other";
+  }
+  /**
+   * Build slice arguments from a selector for all dimensions.
+   * Shared logic used by both display (buildBaseSliceArgs) and queries (fetchDataForSelector).
+   */
+  async buildSliceArgsForSelector(selector, options) {
+    if (!this.zarrArray) {
+      return { sliceArgs: [], multiValueDims: [] };
+    }
+    const sliceArgs = new Array(
+      this.zarrArray.shape.length
+    ).fill(0);
+    const multiValueDims = [];
+    const dimNames = Object.keys(this.dimIndices);
+    for (const dimName of dimNames) {
+      const dimInfo = this.dimIndices[dimName];
+      const dimType = this.classifyDimension(dimName);
+      if (dimType === "lon") {
+        if (options.spatialBounds?.type === "point") {
+          sliceArgs[dimInfo.index] = options.spatialBounds.x;
+        } else if (options.spatialBounds?.type === "bbox") {
+          sliceArgs[dimInfo.index] = slice(
+            options.spatialBounds.minX,
+            options.spatialBounds.maxX
+          );
+        } else {
+          sliceArgs[dimInfo.index] = options.includeSpatialSlices ? slice(0, this.width) : 0;
+        }
+      } else if (dimType === "lat") {
+        if (options.spatialBounds?.type === "point") {
+          sliceArgs[dimInfo.index] = options.spatialBounds.y;
+        } else if (options.spatialBounds?.type === "bbox") {
+          sliceArgs[dimInfo.index] = slice(
+            options.spatialBounds.minY,
+            options.spatialBounds.maxY
+          );
+        } else {
+          sliceArgs[dimInfo.index] = options.includeSpatialSlices ? slice(0, this.height) : 0;
+        }
+      } else {
+        const selectionSpec = selector[dimName] || (dimType === "time" ? selector["time"] : void 0);
+        if (selectionSpec !== void 0) {
+          const selectionValue = selectionSpec.selected;
+          const selectionType = selectionSpec.type;
+          if (options.trackMultiValue && Array.isArray(selectionValue) && selectionValue.length > 1) {
+            const resolvedIndices = [];
+            const labelValues = [];
+            for (const val of selectionValue) {
+              const idx = await this.resolveSelectionIndex(
+                dimName,
+                dimInfo,
+                val,
+                selectionType
+              );
+              resolvedIndices.push(idx);
+              labelValues.push(val);
+            }
+            multiValueDims.push({
+              dimIndex: dimInfo.index,
+              dimName,
+              values: resolvedIndices,
+              labels: labelValues
+            });
+            sliceArgs[dimInfo.index] = resolvedIndices[0];
+          } else {
+            const primaryValue = Array.isArray(selectionValue) ? selectionValue[0] : selectionValue;
+            sliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
+              dimName,
+              dimInfo,
+              primaryValue,
+              selectionType
+            );
+          }
+        } else {
+          sliceArgs[dimInfo.index] = 0;
+        }
+      }
+    }
+    return { sliceArgs, multiValueDims };
+  }
+  /**
+   * Update visible regions based on current viewport.
+   */
+  updateVisibleRegions(map, gl) {
+    const visible = this.getVisibleRegions(map);
+    const newRegions = [];
+    const staleRegions = [];
+    for (const { regionX, regionY } of visible) {
+      const key = `${regionX},${regionY}`;
+      const cached = this.regionCache.get(key);
+      if (cached?.loading) {
+        continue;
+      }
+      if (!cached?.data) {
+        newRegions.push({ regionX, regionY });
+      } else if (cached.selectorVersion !== this.selectorVersion) {
+        staleRegions.push({ regionX, regionY });
+      }
+    }
+    const viewportHash = `${this.selectorVersion}:${visible.map((r) => `${r.regionX},${r.regionY}`).join("|")}`;
+    const viewportChanged = viewportHash !== this.lastViewportHash;
+    this.lastViewportHash = viewportHash;
+    if (newRegions.length === 0 && staleRegions.length === 0 && !viewportChanged) {
+      return;
+    }
+    if (newRegions.length > 0) {
+      this.fetchRegions(newRegions, gl);
+    }
+    if (staleRegions.length > 0) {
+      this.fetchRegionsThrottled(staleRegions, gl);
+    }
+    if (this.previousRegionCache.size > 0 && newRegions.length === 0 && staleRegions.length === 0) {
+      this.clearPreviousRegionCache(gl);
+    }
+  }
+  /**
+   * Fetch regions with throttling (for selector changes).
+   */
+  fetchRegionsThrottled(regions, gl) {
+    const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs);
+    if (waitTime > 0) {
+      if (!this.throttleState.throttledPending) {
+        this.throttleState.throttledPending = true;
+        this.emitLoadingState();
+      }
+      scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate);
+      return;
+    }
+    markFetchStart(this.throttleState);
+    this.fetchRegions(regions, gl);
+  }
+  /**
+   * Fetch multiple regions with limited concurrency to avoid overwhelming the browser.
+   */
+  async fetchRegions(regions, gl) {
+    this.loadingManager.chunksLoading = true;
+    this.emitLoadingState();
+    for (const { regionX, regionY } of regions) {
+      const key = `${regionX},${regionY}`;
+      let region = this.regionCache.get(key);
+      if (!region) {
+        region = this.createRegionState(regionX, regionY);
+        this.regionCache.set(key, region);
+      }
+      region.loading = true;
+    }
+    const MAX_CONCURRENT = 6;
+    const executing = [];
+    for (const region of regions) {
+      const promise = this.fetchRegion(region.regionX, region.regionY, gl).then(() => {
+        executing.splice(executing.indexOf(promise), 1);
+      }).catch(() => {
+        executing.splice(executing.indexOf(promise), 1);
       });
+      executing.push(promise);
+      if (executing.length >= MAX_CONCURRENT) {
+        await Promise.race(executing);
+      }
+    }
+    await Promise.allSettled(executing);
+    if (!hasActiveRequests(this.requestCanceller)) {
+      this.loadingManager.chunksLoading = false;
+      this.emitLoadingState();
+    }
+  }
+  /**
+   * Fetch data for a single region.
+   * Handles multi-band extraction when selector has multi-value dimensions.
+   */
+  async fetchRegion(regionX, regionY, gl) {
+    if (!this.zarrArray || !this.regionSize || this.isRemoved) {
+      return;
+    }
+    const key = `${regionX},${regionY}`;
+    const requestId = ++this.requestCanceller.currentVersion;
+    const fetchSelectorVersion = this.selectorVersion;
+    const controller = new AbortController();
+    this.requestCanceller.controllers.set(requestId, controller);
+    let region = this.regionCache.get(key);
+    if (!region) {
+      region = this.createRegionState(regionX, regionY);
+      this.regionCache.set(key, region);
+    }
+    region.loading = true;
+    const [regionH, regionW] = this.regionSize;
+    const yStart = regionY * regionH;
+    const yEnd = Math.min(yStart + regionH, this.height);
+    const xStart = regionX * regionW;
+    const xEnd = Math.min(xStart + regionW, this.width);
+    const actualW = xEnd - xStart;
+    const actualH = yEnd - yStart;
+    try {
+      const baseSliceArgs = [...this.baseSliceArgs];
+      const latIdx = this.dimIndices.lat.index;
+      const lonIdx = this.dimIndices.lon.index;
+      baseSliceArgs[latIdx] = slice(yStart, yEnd);
+      baseSliceArgs[lonIdx] = slice(xStart, xEnd);
+      const desc = this.zarrStore.describe();
+      const fillValue = desc.fill_value;
+      const { combinations: channelCombinations } = this.buildChannelCombinations(this.baseMultiValueDims);
+      const numChannels = channelCombinations.length || 1;
+      const pixelCount = actualW * actualH;
+      const bandArrays = [];
+      const packedData = new Float32Array(pixelCount * numChannels);
+      packedData.fill(fillValue ?? 0);
+      if (numChannels === 1) {
+        const result2 = await get2(this.zarrArray, baseSliceArgs, {
+          opts: { signal: controller.signal }
+        });
+        if (controller.signal.aborted || this.isRemoved) {
+          region.loading = false;
+          return;
+        }
+        const rawData = new Float32Array(result2.data);
+        bandArrays.push(rawData);
+        packedData.set(rawData);
+      } else {
+        for (let c = 0; c < numChannels; c++) {
+          const sliceArgs = [...baseSliceArgs];
+          const combo = channelCombinations[c];
+          for (let i = 0; i < this.baseMultiValueDims.length; i++) {
+            sliceArgs[this.baseMultiValueDims[i].dimIndex] = combo[i];
+          }
+          const result2 = await get2(this.zarrArray, sliceArgs, {
+            opts: { signal: controller.signal }
+          });
+          if (controller.signal.aborted || this.isRemoved) {
+            region.loading = false;
+            return;
+          }
+          const bandData = new Float32Array(result2.data);
+          bandArrays.push(bandData);
+          for (let pixIdx = 0; pixIdx < pixelCount; pixIdx++) {
+            packedData[pixIdx * numChannels + c] = bandData[pixIdx];
+          }
+        }
+      }
+      if (fetchSelectorVersion < region.selectorVersion) {
+        region.loading = false;
+        return;
+      }
+      region.selectorVersion = fetchSelectorVersion;
+      cancelOlderRequests(this.requestCanceller, requestId);
+      const { normalized } = normalizeDataForTexture(
+        packedData,
+        fillValue,
+        this.clim
+      );
+      region.data = normalized;
+      region.width = actualW;
+      region.height = actualH;
+      region.channels = numChannels;
+      region.loading = false;
+      region.bandData.clear();
+      region.bandTexturesUploaded.clear();
+      for (let c = 0; c < bandArrays.length; c++) {
+        const bandName = this.bandNames[c] || `band_${c}`;
+        const { normalized: bandNormalized } = normalizeDataForTexture(
+          bandArrays[c],
+          fillValue,
+          this.clim
+        );
+        region.bandData.set(bandName, bandNormalized);
+      }
+      if (!region.texture) {
+        region.texture = gl.createTexture();
+      }
+      const result = uploadDataTexture(gl, {
+        texture: region.texture,
+        data: normalized,
+        width: actualW,
+        height: actualH,
+        channels: numChannels,
+        configured: false
+      });
+      region.textureUploaded = result.uploaded;
+      this.createRegionGeometry(regionX, regionY, gl, region);
+      this.invalidate();
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        console.error(`[fetchRegion] Error fetching region ${key}:`, err);
+      }
+      region.loading = false;
+    } finally {
+      this.requestCanceller.controllers.delete(requestId);
+    }
+  }
+  update(map, gl) {
+    this.cachedGl = gl;
+    if (this.isMultiscale && this.levels.length > 0) {
+      const mapZoom = map.getZoom?.() ?? 0;
+      const bestLevelIndex = this.selectLevelForZoom(mapZoom);
+      if (this.currentLevelIndex === -1) {
+        this.initializeLevel(bestLevelIndex);
+        return;
+      } else if (bestLevelIndex !== this.currentLevelIndex) {
+        this.switchToLevel(bestLevelIndex, gl);
+        return;
+      }
+      if (this.regionSize && this.baseSliceArgsReady) {
+        this.updateVisibleRegions(map, gl);
+      }
+    } else {
+      if (!this.regionSize && this.zarrArray && !this.loadingManager.chunksLoading) {
+        const detectedRegionSize = this.getRegionSize(this.zarrArray);
+        this.regionSize = detectedRegionSize ?? [this.height, this.width];
+        this.buildBaseSliceArgs().then(() => {
+          this.updateVisibleRegions(map, gl);
+        });
+        return;
+      }
+      if (this.regionSize && this.baseSliceArgsReady) {
+        this.updateVisibleRegions(map, gl);
+      }
+    }
+  }
+  async initializeLevel(levelIndex) {
+    if (levelIndex < 0 || levelIndex >= this.levels.length) {
+      return;
+    }
+    if (this.loadingManager.chunksLoading) {
+      return;
+    }
+    const level = this.levels[levelIndex];
+    this.currentLevelIndex = levelIndex;
+    try {
+      this.zarrArray = await this.zarrStore.getLevelArray(level.asset);
+      this.width = this.zarrArray.shape[this.dimIndices.lon.index];
+      this.height = this.zarrArray.shape[this.dimIndices.lat.index];
+      const detectedRegionSize = this.getRegionSize(this.zarrArray);
+      this.regionSize = detectedRegionSize ?? [this.height, this.width];
+      this.regionCache.clear();
+      await this.buildBaseSliceArgs();
+      this.invalidate();
+    } catch (err) {
+      console.error(`Failed to initialize level ${level.asset}:`, err);
+    }
+  }
+  /**
+   * Build base slice args for non-spatial dimensions.
+   * This caches the selector values for use in region fetching.
+   * Also tracks multi-value dimensions for band extraction.
+   */
+  async buildBaseSliceArgs() {
+    if (!this.zarrArray) return;
+    this.baseSliceArgsReady = false;
+    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(
+      this.selector,
+      {
+        includeSpatialSlices: false,
+        // placeholders for region fetching
+        trackMultiValue: true
+        // track multi-value dims for band extraction
+      }
+    );
+    this.baseSliceArgs = sliceArgs;
+    this.baseMultiValueDims = multiValueDims;
+    this.baseSliceArgsReady = true;
+  }
+  selectLevelForZoom(mapZoom) {
+    if (!this.xyLimits || this.levels.length === 0) return 0;
+    const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom);
+    const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin;
+    let worldFraction;
+    if (this.crs === "EPSG:3857") {
+      const fullWorldMeters = 2 * 20037508342789244e-9;
+      worldFraction = dataWidth / fullWorldMeters;
+    } else {
+      worldFraction = dataWidth / 360;
+    }
+    const levelResolutions = [];
+    for (let i = 0; i < this.levels.length; i++) {
+      const level = this.levels[i];
+      if (!level.shape) continue;
+      const lonIndex = this.dimIndices.lon?.index ?? level.shape.length - 1;
+      const effectivePixels = level.shape[lonIndex] / worldFraction;
+      levelResolutions.push({ index: i, effectivePixels });
+    }
+    if (levelResolutions.length === 0) return 0;
+    levelResolutions.sort((a, b) => a.effectivePixels - b.effectivePixels);
+    const minRequired = mapPixelsPerWorld * 0.5;
+    for (const { index, effectivePixels } of levelResolutions) {
+      if (effectivePixels >= minRequired) {
+        return index;
+      }
+    }
+    return levelResolutions[levelResolutions.length - 1].index;
+  }
+  async switchToLevel(newLevelIndex, gl) {
+    if (newLevelIndex === this.currentLevelIndex) return;
+    if (newLevelIndex < 0 || newLevelIndex >= this.levels.length) return;
+    if (this.loadingManager.chunksLoading) return;
+    const level = this.levels[newLevelIndex];
+    cancelAllRequests(this.requestCanceller);
+    this.currentLevelIndex = newLevelIndex;
+    try {
+      const newArray = await this.zarrStore.getLevelArray(level.asset);
+      const newWidth = newArray.shape[this.dimIndices.lon.index];
+      const newHeight = newArray.shape[this.dimIndices.lat.index];
+      const detectedRegionSize = this.getRegionSize(newArray);
+      const newRegionSize = detectedRegionSize ?? [
+        newHeight,
+        newWidth
+      ];
+      this.clearPreviousRegionCache(gl);
+      this.previousRegionCache = this.regionCache;
+      this.regionCache = /* @__PURE__ */ new Map();
+      this.zarrArray = newArray;
+      this.width = newWidth;
+      this.height = newHeight;
+      this.regionSize = newRegionSize;
+      this.lastViewportHash = "";
+      await this.buildBaseSliceArgs();
+      this.invalidate();
+    } catch (err) {
+      console.error(`Failed to switch to level ${level.asset}:`, err);
     }
   }
   render(renderer, context) {
-    const singleImageState = this.getSingleImageState();
-    if (!singleImageState) return;
     const useMapboxGlobe = !!context.mapboxGlobe;
     const shaderProgram = renderer.getProgram(
       context.shaderData,
@@ -8257,283 +9284,142 @@ var SingleImageMode = class {
       context.matrix,
       false
     );
-    const bounds = singleImageState.singleImage.bounds;
-    if (bounds) {
-      if (shaderProgram.isEquirectangularLoc) {
-        renderer.gl.uniform1i(
-          shaderProgram.isEquirectangularLoc,
-          bounds.latMin !== void 0 ? 1 : 0
-        );
-      }
-      if (shaderProgram.latMinLoc && bounds.latMin !== void 0) {
-        renderer.gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin);
-      }
-      if (shaderProgram.latMaxLoc && bounds.latMax !== void 0) {
-        renderer.gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax);
-      }
-    }
-    renderer.renderSingleImage(
+    this.renderRegions(
+      renderer,
       shaderProgram,
       context.worldOffsets,
-      singleImageState.singleImage,
-      singleImageState.vertexArr
+      context.customShaderConfig
     );
+  }
+  /**
+   * Convert a RegionState to a RenderableRegion for unified rendering.
+   */
+  regionToRenderable(region) {
+    return {
+      mercatorBounds: region.mercatorBounds,
+      vertexBuffer: region.vertexBuffer,
+      pixCoordBuffer: region.pixCoordBuffer,
+      vertexCount: region.vertexArr.length / 2,
+      texture: region.texture,
+      bandData: region.bandData,
+      bandTextures: region.bandTextures,
+      bandTexturesUploaded: region.bandTexturesUploaded,
+      bandTexturesConfigured: region.bandTexturesConfigured,
+      width: region.width,
+      height: region.height
+    };
+  }
+  /**
+   * Render all loaded regions using the unified render path.
+   * Note: Regions have geometry already positioned in mercator space,
+   * so we disable the equirectangular shader correction to avoid double transformation.
+   */
+  renderRegions(renderer, shaderProgram, worldOffsets, customShaderConfig) {
+    const gl = renderer.gl;
+    if (shaderProgram.isEquirectangularLoc) {
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 0);
+    }
+    setupBandTextureUniforms(gl, shaderProgram, customShaderConfig);
+    for (const region of this.getLoadedRegions()) {
+      renderRegion(
+        gl,
+        shaderProgram,
+        this.regionToRenderable(region),
+        worldOffsets,
+        customShaderConfig
+      );
+    }
   }
   renderToTile(renderer, tileId, context) {
     return renderMapboxTile({
       renderer,
       mode: this,
       tileId,
-      context
+      context,
+      regions: this.getRegionStates()
     });
   }
-  onProjectionChange(isGlobe) {
-    this.updateGeometryForProjection(isGlobe);
+  onProjectionChange(_isGlobe) {
   }
   getTiledState() {
     return null;
   }
-  getSingleImageState() {
-    if (!this.texture || !this.vertexBuffer || !this.pixCoordBuffer) {
-      return null;
+  /**
+   * Get render states for all loaded regions (for multi-region rendering).
+   * Includes previous level regions as fallback during level transitions.
+   */
+  getRegionStates() {
+    if (!this.regionSize) {
+      return [];
     }
-    return {
-      singleImage: {
-        data: this.data,
-        width: this.width,
-        height: this.height,
-        channels: this.channels,
-        bounds: this.mercatorBounds,
-        texture: this.texture,
-        vertexBuffer: this.vertexBuffer,
-        pixCoordBuffer: this.pixCoordBuffer,
-        pixCoordArr: this.pixCoordArr,
-        geometryVersion: this.geometryVersion,
-        dataVersion: this.dataVersion,
-        texScale: this.texScale,
-        texOffset: this.texOffset,
-        clim: this.clim
-      },
-      vertexArr: this.vertexArr
-    };
+    return this.getLoadedRegions().map((region) => ({
+      texture: region.texture,
+      vertexBuffer: region.vertexBuffer,
+      pixCoordBuffer: region.pixCoordBuffer,
+      vertexArr: region.vertexArr,
+      mercatorBounds: region.mercatorBounds,
+      width: region.width,
+      height: region.height,
+      channels: this.channels,
+      latIsAscending: this.latIsAscending ?? void 0,
+      bandData: region.bandData,
+      bandTextures: region.bandTextures,
+      bandTexturesUploaded: region.bandTexturesUploaded,
+      bandTexturesConfigured: region.bandTexturesConfigured
+    }));
   }
   dispose(gl) {
     this.isRemoved = true;
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout);
-      this.throttleTimeout = null;
-    }
-    this.throttledFetchPromise = null;
-    for (const controller of this.pendingControllers.values()) {
-      controller.abort();
-    }
-    this.pendingControllers.clear();
-    if (this.texture) gl.deleteTexture(this.texture);
-    if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
-    if (this.pixCoordBuffer) gl.deleteBuffer(this.pixCoordBuffer);
-    this.texture = null;
-    this.vertexBuffer = null;
-    this.pixCoordBuffer = null;
-    this.data = null;
-    this.isLoadingData = false;
+    clearThrottle(this.throttleState);
+    cancelAllRequests(this.requestCanceller);
+    this.clearRegionCache(gl);
+    this.clearPreviousRegionCache(gl);
+    this.regionSize = null;
+    this.loadingManager.chunksLoading = false;
     this.emitLoadingState();
   }
   setLoadingCallback(callback) {
-    this.loadingCallback = callback;
+    setLoadingCallback(this.loadingManager, callback);
   }
   getCRS() {
-    return this.crs ?? "EPSG:4326";
+    return this.crs;
   }
   getXYLimits() {
     return this.xyLimits;
   }
   getMaxLevelIndex() {
-    return 0;
+    return this.levels.length > 0 ? this.levels.length - 1 : 0;
   }
   getLevels() {
-    return [];
+    return this.levels.map((l) => l.asset);
   }
   updateClim(clim) {
     this.clim = clim;
   }
-  emitLoadingState() {
-    if (!this.loadingCallback) return;
-    this.loadingCallback({
-      loading: this.metadataLoading || this.isLoadingData,
-      metadata: this.metadataLoading,
-      chunks: this.isLoadingData
-    });
-  }
   async setSelector(selector) {
     this.selector = selector;
-    await this.fetchData();
-  }
-  updateGeometryForProjection(isGlobe) {
-    const targetSubdivisions = isGlobe ? SINGLE_IMAGE_TILE_SUBDIVISIONS : 1;
-    if (this.currentSubdivisions === targetSubdivisions) return;
-    const subdivided = createSubdividedQuad(targetSubdivisions);
-    this.vertexArr = subdivided.vertexArr;
-    this.pixCoordArr = subdivided.texCoordArr;
-    this.currentSubdivisions = targetSubdivisions;
-    this.geometryVersion += 1;
+    this.bandNames = getBands(this.variable, selector);
+    const gl = this.cachedGl;
+    if (!gl) {
+      this.invalidate();
+      return;
+    }
+    if (!this.regionSize && this.zarrArray) {
+      this.regionSize = this.getRegionSize(this.zarrArray) ?? [
+        this.height,
+        this.width
+      ];
+    }
+    this.selectorVersion++;
+    await this.buildBaseSliceArgs();
+    this.lastViewportHash = "";
     this.invalidate();
   }
-  async fetchData() {
-    if (!this.zarrArray || this.isRemoved) return;
-    const now = Date.now();
-    const timeSinceLastFetch = now - this.lastFetchTime;
-    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
-      this.isLoadingData = true;
-      this.emitLoadingState();
-      if (!this.throttledFetchPromise) {
-        this.throttledFetchPromise = new Promise((resolve2) => {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null;
-            this.throttledFetchPromise = null;
-            this.fetchData().then(resolve2);
-          }, this.throttleMs - timeSinceLastFetch);
-        });
-      }
-      return this.throttledFetchPromise;
+  emitLoadingState() {
+    if (this.throttleState.throttledPending && !this.loadingManager.chunksLoading) {
+      this.loadingManager.chunksLoading = true;
     }
-    this.lastFetchTime = now;
-    const requestId = ++this.fetchRequestId;
-    const controller = new AbortController();
-    this.pendingControllers.set(requestId, controller);
-    const signal = controller.signal;
-    this.isLoadingData = true;
-    this.emitLoadingState();
-    try {
-      const baseSliceArgs = new Array(
-        this.zarrArray.shape.length
-      ).fill(0);
-      const multiValueDims = [];
-      const dimNames = Object.keys(this.dimIndices);
-      for (const dimName of dimNames) {
-        const dimInfo = this.dimIndices[dimName];
-        const dimKey = dimName.toLowerCase();
-        const isLon = dimKey === "lon" || dimKey === "x" || dimKey === "lng" || dimKey.includes("lon");
-        const isLat = dimKey === "lat" || dimKey === "y" || dimKey.includes("lat");
-        if (isLon) {
-          baseSliceArgs[dimInfo.index] = slice(0, this.width);
-        } else if (isLat) {
-          baseSliceArgs[dimInfo.index] = slice(0, this.height);
-        } else {
-          const selectionSpec = this.selector[dimName] || (dimKey.includes("time") ? this.selector["time"] : void 0) || (dimKey.includes("lat") ? this.selector["lat"] : void 0) || (dimKey.includes("lon") || dimKey.includes("lng") ? this.selector["lon"] : void 0);
-          if (selectionSpec !== void 0) {
-            const selectionValue = selectionSpec.selected;
-            const selectionType = selectionSpec.type;
-            if (Array.isArray(selectionValue) && selectionValue.length > 1) {
-              const resolvedIndices = [];
-              const labelValues = [];
-              for (const val of selectionValue) {
-                const idx = await this.resolveSelectionIndex(
-                  dimName,
-                  dimInfo,
-                  val,
-                  selectionType
-                );
-                resolvedIndices.push(idx);
-                labelValues.push(val);
-              }
-              multiValueDims.push({
-                dimIndex: dimInfo.index,
-                dimName,
-                values: resolvedIndices,
-                labels: labelValues
-              });
-              baseSliceArgs[dimInfo.index] = resolvedIndices[0];
-            } else {
-              const primaryValue = Array.isArray(selectionValue) ? selectionValue[0] : selectionValue;
-              baseSliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
-                dimName,
-                dimInfo,
-                primaryValue,
-                selectionType
-              );
-            }
-          } else {
-            baseSliceArgs[dimInfo.index] = 0;
-          }
-        }
-      }
-      let channelCombinations = [[]];
-      let channelLabelCombinations = [[]];
-      for (const { values, labels } of multiValueDims) {
-        const next = [];
-        const nextLabels = [];
-        for (let idx = 0; idx < values.length; idx++) {
-          const val = values[idx];
-          const label = labels[idx];
-          for (let c = 0; c < channelCombinations.length; c++) {
-            next.push([...channelCombinations[c], val]);
-            nextLabels.push([...channelLabelCombinations[c], label]);
-          }
-        }
-        channelCombinations = next;
-        channelLabelCombinations = nextLabels;
-      }
-      const numChannels = channelCombinations.length || 1;
-      this.channels = numChannels;
-      this.multiValueDimNames = multiValueDims.map((d) => d.dimName);
-      this.channelLabels = channelLabelCombinations;
-      if (numChannels === 1) {
-        const data = await get2(this.zarrArray, baseSliceArgs, {
-          opts: { signal }
-        });
-        if (this.isRemoved) return;
-        if (requestId < this.lastRenderedRequestId) return;
-        this.lastRenderedRequestId = requestId;
-        this.cancelOlderRequests(requestId);
-        this.data = new Float32Array(data.data.buffer);
-        this.dataVersion++;
-      } else {
-        const packedData = new Float32Array(
-          this.width * this.height * numChannels
-        );
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs];
-          const combo = channelCombinations[c];
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i];
-          }
-          const bandData = await get2(this.zarrArray, sliceArgs, {
-            opts: { signal }
-          });
-          if (this.isRemoved) return;
-          const bandArray = new Float32Array(
-            bandData.data.buffer
-          );
-          for (let pixIdx = 0; pixIdx < this.width * this.height; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
-          }
-        }
-        if (requestId < this.lastRenderedRequestId) return;
-        this.lastRenderedRequestId = requestId;
-        this.cancelOlderRequests(requestId);
-        this.data = packedData;
-        this.dataVersion++;
-      }
-      this.invalidate();
-    } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
-        console.error("Error fetching single image data:", err);
-      }
-    } finally {
-      this.pendingControllers.delete(requestId);
-      if (requestId === this.fetchRequestId) {
-        this.isLoadingData = false;
-        this.emitLoadingState();
-      }
-    }
-  }
-  cancelOlderRequests(completedRequestId) {
-    for (const [id, controller] of this.pendingControllers) {
-      if (id < completedRequestId) {
-        controller.abort();
-        this.pendingControllers.delete(id);
-      }
-    }
+    emitLoadingState(this.loadingManager);
   }
   async resolveSelectionIndex(dimName, dimInfo, value, type) {
     if (type === "index") {
@@ -8564,120 +9450,114 @@ var SingleImageMode = class {
     return typeof value === "number" ? value : 0;
   }
   /**
-   * Fetch data for a specific selector (used for queries with selector overrides).
-   * Returns the data array along with channel metadata.
+   * Unified method to fetch query data for either point or region queries.
+   * Handles multi-value dimensions and channel combinations.
    */
-  async fetchDataForSelector(selector) {
+  async fetchQueryData(selector, spatialQuery) {
     if (!this.zarrArray) return null;
     try {
-      const baseSliceArgs = new Array(
-        this.zarrArray.shape.length
-      ).fill(0);
-      const multiValueDims = [];
-      const dimNames = Object.keys(this.dimIndices);
-      for (const dimName of dimNames) {
-        const dimInfo = this.dimIndices[dimName];
-        const dimKey = dimName.toLowerCase();
-        const isLon = dimKey === "lon" || dimKey === "x" || dimKey === "lng" || dimKey.includes("lon");
-        const isLat = dimKey === "lat" || dimKey === "y" || dimKey.includes("lat");
-        if (isLon) {
-          baseSliceArgs[dimInfo.index] = slice(0, this.width);
-        } else if (isLat) {
-          baseSliceArgs[dimInfo.index] = slice(0, this.height);
-        } else {
-          const selectionSpec = selector[dimName] || (dimKey.includes("time") ? selector["time"] : void 0) || (dimKey.includes("lat") ? selector["lat"] : void 0) || (dimKey.includes("lon") || dimKey.includes("lng") ? selector["lon"] : void 0);
-          if (selectionSpec !== void 0) {
-            const selectionValue = selectionSpec.selected;
-            const selectionType = selectionSpec.type;
-            if (Array.isArray(selectionValue) && selectionValue.length > 1) {
-              const resolvedIndices = [];
-              const labelValues = [];
-              for (const val of selectionValue) {
-                const idx = await this.resolveSelectionIndex(
-                  dimName,
-                  dimInfo,
-                  val,
-                  selectionType
-                );
-                resolvedIndices.push(idx);
-                labelValues.push(val);
-              }
-              multiValueDims.push({
-                dimIndex: dimInfo.index,
-                dimName,
-                values: resolvedIndices,
-                labels: labelValues
-              });
-              baseSliceArgs[dimInfo.index] = resolvedIndices[0];
-            } else {
-              const primaryValue = Array.isArray(selectionValue) ? selectionValue[0] : selectionValue;
-              baseSliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
-                dimName,
-                dimInfo,
-                primaryValue,
-                selectionType
-              );
-            }
-          } else {
-            baseSliceArgs[dimInfo.index] = 0;
-          }
-        }
-      }
-      let channelCombinations = [[]];
-      let channelLabelCombinations = [[]];
-      for (const { values, labels } of multiValueDims) {
-        const next = [];
-        const nextLabels = [];
-        for (let idx = 0; idx < values.length; idx++) {
-          const val = values[idx];
-          const label = labels[idx];
-          for (let c = 0; c < channelCombinations.length; c++) {
-            next.push([...channelCombinations[c], val]);
-            nextLabels.push([...channelLabelCombinations[c], label]);
-          }
-        }
-        channelCombinations = next;
-        channelLabelCombinations = nextLabels;
-      }
+      const { sliceArgs: baseSliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(selector, {
+        includeSpatialSlices: spatialQuery.type !== "bbox",
+        trackMultiValue: true,
+        spatialBounds: spatialQuery
+      });
+      const {
+        combinations: channelCombinations,
+        labelCombinations: channelLabelCombinations
+      } = this.buildChannelCombinations(multiValueDims);
       const numChannels = channelCombinations.length || 1;
       const multiValueDimNames = multiValueDims.map((d) => d.dimName);
-      if (numChannels === 1) {
-        const result = await get2(this.zarrArray, baseSliceArgs);
-        return {
-          data: new Float32Array(result.data.buffer),
-          channels: 1,
-          channelLabels: channelLabelCombinations,
-          multiValueDimNames
-        };
-      } else {
-        const packedData = new Float32Array(
-          this.width * this.height * numChannels
-        );
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs];
-          const combo = channelCombinations[c];
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i];
-          }
-          const bandData = await get2(this.zarrArray, sliceArgs);
-          const bandArray = new Float32Array(
-            bandData.data.buffer
-          );
-          for (let pixIdx = 0; pixIdx < this.width * this.height; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
+      if (spatialQuery.type === "point") {
+        const values = [];
+        if (numChannels === 1) {
+          const result = await get2(this.zarrArray, baseSliceArgs);
+          const value = this.extractScalarValue(result);
+          if (value === null) return null;
+          values.push(value);
+        } else {
+          for (let c = 0; c < numChannels; c++) {
+            const sliceArgs = [...baseSliceArgs];
+            const combo = channelCombinations[c];
+            for (let i = 0; i < multiValueDims.length; i++) {
+              sliceArgs[multiValueDims[i].dimIndex] = combo[i];
+            }
+            const result = await get2(this.zarrArray, sliceArgs);
+            const value = this.extractScalarValue(result);
+            if (value !== null) values.push(value);
           }
         }
         return {
-          data: packedData,
+          type: "point",
+          values,
+          data: new Float32Array(0),
+          width: 1,
+          height: 1,
           channels: numChannels,
           channelLabels: channelLabelCombinations,
           multiValueDimNames
         };
       }
+      const fetchWidth = spatialQuery.maxX - spatialQuery.minX;
+      const fetchHeight = spatialQuery.maxY - spatialQuery.minY;
+      if (numChannels === 1) {
+        const result = await get2(this.zarrArray, baseSliceArgs);
+        return {
+          type: "bbox",
+          values: [],
+          data: new Float32Array(result.data.buffer),
+          width: fetchWidth,
+          height: fetchHeight,
+          channels: 1,
+          channelLabels: channelLabelCombinations,
+          multiValueDimNames
+        };
+      }
+      const packedData = new Float32Array(
+        fetchWidth * fetchHeight * numChannels
+      );
+      for (let c = 0; c < numChannels; c++) {
+        const sliceArgs = [...baseSliceArgs];
+        const combo = channelCombinations[c];
+        for (let i = 0; i < multiValueDims.length; i++) {
+          sliceArgs[multiValueDims[i].dimIndex] = combo[i];
+        }
+        const bandData = await get2(this.zarrArray, sliceArgs);
+        const bandArray = new Float32Array(
+          bandData.data.buffer
+        );
+        for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
+          packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
+        }
+      }
+      return {
+        type: "bbox",
+        values: [],
+        data: packedData,
+        width: fetchWidth,
+        height: fetchHeight,
+        channels: numChannels,
+        channelLabels: channelLabelCombinations,
+        multiValueDimNames
+      };
     } catch (err) {
-      console.error("Error fetching data for query selector:", err);
+      console.error("Error fetching query data:", err);
       return null;
     }
+  }
+  /**
+   * Extract a scalar value from zarr.get result (handles various return formats).
+   */
+  extractScalarValue(result) {
+    if (result && typeof result === "object" && "data" in result) {
+      const data = result.data;
+      return data[0] ?? data;
+    } else if (typeof result === "number") {
+      return result;
+    } else if (ArrayBuffer.isView(result)) {
+      return result[0];
+    }
+    console.warn("Unexpected zarr.get result format:", result);
+    return null;
   }
   /**
    * Query data for point or region geometries.
@@ -8691,18 +9571,8 @@ var SingleImageMode = class {
       };
     }
     const normalizedSelector = selector ? normalizeSelector(selector) : this.selector;
-    const fetched = await this.fetchDataForSelector(normalizedSelector);
-    if (!fetched) {
-      return {
-        [this.variable]: [],
-        dimensions: [],
-        coordinates: { lat: [], lon: [] }
-      };
-    }
-    const queryData = fetched.data;
-    const queryChannels = fetched.channels;
-    const queryChannelLabels = fetched.channelLabels;
-    const queryMultiValueDimNames = fetched.multiValueDimNames;
+    const desc = this.zarrStore.describe();
+    const { scaleFactor, addOffset, fill_value } = desc;
     if (geometry.type === "Point") {
       const [lon, lat] = geometry.coordinates;
       const coords = { lat: [lat], lon: [lon] };
@@ -8722,14 +9592,23 @@ var SingleImageMode = class {
           coordinates: coords
         };
       }
-      const { x, y } = pixel;
-      const baseIndex = (y * this.width + x) * queryChannels;
-      const valuesNested = queryMultiValueDimNames.length > 0;
+      const pointData = await this.fetchQueryData(normalizedSelector, {
+        type: "point",
+        x: pixel.x,
+        y: pixel.y
+      });
+      if (!pointData) {
+        return {
+          [this.variable]: [],
+          dimensions: ["lat", "lon"],
+          coordinates: coords
+        };
+      }
+      const { values: rawValues, channelLabels, multiValueDimNames } = pointData;
+      const valuesNested = multiValueDimNames.length > 0;
       let values = valuesNested ? {} : [];
-      const desc2 = this.zarrStore.describe();
-      const { scaleFactor, addOffset, fill_value } = desc2;
-      for (let c = 0; c < queryChannels; c++) {
-        let value = queryData[baseIndex + c];
+      for (let c = 0; c < rawValues.length; c++) {
+        let value = rawValues[c];
         if (value === void 0 || value === null || !Number.isFinite(value)) {
           continue;
         }
@@ -8739,8 +9618,8 @@ var SingleImageMode = class {
         if (scaleFactor !== 1) value *= scaleFactor;
         if (addOffset !== 0) value += addOffset;
         if (valuesNested) {
-          const labels = queryChannelLabels?.[c];
-          if (labels && queryMultiValueDimNames.length > 0 && labels.length === queryMultiValueDimNames.length) {
+          const labels = channelLabels?.[c];
+          if (labels && multiValueDimNames.length > 0 && labels.length === multiValueDimNames.length) {
             values = setObjectValues(values, labels, value);
           } else if (Array.isArray(values)) {
             values.push(value);
@@ -8749,7 +9628,7 @@ var SingleImageMode = class {
           values.push(value);
         }
       }
-      const dimensions = desc2.dimensions;
+      const dimensions = desc.dimensions;
       const mappedDimensions = dimensions.map((d) => {
         const dimLower = d.toLowerCase();
         if (["x", "lon", "longitude"].includes(dimLower)) return "lon";
@@ -8762,19 +9641,18 @@ var SingleImageMode = class {
         lon: coords.lon
       };
       if (valuesNested) {
-        const querySelector = normalizedSelector;
         for (const dim of dimensions) {
           const dimLower = dim.toLowerCase();
           if (["x", "lon", "longitude", "y", "lat", "latitude"].includes(dimLower)) {
             continue;
           }
-          const selSpec = querySelector[dim];
+          const selSpec = normalizedSelector[dim];
           if (selSpec && "selected" in selSpec) {
             const selected = selSpec.selected;
             const vals = Array.isArray(selected) ? selected : [selected];
             resultCoordinates[dim] = vals;
-          } else if (desc2.coordinates[dim]) {
-            resultCoordinates[dim] = desc2.coordinates[dim];
+          } else if (desc.coordinates[dim]) {
+            resultCoordinates[dim] = desc.coordinates[dim];
           }
         }
       }
@@ -8784,21 +9662,65 @@ var SingleImageMode = class {
         coordinates: resultCoordinates
       };
     }
-    const desc = this.zarrStore.describe();
+    const pixelBounds = computePixelBoundsFromGeometry(
+      geometry,
+      this.mercatorBounds,
+      this.width,
+      this.height,
+      this.crs ?? "EPSG:4326",
+      this.latIsAscending ?? void 0
+    );
+    if (!pixelBounds) {
+      return {
+        [this.variable]: [],
+        dimensions: [],
+        coordinates: { lat: [], lon: [] }
+      };
+    }
+    const fetched = await this.fetchQueryData(normalizedSelector, {
+      type: "bbox",
+      ...pixelBounds
+    });
+    if (!fetched) {
+      return {
+        [this.variable]: [],
+        dimensions: [],
+        coordinates: { lat: [], lon: [] }
+      };
+    }
+    const { minX, maxX, minY, maxY } = pixelBounds;
+    const xRange = this.mercatorBounds.x1 - this.mercatorBounds.x0;
+    const yRange = this.mercatorBounds.y1 - this.mercatorBounds.y0;
+    const subsetBounds = {
+      x0: this.mercatorBounds.x0 + minX / this.width * xRange,
+      x1: this.mercatorBounds.x0 + maxX / this.width * xRange,
+      y0: this.mercatorBounds.y0 + minY / this.height * yRange,
+      y1: this.mercatorBounds.y0 + maxY / this.height * yRange
+    };
+    if (this.mercatorBounds.latMin !== void 0 && this.mercatorBounds.latMax !== void 0) {
+      const latRange = this.mercatorBounds.latMax - this.mercatorBounds.latMin;
+      if (this.latIsAscending) {
+        subsetBounds.latMin = this.mercatorBounds.latMin + minY / this.height * latRange;
+        subsetBounds.latMax = this.mercatorBounds.latMin + maxY / this.height * latRange;
+      } else {
+        subsetBounds.latMax = this.mercatorBounds.latMax - minY / this.height * latRange;
+        subsetBounds.latMin = this.mercatorBounds.latMax - maxY / this.height * latRange;
+      }
+    }
     return queryRegionSingleImage(
       this.variable,
       geometry,
       normalizedSelector,
-      queryData,
-      this.width,
-      this.height,
-      this.mercatorBounds,
+      fetched.data,
+      fetched.width,
+      fetched.height,
+      subsetBounds,
       this.crs ?? "EPSG:4326",
       desc.dimensions,
       desc.coordinates,
-      queryChannels,
-      queryChannelLabels,
-      queryMultiValueDimNames,
+      fetched.channels,
+      fetched.channelLabels,
+      fetched.multiValueDimNames,
       this.latIsAscending ?? void 0,
       {
         scaleFactor: desc.scaleFactor,
@@ -8806,16 +9728,6 @@ var SingleImageMode = class {
         fillValue: desc.fill_value
       }
     );
-  }
-  updateTexTransform() {
-    if (this.latIsAscending) {
-      this.texScale = [1, -1];
-      this.texOffset = [0, 1];
-    } else {
-      this.texScale = [1, 1];
-      this.texOffset = [0, 0];
-    }
-    this.geometryVersion += 1;
   }
 };
 
@@ -8846,7 +9758,6 @@ var ZarrLayer = class {
     this.zarrVersion = null;
     this.latIsAscending = null;
     this.selectorHash = "";
-    this.isMultiscale = true;
     this._fillValue = null;
     this.scaleFactor = 1;
     this.offset = 0;
@@ -9042,7 +9953,6 @@ var ZarrLayer = class {
       this.projectionChangeHandler = () => {
         const isGlobe2 = this.isGlobeProjection();
         this.mode?.onProjectionChange(isGlobe2);
-        this.renderer?.resetSingleImageGeometry();
       };
       if (typeof map.on === "function" && this.projectionChangeHandler) {
         map.on("projectionchange", this.projectionChangeHandler);
@@ -9077,7 +9987,8 @@ var ZarrLayer = class {
     if (this.mode) {
       this.mode.dispose(this.gl);
     }
-    if (this.isMultiscale) {
+    const desc = this.zarrStore.describe();
+    if (desc.multiscaleType === "tiled") {
       this.mode = new TiledMode(
         this.zarrStore,
         this.variable,
@@ -9086,7 +9997,7 @@ var ZarrLayer = class {
         this.throttleMs
       );
     } else {
-      this.mode = new SingleImageMode(
+      this.mode = new UntiledMode(
         this.zarrStore,
         this.variable,
         this.normalizedSelector,
@@ -9121,7 +10032,6 @@ var ZarrLayer = class {
       if (this._fillValue === null && desc.fill_value !== null && desc.fill_value !== void 0) {
         this._fillValue = desc.fill_value;
       }
-      this.isMultiscale = this.levelInfos.length > 0;
       this.normalizedSelector = normalizeSelector(this.selector);
       await this.loadInitialDimensionValues();
       this.bandNames = getBands(this.variable, this.normalizedSelector);

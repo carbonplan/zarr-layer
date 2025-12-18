@@ -69,7 +69,7 @@ export interface MapInstance {
 export interface MapConfig {
   createMap: (
     container: HTMLDivElement,
-    globeProjection: boolean,
+    globeProjection: boolean
   ) => MapInstance
   setProjection: (map: MapInstance, globeProjection: boolean) => void
   getLayerBeforeId: (map: MapInstance) => string | undefined
@@ -104,7 +104,7 @@ const mapLibreConfig: MapConfig = {
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
     ;(map as unknown as maplibregl.Map).setProjection(
-      globeProjection ? { type: 'globe' } : { type: 'mercator' },
+      globeProjection ? { type: 'globe' } : { type: 'mercator' }
     )
   },
   getLayerBeforeId: () => 'landuse_pedestrian',
@@ -156,7 +156,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
 
   const layerConfig: LayerProps = useMemo(
     () => datasetModule.buildLayerProps(datasetState as any),
-    [datasetModule, datasetState],
+    [datasetModule, datasetState]
   )
 
   const isCarbonplan4d = datasetModule.id === 'carbonplan_4d'

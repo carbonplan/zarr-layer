@@ -12,7 +12,6 @@ import type {
   CustomShaderConfig,
   MapboxGlobeParams,
   RendererUniforms,
-  SingleImageParams,
 } from './renderer-types'
 import type { ZarrRenderer } from './zarr-renderer'
 import type { QueryGeometry, QueryResult } from './query/types'
@@ -42,11 +41,26 @@ export interface TiledRenderState {
   vertexArr: Float32Array
   pixCoordArr: Float32Array
   tileBounds?: Record<string, MercatorBounds>
+  latIsAscending: boolean | null
 }
 
-export interface SingleImageRenderState {
-  singleImage: SingleImageParams
+export interface RegionRenderState {
+  texture: WebGLTexture
+  vertexBuffer: WebGLBuffer
+  /** Pre-warped coords with mercator distortion for flat map rendering */
+  pixCoordBuffer: WebGLBuffer
   vertexArr: Float32Array
+  mercatorBounds: MercatorBounds
+  width: number
+  height: number
+  channels: number
+  /** Whether latitude increases with array index (needed for globe tile coordinate calculation) */
+  latIsAscending?: boolean
+  /** Band textures for multi-band custom shaders */
+  bandData?: Map<string, Float32Array>
+  bandTextures?: Map<string, WebGLTexture>
+  bandTexturesUploaded?: Set<string>
+  bandTexturesConfigured?: Set<string>
 }
 
 export interface ZarrMode {
@@ -68,12 +82,8 @@ export interface ZarrMode {
   getMaxLevelIndex(): number
   getLevels(): string[]
   getTiledState?(): TiledRenderState | null
-  getSingleImageState?(): SingleImageRenderState | null
   updateClim(clim: [number, number]): void
 
   // Query methods (optional)
-  queryData?(
-    geometry: QueryGeometry,
-    selector?: Selector
-  ): Promise<QueryResult>
+  queryData?(geometry: QueryGeometry, selector?: Selector): Promise<QueryResult>
 }

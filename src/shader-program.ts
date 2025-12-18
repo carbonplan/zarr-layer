@@ -289,5 +289,3 @@ export function applyProjectionUniforms(
     }
   }
 }
-
-

@@ -2,7 +2,11 @@ import React from 'react'
 import { Box } from 'theme-ui'
 import type { Dataset, ControlsProps, LayerProps } from './types'
 import { useAppStore } from '../lib/store'
-import { Slider, RangeSlider, BandSelector } from '../components/shared-controls'
+import {
+  Slider,
+  RangeSlider,
+  BandSelector,
+} from '../components/shared-controls'
 
 const ALL_MONTHS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
@@ -23,9 +27,11 @@ const monthRangeAverageFrag = `
   float count = 0.0;
   ${ALL_MONTHS.map(
     (month) => `
-  float inRange_${month} = step(u_monthStart, ${month.toFixed(1)}) * step(${month.toFixed(1)}, u_monthEnd);
+  float inRange_${month} = step(u_monthStart, ${month.toFixed(
+      1
+    )}) * step(${month.toFixed(1)}, u_monthEnd);
   sum += month_${month} * inRange_${month};
-  count += inRange_${month};`,
+  count += inRange_${month};`
   ).join('')}
   float average = sum / max(count, 1.0);
   float rescaled = (average - clim.x) / (clim.y - clim.x);

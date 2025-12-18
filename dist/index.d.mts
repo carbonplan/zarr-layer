@@ -160,7 +160,6 @@ declare class ZarrLayer {
     private minzoom;
     private maxzoom;
     private selectorHash;
-    private isMultiscale;
     private _fillValue;
     private scaleFactor;
     private offset;

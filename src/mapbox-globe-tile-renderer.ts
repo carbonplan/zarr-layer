@@ -13,21 +13,139 @@ import {
   type MercatorBounds,
   type TileTuple,
 } from './map-utils'
-import type { ZarrRenderer } from './zarr-renderer'
-import type { ZarrMode, RenderContext, TileId } from './zarr-mode'
-import type { SingleImageParams } from './renderer-types'
-import { computeTexOverride } from './webgl-utils'
+import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
+import type {
+  ZarrMode,
+  RenderContext,
+  TileId,
+  RegionRenderState,
+} from './zarr-mode'
+import { computeTexOverride, configureDataTexture } from './webgl-utils'
+import { bindBandTextures, setupBandTextureUniforms } from './render-helpers'
+
+/**
+ * Cache for linear texture coordinate buffers used in globe rendering.
+ * Globe rendering needs linear (non-warped) texture coords - the shader handles reprojection.
+ * We compute these from vertex positions and cache the buffer per region.
+ */
+const linearBufferCache = new WeakMap<RegionRenderState, WebGLBuffer>()
+
+/**
+ * Get or create a linear texture coordinate buffer for globe rendering.
+ * Computes linear coords from vertex positions: u = (x+1)/2, v = (1-y)/2
+ */
+function getLinearPixCoordBuffer(
+  gl: WebGL2RenderingContext,
+  region: RegionRenderState
+): WebGLBuffer {
+  let buffer = linearBufferCache.get(region)
+  if (buffer) return buffer
+
+  // Compute linear tex coords from vertex positions
+  const vertexArr = region.vertexArr
+  const linearCoords = new Float32Array(vertexArr.length)
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const x = vertexArr[i]
+    const y = vertexArr[i + 1]
+    linearCoords[i] = (x + 1) / 2 // u
+    linearCoords[i + 1] = (1 - y) / 2 // v
+  }
+
+  buffer = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+  gl.bufferData(gl.ARRAY_BUFFER, linearCoords, gl.STATIC_DRAW)
+
+  linearBufferCache.set(region, buffer)
+  return buffer
+}
 
 /** Identity matrix for globe rendering (no additional transformation) */
 const IDENTITY_MATRIX = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ])
 
+/**
+ * Params for direct WebGL drawing of a region/image to a globe tile.
+ */
+interface DrawRegionParams {
+  gl: WebGL2RenderingContext
+  shaderProgram: ShaderProgram
+  vertexBuffer: WebGLBuffer
+  pixCoordBuffer: WebGLBuffer
+  texture: WebGLTexture
+  vertexArr: Float32Array
+  scaleX: number
+  scaleY: number
+  shiftX: number
+  shiftY: number
+  texScale: [number, number]
+  texOffset: [number, number]
+  /** If true, skip base texture binding (band textures already bound) */
+  skipBaseTexture?: boolean
+}
+
+/**
+ * Draw a region/image directly with WebGL.
+ * Used for globe tile rendering where buffers and textures are pre-uploaded.
+ */
+function drawRegion(params: DrawRegionParams): void {
+  const {
+    gl,
+    shaderProgram,
+    vertexBuffer,
+    pixCoordBuffer,
+    texture,
+    vertexArr,
+    scaleX,
+    scaleY,
+    shiftX,
+    shiftY,
+    texScale,
+    texOffset,
+    skipBaseTexture,
+  } = params
+
+  // Set scale/shift uniforms
+  gl.uniform1f(shaderProgram.scaleLoc, 0)
+  gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
+  gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
+  gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+  gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+  gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
+  gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
+
+  // Bind vertex buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer)
+  gl.enableVertexAttribArray(shaderProgram.vertexLoc)
+  gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0)
+
+  // Bind texture coordinate buffer
+  gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer)
+  gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
+  gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+
+  // Bind base texture (unless using custom shader with band textures)
+  if (!skipBaseTexture) {
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    if (shaderProgram.texLoc !== null) {
+      gl.uniform1i(shaderProgram.texLoc, 0)
+    }
+    configureDataTexture(gl)
+  }
+
+  // Draw (worldOffset=0 for globe tiles)
+  gl.uniform1f(shaderProgram.worldXOffsetLoc, 0)
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexArr.length / 2)
+}
+
 interface MapboxTileRenderParams {
   renderer: ZarrRenderer
   mode: ZarrMode
   tileId: TileId
   context: RenderContext
+  /** Regions to render (for untiled/region-based modes) */
+  regions?: RegionRenderState[]
 }
 
 /**
@@ -72,8 +190,26 @@ function createTileMatrix(
   ])
 }
 
+/** Params for rendering a region to a globe tile */
+interface RegionTileParams {
+  vertexBuffer: WebGLBuffer
+  pixCoordBuffer: WebGLBuffer
+  texture: WebGLTexture
+  vertexArr: Float32Array
+  bounds: MercatorBounds
+  texScale?: [number, number]
+  texOffset?: [number, number]
+  latIsAscending?: boolean
+  width: number
+  height: number
+  bandData?: Map<string, Float32Array>
+  bandTextures?: Map<string, WebGLTexture>
+  bandTexturesUploaded?: Set<string>
+  bandTexturesConfigured?: Set<string>
+}
+
 /**
- * Renders a single image (non-tiled zarr data) to a Mapbox globe tile.
+ * Renders a region to a Mapbox globe tile.
  * Handles both EPSG:4326 (equirectangular) and EPSG:3857 (Web Mercator) data.
  *
  * For EPSG:4326 data: Uses the shader's equirectangular reprojection to correctly
@@ -82,15 +218,14 @@ function createTileMatrix(
  * For EPSG:3857 data: Direct texture sampling since the data is already in
  * Mercator projection.
  */
-function renderSingleImageToTile(
+function renderRegionToTile(
   renderer: ZarrRenderer,
   context: RenderContext,
   tileId: TileId,
-  singleImage: SingleImageParams,
-  vertexArr: Float32Array,
-  bounds: MercatorBounds
-): void {
+  region: RegionTileParams
+): boolean {
   const { colormapTexture, uniforms, customShaderConfig } = context
+  const { bounds, vertexBuffer, pixCoordBuffer, texture, vertexArr } = region
 
   const tilesPerSide = 2 ** tileId.z
   const tileX0 = tileId.x / tilesPerSide
@@ -127,8 +262,35 @@ function renderSingleImageToTile(
     true
   )
 
-  const baseTexScale: [number, number] = singleImage.texScale ?? [1, 1]
-  const baseTexOffset: [number, number] = singleImage.texOffset ?? [0, 0]
+  const baseTexScale: [number, number] = region.texScale ?? [1, 1]
+  const baseTexOffset: [number, number] = region.texOffset ?? [0, 0]
+  const gl = renderer.gl
+
+  // Bind band textures for custom shaders with multiple bands
+  let skipBaseTexture = false
+  if (shaderProgram.useCustomShader && customShaderConfig) {
+    setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
+    if (
+      region.bandData &&
+      region.bandTextures &&
+      region.bandTexturesUploaded &&
+      region.bandTexturesConfigured
+    ) {
+      const bandsBound = bindBandTextures(gl, {
+        bandData: region.bandData,
+        bandTextures: region.bandTextures,
+        bandTexturesUploaded: region.bandTexturesUploaded,
+        bandTexturesConfigured: region.bandTexturesConfigured,
+        customShaderConfig,
+        width: region.width,
+        height: region.height,
+      })
+      if (!bandsBound) {
+        return false // Missing band data
+      }
+      skipBaseTexture = true
+    }
+  }
 
   // Check if this is equirectangular (EPSG:4326) data that needs reprojection
   const isEquirectangular =
@@ -136,34 +298,40 @@ function renderSingleImageToTile(
 
   if (isEquirectangular) {
     // EPSG:4326 path: Enable shader's equirectangular reprojection
-    // The shader converts Mercator Y to latitude, then maps to texture V coordinate
     const cropLatNorth = mercatorNormToLat(overlapY0)
     const cropLatSouth = mercatorNormToLat(overlapY1)
 
-    // Set scale/shift in Mercator space (required for shader's mercY calculation)
     const scaleX = (overlapX1 - overlapX0) / 2
     const scaleY = (overlapY1 - overlapY0) / 2
     const shiftX = (overlapX0 + overlapX1) / 2
     const shiftY = (overlapY0 + overlapY1) / 2
 
-    // Enable equirectangular mode with crop region's lat bounds
+    // Enable equirectangular mode
     if (shaderProgram.isEquirectangularLoc) {
-      renderer.gl.uniform1i(shaderProgram.isEquirectangularLoc, 1)
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 1)
     }
     if (shaderProgram.latMinLoc) {
-      renderer.gl.uniform1f(shaderProgram.latMinLoc, cropLatSouth)
+      gl.uniform1f(shaderProgram.latMinLoc, cropLatSouth)
     }
     if (shaderProgram.latMaxLoc) {
-      renderer.gl.uniform1f(shaderProgram.latMaxLoc, cropLatNorth)
+      gl.uniform1f(shaderProgram.latMaxLoc, cropLatNorth)
     }
 
-    // Map crop region's lat range to full image texture coordinates
-    // Shader outputs v in [0,1] for crop region; we map to full image space
+    // Map crop region's lat range to texture coordinates
+    // Default assumes ascending (row 0 = south), only flip if explicitly false
     const fullLatRange = bounds.latMax! - bounds.latMin!
-    const vNorth = (bounds.latMax! - cropLatNorth) / fullLatRange
-    const vSouth = (bounds.latMax! - cropLatSouth) / fullLatRange
+    let vNorth: number
+    let vSouth: number
+    if (region.latIsAscending === false) {
+      // Data goes north to south: V=0 at latMax (north), V=1 at latMin (south)
+      vNorth = (bounds.latMax! - cropLatNorth) / fullLatRange
+      vSouth = (bounds.latMax! - cropLatSouth) / fullLatRange
+    } else {
+      // Data goes south to north (default): V=0 at latMin (south), V=1 at latMax (north)
+      vNorth = (cropLatNorth - bounds.latMin!) / fullLatRange
+      vSouth = (cropLatSouth - bounds.latMin!) / fullLatRange
+    }
 
-    // X mapping is linear in lon/Mercator space
     const imgWidth = bounds.x1 - bounds.x0
     const texScaleX = imgWidth > 0 ? (overlapX1 - overlapX0) / imgWidth : 1
     const texOffsetX = imgWidth > 0 ? (overlapX0 - bounds.x0) / imgWidth : 0
@@ -175,33 +343,31 @@ function renderSingleImageToTile(
       baseTexOffset
     )
 
-    renderer.renderSingleImage(shaderProgram, [0], singleImage, vertexArr, {
+    drawRegion({
+      gl,
+      shaderProgram,
+      vertexBuffer,
+      pixCoordBuffer,
+      texture,
+      vertexArr,
       scaleX,
       scaleY,
       shiftX,
       shiftY,
       ...texOverride,
+      skipBaseTexture,
     })
   } else {
-    // EPSG:3857 path: Direct Mercator mapping, no reprojection needed
-    const tileSizeNorm = 1 / tilesPerSide
-    const localX0 = (overlapX0 - tileX0) / tileSizeNorm
-    const localX1 = (overlapX1 - tileX0) / tileSizeNorm
-    const localY0 = (overlapY0 - tileY0) / tileSizeNorm
-    const localY1 = (overlapY1 - tileY0) / tileSizeNorm
+    // EPSG:3857 path: Direct Mercator mapping
+    if (shaderProgram.isEquirectangularLoc) {
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
+    }
 
-    // Position geometry in clip space
-    const clipX0 = localX0 * 2 - 1
-    const clipX1 = localX1 * 2 - 1
-    const clipY0 = localY0 * 2 - 1
-    const clipY1 = localY1 * 2 - 1
+    const scaleX = (overlapX1 - overlapX0) / 2
+    const scaleY = (overlapY1 - overlapY0) / 2
+    const shiftX = (overlapX0 + overlapX1) / 2
+    const shiftY = (overlapY0 + overlapY1) / 2
 
-    const scaleX = (clipX1 - clipX0) / 2
-    const scaleY = (clipY1 - clipY0) / 2
-    const shiftX = (clipX0 + clipX1) / 2
-    const shiftY = (clipY0 + clipY1) / 2
-
-    // Texture crop mapping
     const imgWidth = bounds.x1 - bounds.x0
     const imgHeight = bounds.y1 - bounds.y0
     const texScaleX = imgWidth > 0 ? (overlapX1 - overlapX0) / imgWidth : 1
@@ -216,14 +382,23 @@ function renderSingleImageToTile(
       baseTexOffset
     )
 
-    renderer.renderSingleImage(shaderProgram, [0], singleImage, vertexArr, {
+    drawRegion({
+      gl,
+      shaderProgram,
+      vertexBuffer,
+      pixCoordBuffer,
+      texture,
+      vertexArr,
       scaleX,
       scaleY,
       shiftX,
       shiftY,
       ...texOverride,
+      skipBaseTexture,
     })
   }
+
+  return true
 }
 
 /**
@@ -246,15 +421,13 @@ export function renderMapboxTile({
   mode,
   tileId,
   context,
+  regions,
 }: MapboxTileRenderParams): boolean {
   const { colormapTexture, uniforms, customShaderConfig } = context
 
-  // Handle single image (non-tiled) data
-  const singleImageState = mode.getSingleImageState?.()
-  if (!mode.isMultiscale && singleImageState) {
-    const { singleImage, vertexArr } = singleImageState
-    const bounds = singleImage.bounds
-    if (!bounds) return false
+  // Handle region-based loading (UntiledMode - both single-level and multi-level)
+  if (regions) {
+    if (regions.length === 0) return true // Still loading
 
     const tilesPerSide = 2 ** tileId.z
     const tileX0 = tileId.x / tilesPerSide
@@ -262,24 +435,39 @@ export function renderMapboxTile({
     const tileY0 = tileId.y / tilesPerSide
     const tileY1 = (tileId.y + 1) / tilesPerSide
 
-    // Check if image intersects this tile
-    const intersects =
-      bounds.x0 < tileX1 &&
-      bounds.x1 > tileX0 &&
-      bounds.y0 < tileY1 &&
-      bounds.y1 > tileY0
+    let anyRendered = false
+    for (const region of regions) {
+      const bounds = region.mercatorBounds
+      // Check if region intersects this tile
+      const intersects =
+        bounds.x0 < tileX1 &&
+        bounds.x1 > tileX0 &&
+        bounds.y0 < tileY1 &&
+        bounds.y1 > tileY0
 
-    if (!intersects) return false
+      if (!intersects) continue
 
-    renderSingleImageToTile(
-      renderer,
-      context,
-      tileId,
-      singleImage,
-      vertexArr,
-      bounds
-    )
-    return false
+      // Globe rendering uses linear (non-warped) tex coords - shader handles reprojection
+      // Get or create linear tex coord buffer (computed from vertex positions)
+      const linearBuffer = getLinearPixCoordBuffer(context.gl, region)
+
+      const rendered = renderRegionToTile(renderer, context, tileId, {
+        vertexBuffer: region.vertexBuffer,
+        pixCoordBuffer: linearBuffer,
+        texture: region.texture,
+        vertexArr: region.vertexArr,
+        bounds,
+        latIsAscending: region.latIsAscending,
+        width: region.width,
+        height: region.height,
+        bandData: region.bandData,
+        bandTextures: region.bandTextures,
+        bandTexturesUploaded: region.bandTexturesUploaded,
+        bandTexturesConfigured: region.bandTexturesConfigured,
+      })
+      if (rendered) anyRendered = true
+    }
+    return !anyRendered // Return true if nothing rendered (still loading)
   }
 
   // Handle tiled (pyramid) data
@@ -288,7 +476,14 @@ export function renderMapboxTile({
     return true
   }
 
-  const { tileCache, vertexArr, pixCoordArr, tileSize, tileBounds } = tiledState
+  const {
+    tileCache,
+    vertexArr,
+    pixCoordArr,
+    tileSize,
+    tileBounds,
+    latIsAscending,
+  } = tiledState
 
   const tilesPerSide = 2 ** tileId.z
   const mapboxMercX0 = tileId.x / tilesPerSide
@@ -414,6 +609,7 @@ export function renderMapboxTile({
         tileSize,
         vertexArr,
         pixCoordArr,
+        latIsAscending,
         tileBoundsForRender,
         customShaderConfig,
         true,
@@ -476,6 +672,7 @@ export function renderMapboxTile({
     tileSize,
     vertexArr,
     pixCoordArr,
+    latIsAscending,
     tileBoundsOverride,
     customShaderConfig,
     true

@@ -173,6 +173,89 @@ export function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
 }
 
 /**
+ * Computes pixel bounds from a geometry's bounding box.
+ * Returns the pixel range [minX, maxX, minY, maxY] that covers the geometry.
+ */
+export function computePixelBoundsFromGeometry(
+  geometry: QueryGeometry,
+  bounds: MercatorBounds,
+  width: number,
+  height: number,
+  crs: CRS,
+  latIsAscending?: boolean
+): { minX: number; maxX: number; minY: number; maxY: number } | null {
+  const bbox = computeBoundingBox(geometry)
+
+  // Convert bbox corners to mercator normalized coords
+  const polyX0 = lonToMercatorNorm(bbox.west)
+  const polyX1 = lonToMercatorNorm(bbox.east)
+  const polyY0 = latToMercatorNorm(bbox.north)
+  const polyY1 = latToMercatorNorm(bbox.south)
+
+  // Compute overlap with image bounds
+  const overlapX0 = Math.max(bounds.x0, Math.min(polyX0, polyX1))
+  const overlapX1 = Math.min(bounds.x1, Math.max(polyX0, polyX1))
+
+  let xStart: number
+  let xEnd: number
+  let yStart: number
+  let yEnd: number
+
+  if (
+    crs === 'EPSG:4326' &&
+    bounds.latMin !== undefined &&
+    bounds.latMax !== undefined
+  ) {
+    // For equirectangular data, compute Y overlap in linear latitude space
+    const latMax = bounds.latMax
+    const latMin = bounds.latMin
+    const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax)
+    const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax)
+
+    const latRange = latMax - latMin
+    if (latRange === 0) return null
+
+    const toFrac = (latVal: number) =>
+      latIsAscending
+        ? (latVal - latMin) / latRange
+        : (latMax - latVal) / latRange
+    const yStartFracRaw = toFrac(clampedNorth)
+    const yEndFracRaw = toFrac(clampedSouth)
+    const yFracMin = Math.min(yStartFracRaw, yEndFracRaw)
+    const yFracMax = Math.max(yStartFracRaw, yEndFracRaw)
+
+    if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) return null
+
+    const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+    const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+
+    xStart = Math.max(0, Math.floor(minX))
+    xEnd = Math.min(width, Math.ceil(maxX))
+    yStart = Math.max(0, Math.floor(yFracMin * height))
+    yEnd = Math.min(height, Math.ceil(yFracMax * height))
+  } else {
+    const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1))
+    const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1))
+
+    if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) return null
+
+    const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+    const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+    const minY = ((overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
+    const maxY = ((overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
+
+    xStart = Math.max(0, Math.floor(minX))
+    xEnd = Math.min(width, Math.ceil(maxX))
+    yStart = Math.max(0, Math.floor(minY))
+    yEnd = Math.min(height, Math.ceil(maxY))
+  }
+
+  if (xEnd <= xStart || yEnd <= yStart) return null
+
+  return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
+}
+
+/**
  * Ray-casting point-in-polygon test.
  * Tests if a point is inside a single polygon ring.
  */

@@ -75,6 +75,33 @@ export interface ZarrLayerOptions {
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'
 
+// Untiled multiscale types (zarr-conventions/multiscales format)
+export interface MultiscaleTransform {
+  scale: [number, number]
+  translation: [number, number]
+}
+
+export interface UntiledMultiscaleLayoutItem {
+  asset: string
+  transform: MultiscaleTransform
+  derived_from?: string
+}
+
+export interface UntiledLevel {
+  asset: string
+  scale: [number, number]
+  translation: [number, number]
+  shape?: number[]
+  chunks?: number[]
+}
+
+export interface VisibleChunk {
+  levelIndex: number
+  chunkX: number
+  chunkY: number
+  fullIndices: number[]
+}
+
 export interface BoundsLike {
   getWest(): number
   getEast(): number

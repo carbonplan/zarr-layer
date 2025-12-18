@@ -1,6 +1,11 @@
 import * as zarr from 'zarrita'
 import type { Readable } from '@zarrita/storage'
-import type { SpatialDimensions, DimIndicesProps, CRS } from './types'
+import type {
+  SpatialDimensions,
+  DimIndicesProps,
+  CRS,
+  UntiledLevel,
+} from './types'
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
 
@@ -28,6 +33,22 @@ interface Multiscale {
   datasets: MultiscaleDataset[]
 }
 
+// zarr-conventions/multiscales format (untiled multiscales)
+interface UntiledMultiscaleLayoutEntry {
+  asset: string
+  transform?: {
+    scale?: [number, number]
+    translation?: [number, number]
+  }
+  derived_from?: string
+}
+
+interface UntiledMultiscaleMetadata {
+  layout: UntiledMultiscaleLayoutEntry[]
+  resampling_method?: string
+  crs?: 'EPSG:4326' | 'EPSG:3857'
+}
+
 interface ZarrV2ConsolidatedMetadata {
   metadata: Record<string, unknown>
   zarr_consolidated_format?: number
@@ -42,7 +63,7 @@ interface ZarrV2ArrayMetadata {
 
 interface ZarrV2Attributes {
   _ARRAY_DIMENSIONS?: string[]
-  multiscales?: Multiscale[]
+  multiscales?: Multiscale[] | UntiledMultiscaleMetadata
   scale_factor?: number
   add_offset?: number
 }
@@ -51,7 +72,7 @@ interface ZarrV3GroupMetadata {
   zarr_format: 3
   node_type: 'group'
   attributes?: {
-    multiscales?: Multiscale[]
+    multiscales?: Multiscale[] | UntiledMultiscaleMetadata
   }
   consolidated_metadata?: {
     metadata?: Record<string, ZarrV3ArrayMetadata>
@@ -113,6 +134,8 @@ interface StoreDescription {
   maxLevelIndex: number
   tileSize: number
   crs: CRS
+  multiscaleType: 'tiled' | 'untiled' | 'none'
+  untiledLevels: UntiledLevel[]
   dimIndices: DimIndicesProps
   xyLimits: XYLimits | null
   scaleFactor: number
@@ -146,12 +169,15 @@ export class ZarrStore {
   maxLevelIndex: number = 0
   tileSize: number = 128
   crs: CRS = 'EPSG:4326'
+  multiscaleType: 'tiled' | 'untiled' | 'none' = 'none'
+  untiledLevels: UntiledLevel[] = []
   dimIndices: DimIndicesProps = {}
   xyLimits: XYLimits | null = null
   scaleFactor: number = 1
   addOffset: number = 0
   coordinates: Record<string, (string | number)[]> = {}
   latIsAscending: boolean | null = null
+  private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -260,6 +286,8 @@ export class ZarrStore {
       maxLevelIndex: this.maxLevelIndex,
       tileSize: this.tileSize,
       crs: this.crs,
+      multiscaleType: this.multiscaleType,
+      untiledLevels: this.untiledLevels,
       dimIndices: this.dimIndices,
       xyLimits: this.xyLimits,
       scaleFactor: this.scaleFactor,
@@ -288,6 +316,20 @@ export class ZarrStore {
 
   async getArray(): Promise<zarr.Array<zarr.DataType, Readable>> {
     return this._getArray(this.variable)
+  }
+
+  /**
+   * Get metadata (shape, chunks) for a specific untiled level.
+   * Used by UntiledMode to determine chunk boundaries for viewport-based loading.
+   */
+  async getUntiledLevelMetadata(
+    levelAsset: string
+  ): Promise<{ shape: number[]; chunks: number[] }> {
+    const array = await this.getLevelArray(levelAsset)
+    return {
+      shape: array.shape,
+      chunks: array.chunks,
+    }
   }
 
   private async _getArray(
@@ -646,10 +688,29 @@ export class ZarrStore {
         this.latIsAscending = null
       }
     }
+
+    // Infer CRS from bounds for untiled multiscales if not explicitly set
+    // Only classify as meters if clearly outside degree range (> 360)
+    // This handles both [-180, 180] and [0, 360] degree conventions
+    if (
+      this.multiscaleType === 'untiled' &&
+      !this._crsFromMetadata &&
+      this.xyLimits
+    ) {
+      const maxAbsX = Math.max(
+        Math.abs(this.xyLimits.xMin),
+        Math.abs(this.xyLimits.xMax)
+      )
+      if (maxAbsX > 360) {
+        this.crs = 'EPSG:3857'
+      }
+    }
   }
 
-  private _getPyramidMetadata(multiscales: Multiscale[]): PyramidMetadata {
-    if (!multiscales || !multiscales[0]?.datasets?.length) {
+  private _getPyramidMetadata(
+    multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
+  ): PyramidMetadata {
+    if (!multiscales) {
       return {
         levels: [],
         maxLevelIndex: 0,
@@ -658,16 +719,85 @@ export class ZarrStore {
       }
     }
 
-    const datasets = multiscales[0].datasets
-    const levels = datasets.map((dataset) => String(dataset.path))
-    const maxLevelIndex = levels.length - 1
-    const tileSize = datasets[0].pixels_per_tile || 128
-    // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
-    // Explicitly handle EPSG:4326 pyramids so we can reproject to mercator on the fly.
-    const crs: CRS =
-      (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
+    // Detect zarr-conventions/multiscales format (has 'layout' key)
+    if ('layout' in multiscales && Array.isArray(multiscales.layout)) {
+      return this._parseUntiledMultiscale(multiscales)
+    }
 
-    return { levels, maxLevelIndex, tileSize, crs }
+    // OME-NGFF style format (array with 'datasets' key)
+    if (Array.isArray(multiscales) && multiscales[0]?.datasets?.length) {
+      const datasets = multiscales[0].datasets
+      const levels = datasets.map((dataset) => String(dataset.path))
+      const maxLevelIndex = levels.length - 1
+      const tileSize = datasets[0].pixels_per_tile
+      // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
+      const crs: CRS =
+        (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
+
+      // If pixels_per_tile is present, this is a tiled pyramid (slippy map tiles).
+      // Otherwise, treat as untiled multi-level (each level is a complete image).
+      if (tileSize) {
+        this.multiscaleType = 'tiled'
+        return { levels, maxLevelIndex, tileSize, crs }
+      } else {
+        // Multi-level but not tiled - use UntiledMode
+        this.untiledLevels = levels.map((level) => ({
+          asset: level,
+          scale: [1.0, 1.0] as [number, number],
+          translation: [0.0, 0.0] as [number, number],
+        }))
+        this.multiscaleType = 'untiled'
+        return { levels, maxLevelIndex, tileSize: 128, crs }
+      }
+    }
+
+    return {
+      levels: [],
+      maxLevelIndex: 0,
+      tileSize: 128,
+      crs: 'EPSG:4326',
+    }
+  }
+
+  private _parseUntiledMultiscale(
+    metadata: UntiledMultiscaleMetadata
+  ): PyramidMetadata {
+    const layout = metadata.layout
+    if (!layout || layout.length === 0) {
+      return {
+        levels: [],
+        maxLevelIndex: 0,
+        tileSize: 128,
+        crs: 'EPSG:4326',
+      }
+    }
+
+    // Extract levels from layout
+    const levels = layout.map((entry) => entry.asset)
+    const maxLevelIndex = levels.length - 1
+
+    // Build untiledLevels with transform info
+    this.untiledLevels = layout.map((entry) => ({
+      asset: entry.asset,
+      scale: entry.transform?.scale ?? [1.0, 1.0],
+      translation: entry.transform?.translation ?? [0.0, 0.0],
+    }))
+
+    this.multiscaleType = 'untiled'
+
+    // Check for explicit CRS in metadata, otherwise default to EPSG:4326
+    // (bounds-based inference will happen after coordinate arrays are loaded)
+    const crs: CRS = metadata.crs ?? 'EPSG:4326'
+    if (metadata.crs) {
+      this._crsFromMetadata = true
+    }
+
+    return {
+      levels,
+      maxLevelIndex,
+      tileSize: 128, // Will be overridden by chunk shape
+      crs,
+    }
   }
 
   static clearCache() {

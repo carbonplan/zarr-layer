@@ -9,6 +9,8 @@ import type {
 import { ZarrStore } from './zarr-store'
 import { resolveSelectorValue } from './zarr-utils'
 import {
+  configureDataTexture,
+  getTextureFormats,
   mustCreateBuffer,
   mustCreateTexture,
   normalizeDataForTexture,
@@ -33,6 +35,9 @@ export interface TileData {
   dataScale: number // Scale factor applied to data (1.0 = no normalization)
   bandDataScales: Map<string, number> // Scale factors per band
 
+  // Geographic bounds for coordinate warping (EPSG:4326 only)
+  latBounds: { min: number; max: number } | null
+
   // WebGL resources
   tileTexture: WebGLTexture | null
   bandTextures: Map<string, WebGLTexture>
@@ -42,7 +47,9 @@ export interface TileData {
   textureConfigured: boolean
   vertexBuffer: WebGLBuffer | null
   pixCoordBuffer: WebGLBuffer | null
+  warpedPixCoordBuffer: WebGLBuffer | null // Pre-warped tex coords for EPSG:4326
   geometryUploaded: boolean
+  warpedGeometryUploaded: boolean // Track if warped coords have been uploaded
 }
 
 interface TilesOptions {
@@ -373,27 +380,76 @@ export class Tiles {
   }
 
   /**
-   * Apply normalization to tile data for half-float precision safety.
+   * Apply normalization to tile data and upload texture.
    * Updates tile.data, tile.bandData with normalized values and stores scale factors.
    */
   private applyNormalization(
     tile: TileData,
-    sliced: { data: Float32Array; channels: number; bandData: Map<string, Float32Array> }
+    sliced: {
+      data: Float32Array
+      channels: number
+      bandData: Map<string, Float32Array>
+    }
   ): void {
     // Normalize main data using clim to determine scale
-    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim)
+    const { normalized, scale } = normalizeDataForTexture(
+      sliced.data,
+      this.fillValue,
+      this.clim
+    )
     tile.data = normalized
     tile.dataScale = scale
     tile.channels = sliced.channels
 
+    // Upload texture immediately
+    if (this.gl && tile.tileTexture) {
+      this.uploadTileTexture(tile)
+    }
+
     // Normalize each band's data (use same scale for consistency)
     tile.bandData = new Map()
     tile.bandDataScales = new Map()
+    tile.bandTexturesUploaded.clear()
     for (const [bandName, bandData] of sliced.bandData) {
-      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim)
+      const bandResult = normalizeDataForTexture(
+        bandData,
+        this.fillValue,
+        this.clim
+      )
       tile.bandData.set(bandName, bandResult.normalized)
       tile.bandDataScales.set(bandName, bandResult.scale)
     }
+  }
+
+  /**
+   * Upload tile data to its texture.
+   */
+  private uploadTileTexture(tile: TileData): void {
+    if (!this.gl || !tile.tileTexture || !tile.data) return
+
+    const gl = this.gl
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, tile.tileTexture)
+
+    if (!tile.textureConfigured) {
+      configureDataTexture(gl)
+      tile.textureConfigured = true
+    }
+
+    const { format, internalFormat } = getTextureFormats(gl, tile.channels)
+    const tileSize = this.store.tileSize
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      internalFormat,
+      tileSize,
+      tileSize,
+      0,
+      format,
+      gl.FLOAT,
+      tile.data
+    )
+    tile.textureUploaded = true
   }
 
   /**
@@ -423,6 +479,7 @@ export class Tiles {
       loading: false,
       dataScale: 1.0,
       bandDataScales: new Map(),
+      latBounds: null,
       tileTexture: this.gl ? mustCreateTexture(this.gl) : null,
       bandTextures: new Map(),
       bandTexturesUploaded: new Set(),
@@ -431,7 +488,9 @@ export class Tiles {
       textureConfigured: false,
       vertexBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
       pixCoordBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
+      warpedPixCoordBuffer: this.gl ? mustCreateBuffer(this.gl) : null,
       geometryUploaded: false,
+      warpedGeometryUploaded: false,
     }
     this.tiles.set(tileKey, tile)
     this.evictOldTiles()
@@ -458,6 +517,8 @@ export class Tiles {
         }
         if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer)
         if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer)
+        if (tile.warpedPixCoordBuffer)
+          this.gl.deleteBuffer(tile.warpedPixCoordBuffer)
       }
       this.tiles.delete(oldestKey)
     }
@@ -502,6 +563,27 @@ export class Tiles {
     return this.tiles.get(tileToKey(tileTuple))
   }
 
+  /**
+   * Set latitude bounds for a tile (used for coordinate warping in EPSG:4326 mode).
+   * If bounds change, marks warped geometry as needing re-upload.
+   */
+  setTileLatBounds(
+    tileKey: string,
+    latBounds: { min: number; max: number }
+  ): void {
+    const tile = this.tiles.get(tileKey)
+    if (!tile) return
+
+    // Check if bounds changed
+    if (
+      tile.latBounds?.min !== latBounds.min ||
+      tile.latBounds?.max !== latBounds.max
+    ) {
+      tile.latBounds = latBounds
+      tile.warpedGeometryUploaded = false
+    }
+  }
+
   async reextractTileSlices(
     visibleTiles: TileTuple[],
     selectorHash: string,
@@ -534,9 +616,6 @@ export class Tiles {
         this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
         tile.selectorVersion = version
-        // Mark textures as needing re-upload
-        tile.textureUploaded = false
-        tile.bandTexturesUploaded.clear()
       } else {
         // Keep old data visible while new chunk loads - don't clear tile.data
         // The stale selectorHash ensures a new fetch will be triggered,
@@ -592,13 +671,13 @@ export class Tiles {
         this.applyNormalization(tile, sliced)
         tile.selectorHash = selectorHash
         tile.selectorVersion = version
-        tile.textureUploaded = false
-        tile.bandTexturesUploaded.clear()
         tile.loading = false
         return tile
       }
 
-      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal })
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, {
+        signal,
+      })
       const chunkShape = (chunk.shape as number[]).map((n) => Number(n))
       const chunkData =
         chunk.data instanceof Float32Array
@@ -623,8 +702,6 @@ export class Tiles {
       this.applyNormalization(tile, sliced)
       tile.selectorHash = selectorHash
       tile.selectorVersion = version
-      tile.textureUploaded = false
-      tile.bandTexturesUploaded.clear()
       tile.loading = false
       return tile
     } catch (err) {
@@ -644,6 +721,7 @@ export class Tiles {
   markGeometryDirty() {
     for (const tile of this.tiles.values()) {
       tile.geometryUploaded = false
+      tile.warpedGeometryUploaded = false
     }
   }
 
@@ -659,6 +737,8 @@ export class Tiles {
         }
         if (tile.vertexBuffer) this.gl.deleteBuffer(tile.vertexBuffer)
         if (tile.pixCoordBuffer) this.gl.deleteBuffer(tile.pixCoordBuffer)
+        if (tile.warpedPixCoordBuffer)
+          this.gl.deleteBuffer(tile.warpedPixCoordBuffer)
       }
     }
     this.tiles.clear()
