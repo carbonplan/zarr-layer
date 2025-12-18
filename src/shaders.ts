@@ -1,7 +1,7 @@
 /**
  * @module maplibre-shaders
  *
- * WebGL shaders for MapLibre/MapBox custom layer rendering.
+ * WebGL shaders for MapLibre/Mapbox custom layer rendering.
  * Adapted from zarr-gl and zarr-cesium.
  */
 

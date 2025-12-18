@@ -1,6 +1,9 @@
 # @carbonplan/zarr-layer
 
-MapLibre/Mapbox GL custom layer for rendering Zarr datasets, inspired (and borrowing significant code and concepts from)
+![NPM Version](https://img.shields.io/npm/v/@carbonplan/zarr-layer)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+Custom layer for rendering Zarr datasets in MapLibre or Mapbox GL, inspired (and borrowing significant code and concepts from)
 [zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium),
 and [@carbonplan/maps](https://github.com/carbonplan/maps). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports globe and mercator projections for both Maplibre and Mapbox.
 
@@ -67,18 +70,18 @@ map.on('load', () => {
 |--------|------|---------|-------------|
 | selector | object | `{}` | Dimension selector (unspecified dims default to index 0) |
 | opacity | number | `1` | Layer opacity (0-1) |
-| zarrVersion | 2 | 3 | auto | Zarr format version (tries v3 first, falls back to v2) |
+| zarrVersion | `2` \| `3` | auto | Zarr format version (tries v3 first, falls back to v2) |
 | minzoom | number | `0` | Minimum zoom level for rendering |
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
 | bounds | array | auto | `[west, south, east, north]` in degrees, used for single image placement |
 | latIsAscending | boolean | auto | Latitude orientation |
-| renderingMode | '2d' | '3d' | `'3d'` | Custom layer rendering mode |
+| renderingMode | `'2d'` \| `'3d'` | `'3d'` | Custom layer rendering mode |
 | customFrag | string | - | Custom fragment shader |
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
-| throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to 0 to disable. |
+| throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to `0` to disable. |
 
 ## methods
 

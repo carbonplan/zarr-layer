@@ -4,3 +4,4 @@ node_modules/
 demo/node_modules/
 demo/.next/
 demo/.env.local
+dist/
