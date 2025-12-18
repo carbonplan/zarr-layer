@@ -26,7 +26,9 @@ export default function Home() {
           position: 'absolute',
           top: 0,
           bottom: 0,
-          width: '100vw',
+          left: 0,
+          right: 0,
+          overflow: 'hidden',
         }}
       >
         <Sidebar />
