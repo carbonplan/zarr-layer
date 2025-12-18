@@ -7,6 +7,6 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   clean: true,
-  external: ['maplibre-gl'],
+  external: ['maplibre-gl', 'mapbox-gl'],
   noExternal: ['zarrita'],
 })

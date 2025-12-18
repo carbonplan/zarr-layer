@@ -6,15 +6,37 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
   "sideEffects": false,
   "prettier": "@carbonplan/prettier",
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/carbonplan/zarr-layer.git"
+  },
+  "homepage": "https://github.com/carbonplan/zarr-layer#readme",
+  "bugs": {
+    "url": "https://github.com/carbonplan/zarr-layer/issues"
+  },
+  "keywords": [
+    "zarr",
+    "maplibre",
+    "mapbox"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
