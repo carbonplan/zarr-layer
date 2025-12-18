@@ -23,7 +23,7 @@ export interface SingleImageParams {
   texture: WebGLTexture | null
   vertexBuffer: WebGLBuffer | null
   pixCoordBuffer: WebGLBuffer | null
-  pixCoordArr: Float32Array
+  pixCoordArr?: Float32Array
   geometryVersion: number
   dataVersion: number
   texScale?: [number, number]

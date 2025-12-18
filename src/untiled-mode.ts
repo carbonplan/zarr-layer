@@ -27,9 +27,10 @@ import {
   type MercatorBounds,
   type XYLimits,
 } from './map-utils'
-import { loadDimensionValues, normalizeSelector } from './zarr-utils'
-import { createSubdividedQuad, normalizeDataForTexture } from './webgl-utils'
+import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
+import { createSubdividedQuad, normalizeDataForTexture, configureDataTexture, getTextureFormats } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
+import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
 import { queryRegionSingleImage } from './query/region-query'
 import {
@@ -38,6 +39,23 @@ import {
 } from './query/query-utils'
 import { setObjectValues } from './query/selector-utils'
 import { geoToArrayIndex } from './map-utils'
+import {
+  type ThrottleState,
+  type RequestCanceller,
+  type LoadingManager,
+  createThrottleState,
+  createRequestCanceller,
+  createLoadingManager,
+  getThrottleWaitTime,
+  scheduleThrottledUpdate,
+  markFetchStart,
+  clearThrottle,
+  cancelOlderRequests,
+  cancelAllRequests,
+  hasActiveRequests,
+  setLoadingCallback as setLoadingCallbackUtil,
+  emitLoadingState as emitLoadingStateUtil,
+} from './mode-utils'
 
 /** State for a single region (chunk/shard) in region-based loading */
 interface RegionState {
@@ -49,6 +67,7 @@ interface RegionState {
   width: number
   height: number
   loading: boolean
+  channels: number
   // WebGL resources
   texture: WebGLTexture | null
   textureUploaded: boolean
@@ -61,6 +80,11 @@ interface RegionState {
   mercatorBounds: MercatorBounds | null
   // Version tracking for selector changes
   selectorVersion: number
+  // Multi-band support
+  bandData: Map<string, Float32Array>
+  bandTextures: Map<string, WebGLTexture>
+  bandTexturesUploaded: Set<string>
+  bandTexturesConfigured: Set<string>
 }
 
 export class UntiledMode implements ZarrMode {
@@ -78,6 +102,7 @@ export class UntiledMode implements ZarrMode {
   private zarrStore: ZarrStore
   private variable: string
   private selector: NormalizedSelector
+  private bandNames: string[] = []
   private invalidate: () => void
   private dimIndices: DimIndicesProps = {}
   private xyLimits: XYLimits | null = null
@@ -91,13 +116,12 @@ export class UntiledMode implements ZarrMode {
 
   // Loading state
   private isRemoved: boolean = false
-  private loadingCallback: LoadingStateCallback | undefined
-  private isLoadingData: boolean = false
-  private metadataLoading: boolean = false
-  private throttleTimeout: ReturnType<typeof setTimeout> | null = null
   private throttleMs: number
-  private lastFetchTime: number = 0 // For throttling fetches
-  private throttledFetchPromise: Promise<void> | null = null
+
+  // Shared state managers
+  private throttleState: ThrottleState = createThrottleState()
+  private requestCanceller: RequestCanceller = createRequestCanceller()
+  private loadingManager: LoadingManager = createLoadingManager()
 
   // Dimension values cache
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
@@ -110,11 +134,16 @@ export class UntiledMode implements ZarrMode {
   private previousRegionCache: Map<string, RegionState> = new Map() // Fallback during level transitions
   private previousLevelIndex: number = -1 // Track which level the previous cache is from
   private regionSize: [number, number] | null = null // [height, width] of each region
-  private pendingRegionControllers: Map<number, AbortController> = new Map() // Keyed by request ID
-  private regionFetchRequestId: number = 0 // Incrementing request ID for region fetches
   private lastViewportHash: string = ''
   private baseSliceArgs: (number | zarr.Slice)[] = [] // Cached slice args for non-spatial dims
   private selectorVersion: number = 0 // Incremented on selector change to track stale regions
+  // Multi-band support: track which dimensions have multiple selected values
+  private baseMultiValueDims: Array<{
+    dimIndex: number
+    dimName: string
+    values: number[]
+    labels: (number | string)[]
+  }> = []
 
   // Cached WebGL context for use in setSelector
   private cachedGl: WebGL2RenderingContext | null = null
@@ -131,12 +160,13 @@ export class UntiledMode implements ZarrMode {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
+    this.bandNames = getBands(variable, selector)
     this.invalidate = invalidate
     this.throttleMs = throttleMs
   }
 
   async initialize(): Promise<void> {
-    this.metadataLoading = true
+    this.loadingManager.metadataLoading = true
     this.emitLoadingState()
 
     try {
@@ -168,7 +198,7 @@ export class UntiledMode implements ZarrMode {
         console.warn('UntiledMode: No XY limits found')
       }
     } finally {
-      this.metadataLoading = false
+      this.loadingManager.metadataLoading = false
       this.emitLoadingState()
     }
   }
@@ -246,29 +276,11 @@ export class UntiledMode implements ZarrMode {
       if (region.texture) gl.deleteTexture(region.texture)
       if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
       if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer)
-    }
-  }
-
-  /**
-   * Generic helper to cancel pending requests older than a given ID.
-   */
-  private cancelOlderRequestsInMap(
-    controllers: Map<number, AbortController>,
-    completedRequestId: number
-  ): void {
-    for (const [id, controller] of controllers) {
-      if (id < completedRequestId) {
-        controller.abort()
-        controllers.delete(id)
+      // Clean up band textures
+      for (const tex of region.bandTextures.values()) {
+        gl.deleteTexture(tex)
       }
     }
-  }
-
-  /**
-   * Cancel pending region requests older than the given request ID.
-   */
-  private cancelOlderRegionRequests(completedRequestId: number): void {
-    this.cancelOlderRequestsInMap(this.pendingRegionControllers, completedRequestId)
   }
 
   /**
@@ -337,6 +349,7 @@ export class UntiledMode implements ZarrMode {
       width: 0,
       height: 0,
       loading: false,
+      channels: 1,
       texture: null,
       textureUploaded: false,
       vertexBuffer: null,
@@ -345,6 +358,10 @@ export class UntiledMode implements ZarrMode {
       pixCoordArr: null,
       mercatorBounds: null,
       selectorVersion: this.selectorVersion,
+      bandData: new Map(),
+      bandTextures: new Map(),
+      bandTexturesUploaded: new Set(),
+      bandTexturesConfigured: new Set(),
     }
   }
 
@@ -747,28 +764,17 @@ export class UntiledMode implements ZarrMode {
     regions: Array<{ regionX: number; regionY: number }>,
     gl: WebGL2RenderingContext
   ): void {
-    const now = Date.now()
-    const timeSinceLastFetch = now - this.lastFetchTime
-    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+    const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs)
+    if (waitTime > 0) {
       // Set loading state even when throttled so callers know data is pending
-      this.isLoadingData = true
-      this.emitLoadingState()
-
-      // Only schedule if no timeout is already pending
-      if (!this.throttledFetchPromise) {
-        this.throttledFetchPromise = new Promise<void>((resolve) => {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null
-            this.throttledFetchPromise = null
-            // Re-trigger update to fetch with current state
-            this.invalidate()
-            resolve()
-          }, this.throttleMs - timeSinceLastFetch)
-        })
+      if (!this.throttleState.throttledPending) {
+        this.throttleState.throttledPending = true
+        this.emitLoadingState()
       }
+      scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate)
       return
     }
-    this.lastFetchTime = now
+    markFetchStart(this.throttleState)
 
     // Actually fetch the regions
     this.fetchRegions(regions, gl)
@@ -782,7 +788,7 @@ export class UntiledMode implements ZarrMode {
     gl: WebGL2RenderingContext
   ): Promise<void> {
     // Emit loading state
-    this.isLoadingData = true
+    this.loadingManager.chunksLoading = true
     this.emitLoadingState()
 
     // Mark ALL regions as loading upfront to prevent duplicate fetches
@@ -821,21 +827,15 @@ export class UntiledMode implements ZarrMode {
     await Promise.allSettled(executing)
 
     // Check if any regions are still loading
-    let stillLoading = false
-    for (const controller of this.pendingRegionControllers.values()) {
-      if (!controller.signal.aborted) {
-        stillLoading = true
-        break
-      }
-    }
-    if (!stillLoading) {
-      this.isLoadingData = false
+    if (!hasActiveRequests(this.requestCanceller)) {
+      this.loadingManager.chunksLoading = false
       this.emitLoadingState()
     }
   }
 
   /**
    * Fetch data for a single region.
+   * Handles multi-band extraction when selector has multi-value dimensions.
    */
   private async fetchRegion(
     regionX: number,
@@ -847,11 +847,11 @@ export class UntiledMode implements ZarrMode {
     }
 
     const key = `${regionX},${regionY}`
-    const requestId = ++this.regionFetchRequestId
+    const requestId = ++this.requestCanceller.currentVersion
     const fetchSelectorVersion = this.selectorVersion // Capture current version
 
     const controller = new AbortController()
-    this.pendingRegionControllers.set(requestId, controller)
+    this.requestCanceller.controllers.set(requestId, controller)
 
     let region = this.regionCache.get(key)
     if (!region) {
@@ -871,54 +871,119 @@ export class UntiledMode implements ZarrMode {
     const actualH = yEnd - yStart
 
     try {
-      // Build slice args with spatial region bounds
-      const sliceArgs = [...this.baseSliceArgs]
+      // Build base slice args with spatial region bounds
+      const baseSliceArgs = [...this.baseSliceArgs]
       const latIdx = this.dimIndices.lat.index
       const lonIdx = this.dimIndices.lon.index
-      sliceArgs[latIdx] = zarr.slice(yStart, yEnd)
-      sliceArgs[lonIdx] = zarr.slice(xStart, xEnd)
+      baseSliceArgs[latIdx] = zarr.slice(yStart, yEnd)
+      baseSliceArgs[lonIdx] = zarr.slice(xStart, xEnd)
 
-      // Fetch data - zarrita handles sharding/chunking transparently
-      const result = (await zarr.get(this.zarrArray, sliceArgs, {
-        opts: { signal: controller.signal },
-      })) as { data: ArrayLike<number> }
+      const desc = this.zarrStore.describe()
+      const fillValue = desc.fill_value
 
-      if (controller.signal.aborted || this.isRemoved) {
-        region.loading = false
-        return
+      // Build channel combinations from multi-value dimensions
+      let channelCombinations: number[][] = [[]]
+      for (const { values } of this.baseMultiValueDims) {
+        const next: number[][] = []
+        for (const val of values) {
+          for (const combo of channelCombinations) {
+            next.push([...combo, val])
+          }
+        }
+        channelCombinations = next
+      }
+
+      const numChannels = channelCombinations.length || 1
+      const pixelCount = actualW * actualH
+
+      // Fetch data for all channels
+      const bandArrays: Float32Array[] = []
+      const packedData = new Float32Array(pixelCount * numChannels)
+      packedData.fill(fillValue ?? 0)
+
+      if (numChannels === 1) {
+        // Single channel - simple fetch
+        const result = (await zarr.get(this.zarrArray, baseSliceArgs, {
+          opts: { signal: controller.signal },
+        })) as { data: ArrayLike<number> }
+
+        if (controller.signal.aborted || this.isRemoved) {
+          region.loading = false
+          return
+        }
+
+        const rawData = new Float32Array(result.data as ArrayLike<number>)
+        bandArrays.push(rawData)
+        packedData.set(rawData)
+      } else {
+        // Multi-channel - fetch each channel's data
+        for (let c = 0; c < numChannels; c++) {
+          const sliceArgs = [...baseSliceArgs]
+          const combo = channelCombinations[c]
+
+          // Apply channel-specific indices to multi-value dimensions
+          for (let i = 0; i < this.baseMultiValueDims.length; i++) {
+            sliceArgs[this.baseMultiValueDims[i].dimIndex] = combo[i]
+          }
+
+          const result = (await zarr.get(this.zarrArray, sliceArgs, {
+            opts: { signal: controller.signal },
+          })) as { data: ArrayLike<number> }
+
+          if (controller.signal.aborted || this.isRemoved) {
+            region.loading = false
+            return
+          }
+
+          const bandData = new Float32Array(result.data as ArrayLike<number>)
+          bandArrays.push(bandData)
+
+          // Pack into interleaved format for main texture
+          for (let pixIdx = 0; pixIdx < pixelCount; pixIdx++) {
+            packedData[pixIdx * numChannels + c] = bandData[pixIdx]
+          }
+        }
       }
 
       // Only render if this is newer than what's already rendered for this region
-      // This allows incremental progress - older data renders first, newer replaces it
       if (fetchSelectorVersion < region.selectorVersion) {
-        // Older data arrived after newer - skip it
         region.loading = false
         return
       }
 
       // Update region's selector version and cancel any older pending requests
       region.selectorVersion = fetchSelectorVersion
-      this.cancelOlderRegionRequests(requestId)
+      cancelOlderRequests(this.requestCanceller, requestId)
 
-      // Store raw data and normalize for texture
-      const rawData = new Float32Array(result.data as ArrayLike<number>)
-      const desc = this.zarrStore.describe()
-      const fillValue = desc.fill_value
-      const { normalized } = normalizeDataForTexture(rawData, fillValue, this.clim)
-
+      // Normalize and store data
+      const { normalized } = normalizeDataForTexture(packedData, fillValue, this.clim)
       region.data = normalized
       region.width = actualW
       region.height = actualH
+      region.channels = numChannels
       region.loading = false
 
-      // Create texture for this region
+      // Store band data with bandNames as keys
+      region.bandData.clear()
+      region.bandTexturesUploaded.clear()
+      for (let c = 0; c < bandArrays.length; c++) {
+        const bandName = this.bandNames[c] || `band_${c}`
+        const { normalized: bandNormalized } = normalizeDataForTexture(
+          bandArrays[c],
+          fillValue,
+          this.clim
+        )
+        region.bandData.set(bandName, bandNormalized)
+      }
+
+      // Create/update main texture for this region
       if (!region.texture) {
         region.texture = gl.createTexture()
       }
       gl.bindTexture(gl.TEXTURE_2D, region.texture)
 
       // Determine texture format based on channels
-      const { format, internalFormat } = this.getTextureFormats(gl, this.channels)
+      const { format, internalFormat } = getTextureFormats(gl, numChannels)
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
@@ -946,27 +1011,7 @@ export class UntiledMode implements ZarrMode {
       }
       region.loading = false
     } finally {
-      this.pendingRegionControllers.delete(requestId)
-    }
-  }
-
-  /**
-   * Get texture formats based on channel count.
-   */
-  private getTextureFormats(
-    gl: WebGL2RenderingContext,
-    channels: number
-  ): { format: number; internalFormat: number } {
-    switch (channels) {
-      case 1:
-        return { format: gl.RED, internalFormat: gl.R32F }
-      case 2:
-        return { format: gl.RG, internalFormat: gl.RG32F }
-      case 3:
-        return { format: gl.RGB, internalFormat: gl.RGB32F }
-      case 4:
-      default:
-        return { format: gl.RGBA, internalFormat: gl.RGBA32F }
+      this.requestCanceller.controllers.delete(requestId)
     }
   }
 
@@ -996,7 +1041,7 @@ export class UntiledMode implements ZarrMode {
       }
     } else {
       // Single-level dataset - set up region-based loading if not already done
-      if (!this.regionSize && this.zarrArray && !this.isLoadingData) {
+      if (!this.regionSize && this.zarrArray && !this.loadingManager.chunksLoading) {
         const detectedRegionSize = this.getRegionSize(this.zarrArray)
         this.regionSize = detectedRegionSize ?? [this.height, this.width]
 
@@ -1021,7 +1066,7 @@ export class UntiledMode implements ZarrMode {
     if (levelIndex < 0 || levelIndex >= this.levels.length) {
       return
     }
-    if (this.isLoadingData) {
+    if (this.loadingManager.chunksLoading) {
       return
     }
 
@@ -1052,18 +1097,20 @@ export class UntiledMode implements ZarrMode {
   /**
    * Build base slice args for non-spatial dimensions.
    * This caches the selector values for use in region fetching.
+   * Also tracks multi-value dimensions for band extraction.
    */
   private async buildBaseSliceArgs(): Promise<void> {
     if (!this.zarrArray) return
 
     this.baseSliceArgsReady = false
 
-    const { sliceArgs } = await this.buildSliceArgsForSelector(this.selector, {
+    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(this.selector, {
       includeSpatialSlices: false, // placeholders for region fetching
-      trackMultiValue: false, // display only needs first value
+      trackMultiValue: true, // track multi-value dims for band extraction
     })
 
     this.baseSliceArgs = sliceArgs
+    this.baseMultiValueDims = multiValueDims
     this.baseSliceArgsReady = true
   }
 
@@ -1117,19 +1164,16 @@ export class UntiledMode implements ZarrMode {
 
   private async switchToLevel(
     newLevelIndex: number,
-    gl?: WebGL2RenderingContext
+    gl: WebGL2RenderingContext
   ): Promise<void> {
     if (newLevelIndex === this.currentLevelIndex) return
     if (newLevelIndex < 0 || newLevelIndex >= this.levels.length) return
-    if (this.isLoadingData) return // Don't interrupt ongoing load
+    if (this.loadingManager.chunksLoading) return // Don't interrupt ongoing load
 
     const level = this.levels[newLevelIndex]
 
     // Cancel any pending region requests
-    for (const controller of this.pendingRegionControllers.values()) {
-      controller.abort()
-    }
-    this.pendingRegionControllers.clear()
+    cancelAllRequests(this.requestCanceller)
 
     const oldLevelIndex = this.currentLevelIndex
     this.currentLevelIndex = newLevelIndex
@@ -1189,19 +1233,20 @@ export class UntiledMode implements ZarrMode {
     )
 
     // Always use region-based rendering (unified path)
-    this.renderRegions(renderer, shaderProgram, context.worldOffsets)
+    this.renderRegions(renderer, shaderProgram, context.worldOffsets, context.customShaderConfig)
   }
 
   /**
    * Render all loaded regions.
-   * Uses getRegionStates() to include both current and fallback regions.
+   * Iterates over region caches directly to access band data for custom shaders.
    * Note: Regions have geometry already positioned in mercator space,
    * so we disable the equirectangular shader correction to avoid double transformation.
    */
   private renderRegions(
     renderer: ZarrRenderer,
     shaderProgram: ShaderProgram,
-    worldOffsets: number[]
+    worldOffsets: number[],
+    customShaderConfig?: CustomShaderConfig
   ): void {
     const gl = renderer.gl
 
@@ -1210,12 +1255,45 @@ export class UntiledMode implements ZarrMode {
       gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
     }
 
-    // Get all regions including fallback from previous level
-    const regionStates = this.getRegionStates()
+    // Set band texture uniform locations if using custom shader
+    if (shaderProgram.useCustomShader && customShaderConfig) {
+      let textureUnit = 2 // 0 = main texture, 1 = colormap
+      for (const bandName of customShaderConfig.bands) {
+        const loc = shaderProgram.bandTexLocs.get(bandName)
+        if (loc) {
+          gl.uniform1i(loc, textureUnit)
+        }
+        textureUnit++
+      }
+    }
+
+    // Helper to check if a region is valid for rendering
+    const isRegionValid = (region: RegionState): boolean => {
+      return !!(region.data &&
+        region.textureUploaded &&
+        region.texture &&
+        region.vertexBuffer &&
+        region.pixCoordBuffer &&
+        region.vertexArr &&
+        region.mercatorBounds)
+    }
+
+    // Collect regions to render (previous cache for fallback, then current)
+    const regionsToRender: RegionState[] = []
+    for (const region of this.previousRegionCache.values()) {
+      if (isRegionValid(region)) {
+        regionsToRender.push(region)
+      }
+    }
+    for (const region of this.regionCache.values()) {
+      if (isRegionValid(region)) {
+        regionsToRender.push(region)
+      }
+    }
 
     // Render each region
-    for (const region of regionStates) {
-      const bounds = region.mercatorBounds
+    for (const region of regionsToRender) {
+      const bounds = region.mercatorBounds!
 
       // Compute scale and shift from mercator bounds
       // Transform: final = vertex * scale + shift
@@ -1246,13 +1324,70 @@ export class UntiledMode implements ZarrMode {
       gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
       gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
 
-      // Bind texture
+      // Bind main texture
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, region.texture)
       gl.uniform1i(shaderProgram.texLoc, 0)
 
+      // Bind band textures if using custom shader
+      if (shaderProgram.useCustomShader && customShaderConfig) {
+        let textureUnit = 2
+        let missingBandData = false
+
+        for (const bandName of customShaderConfig.bands) {
+          const bandData = region.bandData.get(bandName)
+          if (!bandData) {
+            missingBandData = true
+            break
+          }
+
+          // Create band texture if it doesn't exist
+          let bandTex = region.bandTextures.get(bandName)
+          if (!bandTex) {
+            bandTex = gl.createTexture()
+            if (!bandTex) {
+              missingBandData = true
+              break
+            }
+            region.bandTextures.set(bandName, bandTex)
+          }
+
+          gl.activeTexture(gl.TEXTURE0 + textureUnit)
+          gl.bindTexture(gl.TEXTURE_2D, bandTex)
+
+          // Configure texture parameters if not yet done
+          if (!region.bandTexturesConfigured.has(bandName)) {
+            configureDataTexture(gl)
+            region.bandTexturesConfigured.add(bandName)
+          }
+
+          // Upload texture data if not yet done
+          if (!region.bandTexturesUploaded.has(bandName)) {
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.R32F,
+              region.width,
+              region.height,
+              0,
+              gl.RED,
+              gl.FLOAT,
+              bandData
+            )
+            region.bandTexturesUploaded.add(bandName)
+          }
+
+          textureUnit++
+        }
+
+        // Skip this region if any band data is missing
+        if (missingBandData) {
+          continue
+        }
+      }
+
       // Draw for each world offset (for map wrapping)
-      const vertexCount = region.vertexArr.length / 2
+      const vertexCount = region.vertexArr!.length / 2
       for (const worldOffset of worldOffsets) {
         gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount)
@@ -1337,26 +1472,18 @@ export class UntiledMode implements ZarrMode {
 
   dispose(gl: WebGL2RenderingContext): void {
     this.isRemoved = true
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout)
-      this.throttleTimeout = null
-    }
-    this.throttledFetchPromise = null
-    // Cancel pending region requests
-    for (const controller of this.pendingRegionControllers.values()) {
-      controller.abort()
-    }
-    this.pendingRegionControllers.clear()
+    clearThrottle(this.throttleState)
+    cancelAllRequests(this.requestCanceller)
     // Clean up region caches
     this.clearRegionCache(gl)
     this.clearPreviousRegionCache(gl)
     this.regionSize = null
-    this.isLoadingData = false
+    this.loadingManager.chunksLoading = false
     this.emitLoadingState()
   }
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
-    this.loadingCallback = callback
+    setLoadingCallbackUtil(this.loadingManager, callback)
   }
 
   getCRS(): CRS {
@@ -1381,6 +1508,7 @@ export class UntiledMode implements ZarrMode {
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
+    this.bandNames = getBands(this.variable, selector)
 
     // Use cached gl context (always available after first update())
     const gl = this.cachedGl
@@ -1407,12 +1535,11 @@ export class UntiledMode implements ZarrMode {
   }
 
   private emitLoadingState(): void {
-    if (!this.loadingCallback) return
-    this.loadingCallback({
-      loading: this.metadataLoading || this.isLoadingData,
-      metadata: this.metadataLoading,
-      chunks: this.isLoadingData,
-    })
+    // Update chunksLoading to include throttle state
+    if (this.throttleState.throttledPending && !this.loadingManager.chunksLoading) {
+      this.loadingManager.chunksLoading = true
+    }
+    emitLoadingStateUtil(this.loadingManager)
   }
 
   private async resolveSelectionIndex(
@@ -1462,15 +1589,18 @@ export class UntiledMode implements ZarrMode {
   }
 
   /**
-   * Fetch data for a specific selector (used for queries with selector overrides).
-   * @param selector - The selector to use for non-spatial dimensions
-   * @param spatialBounds - Optional pixel bounds to limit spatial fetch
+   * Unified method to fetch query data for either point or region queries.
+   * Handles multi-value dimensions and channel combinations.
    */
-  private async fetchDataForSelector(
+  private async fetchQueryData(
     selector: NormalizedSelector,
-    spatialBounds?: { minX: number; maxX: number; minY: number; maxY: number }
+    spatialQuery:
+      | { type: 'point'; x: number; y: number }
+      | { type: 'bbox'; minX: number; maxX: number; minY: number; maxY: number }
   ): Promise<{
-    data: Float32Array
+    type: 'point' | 'bbox'
+    values: number[] // For point queries
+    data: Float32Array // For bbox queries
     width: number
     height: number
     channels: number
@@ -1482,11 +1612,9 @@ export class UntiledMode implements ZarrMode {
     try {
       const { sliceArgs: baseSliceArgs, multiValueDims } =
         await this.buildSliceArgsForSelector(selector, {
-          includeSpatialSlices: !spatialBounds,
+          includeSpatialSlices: spatialQuery.type !== 'bbox',
           trackMultiValue: true,
-          spatialBounds: spatialBounds
-            ? { type: 'bbox', ...spatialBounds }
-            : undefined,
+          spatialBounds: spatialQuery,
         })
 
       // Build channel combinations from multi-value dimensions
@@ -1510,19 +1638,51 @@ export class UntiledMode implements ZarrMode {
       const numChannels = channelCombinations.length || 1
       const multiValueDimNames = multiValueDims.map((d) => d.dimName)
 
-      // Calculate dimensions based on spatial bounds
-      const fetchWidth = spatialBounds
-        ? spatialBounds.maxX - spatialBounds.minX
-        : this.width
-      const fetchHeight = spatialBounds
-        ? spatialBounds.maxY - spatialBounds.minY
-        : this.height
+      // Point query: fetch individual values
+      if (spatialQuery.type === 'point') {
+        const values: number[] = []
+
+        if (numChannels === 1) {
+          const result = await zarr.get(this.zarrArray, baseSliceArgs)
+          const value = this.extractScalarValue(result)
+          if (value === null) return null
+          values.push(value)
+        } else {
+          for (let c = 0; c < numChannels; c++) {
+            const sliceArgs = [...baseSliceArgs]
+            const combo = channelCombinations[c]
+            for (let i = 0; i < multiValueDims.length; i++) {
+              sliceArgs[multiValueDims[i].dimIndex] = combo[i]
+            }
+            const result = await zarr.get(this.zarrArray, sliceArgs)
+            const value = this.extractScalarValue(result)
+            if (value !== null) values.push(value)
+          }
+        }
+
+        return {
+          type: 'point',
+          values,
+          data: new Float32Array(0),
+          width: 1,
+          height: 1,
+          channels: numChannels,
+          channelLabels: channelLabelCombinations,
+          multiValueDimNames,
+        }
+      }
+
+      // Bbox query: fetch region data
+      const fetchWidth = spatialQuery.maxX - spatialQuery.minX
+      const fetchHeight = spatialQuery.maxY - spatialQuery.minY
 
       if (numChannels === 1) {
         const result = (await zarr.get(this.zarrArray, baseSliceArgs)) as {
           data: ArrayLike<number>
         }
         return {
+          type: 'bbox',
+          values: [],
           data: new Float32Array((result.data as Float32Array).buffer),
           width: fetchWidth,
           height: fetchHeight,
@@ -1530,143 +1690,55 @@ export class UntiledMode implements ZarrMode {
           channelLabels: channelLabelCombinations,
           multiValueDimNames,
         }
-      } else {
-        const packedData = new Float32Array(
-          fetchWidth * fetchHeight * numChannels
-        )
+      }
 
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs]
-          const combo = channelCombinations[c]
-
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i]
-          }
-
-          const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
-            data: ArrayLike<number>
-          }
-
-          const bandArray = new Float32Array(
-            (bandData.data as Float32Array).buffer
-          )
-          for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
-          }
+      const packedData = new Float32Array(fetchWidth * fetchHeight * numChannels)
+      for (let c = 0; c < numChannels; c++) {
+        const sliceArgs = [...baseSliceArgs]
+        const combo = channelCombinations[c]
+        for (let i = 0; i < multiValueDims.length; i++) {
+          sliceArgs[multiValueDims[i].dimIndex] = combo[i]
         }
 
-        return {
-          data: packedData,
-          width: fetchWidth,
-          height: fetchHeight,
-          channels: numChannels,
-          channelLabels: channelLabelCombinations,
-          multiValueDimNames,
+        const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
+          data: ArrayLike<number>
+        }
+        const bandArray = new Float32Array((bandData.data as Float32Array).buffer)
+        for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
+          packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
         }
       }
+
+      return {
+        type: 'bbox',
+        values: [],
+        data: packedData,
+        width: fetchWidth,
+        height: fetchHeight,
+        channels: numChannels,
+        channelLabels: channelLabelCombinations,
+        multiValueDimNames,
+      }
     } catch (err) {
-      console.error('Error fetching data for query selector:', err)
+      console.error('Error fetching query data:', err)
       return null
     }
   }
 
   /**
-   * Fetch data for a single point. Only fetches the chunk(s) containing that point.
+   * Extract a scalar value from zarr.get result (handles various return formats).
    */
-  private async fetchPointData(
-    selector: NormalizedSelector,
-    pixelX: number,
-    pixelY: number
-  ): Promise<{
-    values: number[]
-    channelLabels: (string | number)[][]
-    multiValueDimNames: string[]
-  } | null> {
-    if (!this.zarrArray) return null
-
-    try {
-      const { sliceArgs: baseSliceArgs, multiValueDims } =
-        await this.buildSliceArgsForSelector(selector, {
-          includeSpatialSlices: false, // not used when spatialBounds provided
-          trackMultiValue: true,
-          spatialBounds: { type: 'point', x: pixelX, y: pixelY },
-        })
-
-      // Build channel combinations from multi-value dimensions
-      let channelCombinations: number[][] = [[]]
-      let channelLabelCombinations: (number | string)[][] = [[]]
-      for (const { values, labels } of multiValueDims) {
-        const next: number[][] = []
-        const nextLabels: (number | string)[][] = []
-        for (let idx = 0; idx < values.length; idx++) {
-          const val = values[idx]
-          const label = labels[idx]
-          for (let c = 0; c < channelCombinations.length; c++) {
-            next.push([...channelCombinations[c], val])
-            nextLabels.push([...channelLabelCombinations[c], label])
-          }
-        }
-        channelCombinations = next
-        channelLabelCombinations = nextLabels
-      }
-
-      const numChannels = channelCombinations.length || 1
-      const multiValueDimNames = multiValueDims.map((d) => d.dimName)
-      const values: number[] = []
-
-      if (numChannels === 1) {
-        // Single channel - fetch single point
-        const result = await zarr.get(this.zarrArray, baseSliceArgs)
-        // Result could be: { data: TypedArray }, a scalar, or TypedArray directly
-        let value: number
-        if (result && typeof result === 'object' && 'data' in result) {
-          const data = (result as { data: ArrayLike<number> }).data
-          value = data[0] ?? (data as unknown as number)
-        } else if (typeof result === 'number') {
-          value = result
-        } else if (ArrayBuffer.isView(result)) {
-          value = (result as Float32Array)[0]
-        } else {
-          console.warn('Unexpected zarr.get result format:', result)
-          return null
-        }
-        values.push(value)
-      } else {
-        // Multi-channel - fetch each channel's point value
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs]
-          const combo = channelCombinations[c]
-
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i]
-          }
-
-          const result = await zarr.get(this.zarrArray, sliceArgs)
-          let value: number
-          if (result && typeof result === 'object' && 'data' in result) {
-            const data = (result as { data: ArrayLike<number> }).data
-            value = data[0] ?? (data as unknown as number)
-          } else if (typeof result === 'number') {
-            value = result
-          } else if (ArrayBuffer.isView(result)) {
-            value = (result as Float32Array)[0]
-          } else {
-            console.warn('Unexpected zarr.get result format:', result)
-            continue
-          }
-          values.push(value)
-        }
-      }
-
-      return {
-        values,
-        channelLabels: channelLabelCombinations,
-        multiValueDimNames,
-      }
-    } catch (err) {
-      console.error('Error fetching point data:', err)
-      return null
+  private extractScalarValue(result: unknown): number | null {
+    if (result && typeof result === 'object' && 'data' in result) {
+      const data = (result as { data: ArrayLike<number> }).data
+      return data[0] ?? (data as unknown as number)
+    } else if (typeof result === 'number') {
+      return result
+    } else if (ArrayBuffer.isView(result)) {
+      return (result as Float32Array)[0]
     }
+    console.warn('Unexpected zarr.get result format:', result)
+    return null
   }
 
   /**
@@ -1715,10 +1787,9 @@ export class UntiledMode implements ZarrMode {
       }
 
       // Fetch only the chunk(s) containing this point
-      const pointData = await this.fetchPointData(
+      const pointData = await this.fetchQueryData(
         normalizedSelector,
-        pixel.x,
-        pixel.y
+        { type: 'point', x: pixel.x, y: pixel.y }
       )
 
       if (!pointData) {
@@ -1828,9 +1899,9 @@ export class UntiledMode implements ZarrMode {
       }
     }
 
-    const fetched = await this.fetchDataForSelector(
+    const fetched = await this.fetchQueryData(
       normalizedSelector,
-      pixelBounds
+      { type: 'bbox', ...pixelBounds }
     )
     if (!fetched) {
       return {

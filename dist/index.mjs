@@ -7007,6 +7007,90 @@ async function queryRegionSingleImage(variable, geometry, selector, data, width,
   return result;
 }
 
+// src/mode-utils.ts
+function createThrottleState() {
+  return {
+    lastFetchTime: 0,
+    throttleTimeout: null,
+    throttledPending: false
+  };
+}
+function getThrottleWaitTime(state, throttleMs) {
+  if (throttleMs <= 0) return 0;
+  const now = Date.now();
+  const timeSinceLastFetch = now - state.lastFetchTime;
+  if (timeSinceLastFetch < throttleMs) {
+    return throttleMs - timeSinceLastFetch;
+  }
+  return 0;
+}
+function scheduleThrottledUpdate(state, waitTime, invalidate) {
+  if (state.throttleTimeout) return;
+  state.throttledPending = true;
+  state.throttleTimeout = setTimeout(() => {
+    state.throttleTimeout = null;
+    state.throttledPending = false;
+    invalidate();
+  }, waitTime);
+}
+function markFetchStart(state) {
+  state.lastFetchTime = Date.now();
+}
+function clearThrottle(state) {
+  if (state.throttleTimeout) {
+    clearTimeout(state.throttleTimeout);
+    state.throttleTimeout = null;
+  }
+  state.throttledPending = false;
+}
+function createRequestCanceller() {
+  return {
+    controllers: /* @__PURE__ */ new Map(),
+    currentVersion: 0
+  };
+}
+function cancelOlderRequests(canceller, completedVersion) {
+  for (const [version, controller] of canceller.controllers) {
+    if (version < completedVersion) {
+      controller.abort();
+      canceller.controllers.delete(version);
+    }
+  }
+}
+function cancelAllRequests(canceller) {
+  for (const controller of canceller.controllers.values()) {
+    controller.abort();
+  }
+  canceller.controllers.clear();
+}
+function hasActiveRequests(canceller) {
+  for (const controller of canceller.controllers.values()) {
+    if (!controller.signal.aborted) {
+      return true;
+    }
+  }
+  return false;
+}
+function createLoadingManager() {
+  return {
+    callback: void 0,
+    metadataLoading: false,
+    chunksLoading: false
+  };
+}
+function setLoadingCallback(manager, callback) {
+  manager.callback = callback;
+}
+function emitLoadingState(manager) {
+  if (!manager.callback) return;
+  const state = {
+    loading: manager.metadataLoading || manager.chunksLoading,
+    metadata: manager.metadataLoading,
+    chunks: manager.chunksLoading
+  };
+  manager.callback(state);
+}
+
 // src/tiles.ts
 var Tiles = class {
   constructor({
@@ -7661,8 +7745,9 @@ function renderMapboxTile({
       const bounds = region.mercatorBounds;
       const intersects = bounds.x0 < tileX1 && bounds.x1 > tileX0 && bounds.y0 < tileY1 && bounds.y1 > tileY0;
       if (!intersects) continue;
-      const baseTexScale = region.latIsAscending ? [1, -1] : [1, 1];
-      const baseTexOffset = region.latIsAscending ? [0, 1] : [0, 0];
+      const isAscending = region.latIsAscending !== false;
+      const baseTexScale = isAscending ? [1, -1] : [1, 1];
+      const baseTexOffset = isAscending ? [0, 1] : [0, 0];
       const linearBuffer = getLinearPixCoordBuffer(context.gl, region);
       const regionParams = {
         data: null,
@@ -7675,14 +7760,13 @@ function renderMapboxTile({
         texture: region.texture,
         vertexBuffer: region.vertexBuffer,
         pixCoordBuffer: linearBuffer,
-        pixCoordArr: region.vertexArr,
-        // Not used since geometryVersion=0, but required by interface
         geometryVersion: 0,
         // Buffer already has correct data, no re-upload needed
         dataVersion: 1,
         // Already uploaded
         texScale: baseTexScale,
-        texOffset: baseTexOffset
+        texOffset: baseTexOffset,
+        clim: uniforms.clim
       };
       renderSingleImageToTile(
         renderer,
@@ -7691,7 +7775,6 @@ function renderMapboxTile({
         regionParams,
         region.vertexArr,
         bounds
-        // No latIsAscending parameter - handled via texScale/texOffset
       );
       anyRendered = true;
     }
@@ -7943,13 +8026,12 @@ var TiledMode = class {
     this.xyLimits = null;
     this.tileBounds = {};
     this.pendingChunks = /* @__PURE__ */ new Set();
-    this.metadataLoading = false;
     this.currentLevel = null;
     this.selectorVersion = 0;
-    this.pendingControllers = /* @__PURE__ */ new Map();
-    this.lastFetchTime = 0;
-    this.throttleTimeout = null;
-    this.hasThrottledPending = false;
+    // Shared state managers
+    this.throttleState = createThrottleState();
+    this.requestCanceller = createRequestCanceller();
+    this.loadingManager = createLoadingManager();
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
@@ -7957,7 +8039,7 @@ var TiledMode = class {
     this.throttleMs = throttleMs;
   }
   async initialize() {
-    this.metadataLoading = true;
+    this.loadingManager.metadataLoading = true;
     this.emitLoadingState();
     try {
       const desc = this.zarrStore.describe();
@@ -7977,7 +8059,7 @@ var TiledMode = class {
       });
       this.updateGeometryForProjection(false);
     } finally {
-      this.metadataLoading = false;
+      this.loadingManager.metadataLoading = false;
       this.emitLoadingState();
     }
   }
@@ -8008,23 +8090,16 @@ var TiledMode = class {
       }
     }
     if (tilesToFetch.length > 0) {
-      const now = Date.now();
-      const timeSinceLastFetch = now - this.lastFetchTime;
-      if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
-        if (!this.hasThrottledPending) {
-          this.hasThrottledPending = true;
+      const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs);
+      if (waitTime > 0) {
+        if (!this.throttleState.throttledPending) {
+          this.throttleState.throttledPending = true;
           this.emitLoadingState();
         }
-        if (!this.throttleTimeout) {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null;
-            this.hasThrottledPending = false;
-            this.invalidate();
-          }, this.throttleMs - timeSinceLastFetch);
-        }
+        scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate);
         return;
       }
-      this.lastFetchTime = now;
+      markFetchStart(this.throttleState);
       const wasEmpty = this.pendingChunks.size === 0;
       for (const tileTuple of tilesToFetch) {
         this.pendingChunks.add(tileToKey(tileTuple));
@@ -8102,22 +8177,15 @@ var TiledMode = class {
     return null;
   }
   dispose(_gl) {
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout);
-      this.throttleTimeout = null;
-    }
-    this.hasThrottledPending = false;
-    for (const controller of this.pendingControllers.values()) {
-      controller.abort();
-    }
-    this.pendingControllers.clear();
+    clearThrottle(this.throttleState);
+    cancelAllRequests(this.requestCanceller);
     this.tileCache?.clear();
     this.tileCache = null;
     this.pendingChunks.clear();
     this.emitLoadingState();
   }
   setLoadingCallback(callback) {
-    this.loadingCallback = callback;
+    setLoadingCallback(this.loadingManager, callback);
   }
   getCRS() {
     return this.crs;
@@ -8135,13 +8203,8 @@ var TiledMode = class {
     this.tileCache?.updateClim(clim);
   }
   emitLoadingState() {
-    if (!this.loadingCallback) return;
-    const chunksLoading = this.pendingChunks.size > 0 || this.hasThrottledPending;
-    this.loadingCallback({
-      loading: this.metadataLoading || chunksLoading,
-      metadata: this.metadataLoading,
-      chunks: chunksLoading
-    });
+    this.loadingManager.chunksLoading = this.pendingChunks.size > 0 || this.throttleState.throttledPending;
+    emitLoadingState(this.loadingManager);
   }
   async setSelector(selector) {
     this.selector = selector;
@@ -8227,14 +8290,14 @@ var TiledMode = class {
   }
   async prefetchTileData(tiles, selectorHash, version) {
     const controller = new AbortController();
-    this.pendingControllers.set(version, controller);
+    this.requestCanceller.controllers.set(version, controller);
     try {
       const fetchPromises = tiles.map(
         (tiletuple) => this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
       );
       await Promise.all(fetchPromises);
     } finally {
-      this.pendingControllers.delete(version);
+      this.requestCanceller.controllers.delete(version);
     }
   }
   async fetchTileData(tileTuple, selectorHash, version, signal) {
@@ -8257,7 +8320,7 @@ var TiledMode = class {
         this.emitLoadingState();
         return null;
       }
-      this.cancelOlderRequests(version);
+      cancelOlderRequests(this.requestCanceller, version);
       this.emitLoadingState();
       this.invalidate();
       return tile.data;
@@ -8268,14 +8331,6 @@ var TiledMode = class {
         return null;
       }
       throw err;
-    }
-  }
-  cancelOlderRequests(completedVersion) {
-    for (const [version, controller] of this.pendingControllers) {
-      if (version < completedVersion) {
-        controller.abort();
-        this.pendingControllers.delete(version);
-      }
     }
   }
   /**
@@ -8320,6 +8375,7 @@ var UntiledMode = class {
     this.channels = 1;
     // Bounds
     this.mercatorBounds = null;
+    this.bandNames = [];
     this.dimIndices = {};
     this.xyLimits = null;
     this.crs = "EPSG:4326";
@@ -8330,12 +8386,10 @@ var UntiledMode = class {
     this.currentLevelIndex = 0;
     // Loading state
     this.isRemoved = false;
-    this.isLoadingData = false;
-    this.metadataLoading = false;
-    this.throttleTimeout = null;
-    this.lastFetchTime = 0;
-    // For throttling fetches
-    this.throttledFetchPromise = null;
+    // Shared state managers
+    this.throttleState = createThrottleState();
+    this.requestCanceller = createRequestCanceller();
+    this.loadingManager = createLoadingManager();
     // Dimension values cache
     this.dimensionValues = {};
     // Data processing
@@ -8348,15 +8402,13 @@ var UntiledMode = class {
     // Track which level the previous cache is from
     this.regionSize = null;
     // [height, width] of each region
-    this.pendingRegionControllers = /* @__PURE__ */ new Map();
-    // Keyed by request ID
-    this.regionFetchRequestId = 0;
-    // Incrementing request ID for region fetches
     this.lastViewportHash = "";
     this.baseSliceArgs = [];
     // Cached slice args for non-spatial dims
     this.selectorVersion = 0;
     // Incremented on selector change to track stale regions
+    // Multi-band support: track which dimensions have multiple selected values
+    this.baseMultiValueDims = [];
     // Cached WebGL context for use in setSelector
     this.cachedGl = null;
     // Track if base slice args have been built (ready for region fetching)
@@ -8364,11 +8416,12 @@ var UntiledMode = class {
     this.zarrStore = store;
     this.variable = variable;
     this.selector = selector;
+    this.bandNames = getBands(variable, selector);
     this.invalidate = invalidate;
     this.throttleMs = throttleMs;
   }
   async initialize() {
-    this.metadataLoading = true;
+    this.loadingManager.metadataLoading = true;
     this.emitLoadingState();
     try {
       const desc = this.zarrStore.describe();
@@ -8393,7 +8446,7 @@ var UntiledMode = class {
         console.warn("UntiledMode: No XY limits found");
       }
     } finally {
-      this.metadataLoading = false;
+      this.loadingManager.metadataLoading = false;
       this.emitLoadingState();
     }
   }
@@ -8460,24 +8513,10 @@ var UntiledMode = class {
       if (region.texture) gl.deleteTexture(region.texture);
       if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer);
       if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer);
-    }
-  }
-  /**
-   * Generic helper to cancel pending requests older than a given ID.
-   */
-  cancelOlderRequestsInMap(controllers, completedRequestId) {
-    for (const [id, controller] of controllers) {
-      if (id < completedRequestId) {
-        controller.abort();
-        controllers.delete(id);
+      for (const tex of region.bandTextures.values()) {
+        gl.deleteTexture(tex);
       }
     }
-  }
-  /**
-   * Cancel pending region requests older than the given request ID.
-   */
-  cancelOlderRegionRequests(completedRequestId) {
-    this.cancelOlderRequestsInMap(this.pendingRegionControllers, completedRequestId);
   }
   /**
    * Calculate which regions are visible in the current viewport.
@@ -8526,6 +8565,7 @@ var UntiledMode = class {
       width: 0,
       height: 0,
       loading: false,
+      channels: 1,
       texture: null,
       textureUploaded: false,
       vertexBuffer: null,
@@ -8533,7 +8573,11 @@ var UntiledMode = class {
       vertexArr: null,
       pixCoordArr: null,
       mercatorBounds: null,
-      selectorVersion: this.selectorVersion
+      selectorVersion: this.selectorVersion,
+      bandData: /* @__PURE__ */ new Map(),
+      bandTextures: /* @__PURE__ */ new Map(),
+      bandTexturesUploaded: /* @__PURE__ */ new Set(),
+      bandTexturesConfigured: /* @__PURE__ */ new Set()
     };
   }
   /**
@@ -8783,31 +8827,23 @@ var UntiledMode = class {
    * Fetch regions with throttling (for selector changes).
    */
   fetchRegionsThrottled(regions, gl) {
-    const now = Date.now();
-    const timeSinceLastFetch = now - this.lastFetchTime;
-    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
-      this.isLoadingData = true;
-      this.emitLoadingState();
-      if (!this.throttledFetchPromise) {
-        this.throttledFetchPromise = new Promise((resolve2) => {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null;
-            this.throttledFetchPromise = null;
-            this.invalidate();
-            resolve2();
-          }, this.throttleMs - timeSinceLastFetch);
-        });
+    const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs);
+    if (waitTime > 0) {
+      if (!this.throttleState.throttledPending) {
+        this.throttleState.throttledPending = true;
+        this.emitLoadingState();
       }
+      scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate);
       return;
     }
-    this.lastFetchTime = now;
+    markFetchStart(this.throttleState);
     this.fetchRegions(regions, gl);
   }
   /**
    * Fetch multiple regions with limited concurrency to avoid overwhelming the browser.
    */
   async fetchRegions(regions, gl) {
-    this.isLoadingData = true;
+    this.loadingManager.chunksLoading = true;
     this.emitLoadingState();
     for (const { regionX, regionY } of regions) {
       const key = `${regionX},${regionY}`;
@@ -8832,30 +8868,24 @@ var UntiledMode = class {
       }
     }
     await Promise.allSettled(executing);
-    let stillLoading = false;
-    for (const controller of this.pendingRegionControllers.values()) {
-      if (!controller.signal.aborted) {
-        stillLoading = true;
-        break;
-      }
-    }
-    if (!stillLoading) {
-      this.isLoadingData = false;
+    if (!hasActiveRequests(this.requestCanceller)) {
+      this.loadingManager.chunksLoading = false;
       this.emitLoadingState();
     }
   }
   /**
    * Fetch data for a single region.
+   * Handles multi-band extraction when selector has multi-value dimensions.
    */
   async fetchRegion(regionX, regionY, gl) {
     if (!this.zarrArray || !this.regionSize || this.isRemoved) {
       return;
     }
     const key = `${regionX},${regionY}`;
-    const requestId = ++this.regionFetchRequestId;
+    const requestId = ++this.requestCanceller.currentVersion;
     const fetchSelectorVersion = this.selectorVersion;
     const controller = new AbortController();
-    this.pendingRegionControllers.set(requestId, controller);
+    this.requestCanceller.controllers.set(requestId, controller);
     let region = this.regionCache.get(key);
     if (!region) {
       region = this.createRegionState(regionX, regionY);
@@ -8870,37 +8900,88 @@ var UntiledMode = class {
     const actualW = xEnd - xStart;
     const actualH = yEnd - yStart;
     try {
-      const sliceArgs = [...this.baseSliceArgs];
+      const baseSliceArgs = [...this.baseSliceArgs];
       const latIdx = this.dimIndices.lat.index;
       const lonIdx = this.dimIndices.lon.index;
-      sliceArgs[latIdx] = slice(yStart, yEnd);
-      sliceArgs[lonIdx] = slice(xStart, xEnd);
-      const result = await get2(this.zarrArray, sliceArgs, {
-        opts: { signal: controller.signal }
-      });
-      if (controller.signal.aborted || this.isRemoved) {
-        region.loading = false;
-        return;
+      baseSliceArgs[latIdx] = slice(yStart, yEnd);
+      baseSliceArgs[lonIdx] = slice(xStart, xEnd);
+      const desc = this.zarrStore.describe();
+      const fillValue = desc.fill_value;
+      let channelCombinations = [[]];
+      for (const { values } of this.baseMultiValueDims) {
+        const next = [];
+        for (const val of values) {
+          for (const combo of channelCombinations) {
+            next.push([...combo, val]);
+          }
+        }
+        channelCombinations = next;
+      }
+      const numChannels = channelCombinations.length || 1;
+      const pixelCount = actualW * actualH;
+      const bandArrays = [];
+      const packedData = new Float32Array(pixelCount * numChannels);
+      packedData.fill(fillValue ?? 0);
+      if (numChannels === 1) {
+        const result = await get2(this.zarrArray, baseSliceArgs, {
+          opts: { signal: controller.signal }
+        });
+        if (controller.signal.aborted || this.isRemoved) {
+          region.loading = false;
+          return;
+        }
+        const rawData = new Float32Array(result.data);
+        bandArrays.push(rawData);
+        packedData.set(rawData);
+      } else {
+        for (let c = 0; c < numChannels; c++) {
+          const sliceArgs = [...baseSliceArgs];
+          const combo = channelCombinations[c];
+          for (let i = 0; i < this.baseMultiValueDims.length; i++) {
+            sliceArgs[this.baseMultiValueDims[i].dimIndex] = combo[i];
+          }
+          const result = await get2(this.zarrArray, sliceArgs, {
+            opts: { signal: controller.signal }
+          });
+          if (controller.signal.aborted || this.isRemoved) {
+            region.loading = false;
+            return;
+          }
+          const bandData = new Float32Array(result.data);
+          bandArrays.push(bandData);
+          for (let pixIdx = 0; pixIdx < pixelCount; pixIdx++) {
+            packedData[pixIdx * numChannels + c] = bandData[pixIdx];
+          }
+        }
       }
       if (fetchSelectorVersion < region.selectorVersion) {
         region.loading = false;
         return;
       }
       region.selectorVersion = fetchSelectorVersion;
-      this.cancelOlderRegionRequests(requestId);
-      const rawData = new Float32Array(result.data);
-      const desc = this.zarrStore.describe();
-      const fillValue = desc.fill_value;
-      const { normalized } = normalizeDataForTexture(rawData, fillValue, this.clim);
+      cancelOlderRequests(this.requestCanceller, requestId);
+      const { normalized } = normalizeDataForTexture(packedData, fillValue, this.clim);
       region.data = normalized;
       region.width = actualW;
       region.height = actualH;
+      region.channels = numChannels;
       region.loading = false;
+      region.bandData.clear();
+      region.bandTexturesUploaded.clear();
+      for (let c = 0; c < bandArrays.length; c++) {
+        const bandName = this.bandNames[c] || `band_${c}`;
+        const { normalized: bandNormalized } = normalizeDataForTexture(
+          bandArrays[c],
+          fillValue,
+          this.clim
+        );
+        region.bandData.set(bandName, bandNormalized);
+      }
       if (!region.texture) {
         region.texture = gl.createTexture();
       }
       gl.bindTexture(gl.TEXTURE_2D, region.texture);
-      const { format, internalFormat } = this.getTextureFormats(gl, this.channels);
+      const { format, internalFormat } = getTextureFormats(gl, numChannels);
       gl.texImage2D(
         gl.TEXTURE_2D,
         0,
@@ -8925,23 +9006,7 @@ var UntiledMode = class {
       }
       region.loading = false;
     } finally {
-      this.pendingRegionControllers.delete(requestId);
-    }
-  }
-  /**
-   * Get texture formats based on channel count.
-   */
-  getTextureFormats(gl, channels) {
-    switch (channels) {
-      case 1:
-        return { format: gl.RED, internalFormat: gl.R32F };
-      case 2:
-        return { format: gl.RG, internalFormat: gl.RG32F };
-      case 3:
-        return { format: gl.RGB, internalFormat: gl.RGB32F };
-      case 4:
-      default:
-        return { format: gl.RGBA, internalFormat: gl.RGBA32F };
+      this.requestCanceller.controllers.delete(requestId);
     }
   }
   update(map, gl) {
@@ -8960,7 +9025,7 @@ var UntiledMode = class {
         this.updateVisibleRegions(map, gl);
       }
     } else {
-      if (!this.regionSize && this.zarrArray && !this.isLoadingData) {
+      if (!this.regionSize && this.zarrArray && !this.loadingManager.chunksLoading) {
         const detectedRegionSize = this.getRegionSize(this.zarrArray);
         this.regionSize = detectedRegionSize ?? [this.height, this.width];
         this.buildBaseSliceArgs().then(() => {
@@ -8977,7 +9042,7 @@ var UntiledMode = class {
     if (levelIndex < 0 || levelIndex >= this.levels.length) {
       return;
     }
-    if (this.isLoadingData) {
+    if (this.loadingManager.chunksLoading) {
       return;
     }
     const level = this.levels[levelIndex];
@@ -8998,17 +9063,19 @@ var UntiledMode = class {
   /**
    * Build base slice args for non-spatial dimensions.
    * This caches the selector values for use in region fetching.
+   * Also tracks multi-value dimensions for band extraction.
    */
   async buildBaseSliceArgs() {
     if (!this.zarrArray) return;
     this.baseSliceArgsReady = false;
-    const { sliceArgs } = await this.buildSliceArgsForSelector(this.selector, {
+    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(this.selector, {
       includeSpatialSlices: false,
       // placeholders for region fetching
-      trackMultiValue: false
-      // display only needs first value
+      trackMultiValue: true
+      // track multi-value dims for band extraction
     });
     this.baseSliceArgs = sliceArgs;
+    this.baseMultiValueDims = multiValueDims;
     this.baseSliceArgsReady = true;
   }
   selectLevelForZoom(mapZoom) {
@@ -9043,12 +9110,9 @@ var UntiledMode = class {
   async switchToLevel(newLevelIndex, gl) {
     if (newLevelIndex === this.currentLevelIndex) return;
     if (newLevelIndex < 0 || newLevelIndex >= this.levels.length) return;
-    if (this.isLoadingData) return;
+    if (this.loadingManager.chunksLoading) return;
     const level = this.levels[newLevelIndex];
-    for (const controller of this.pendingRegionControllers.values()) {
-      controller.abort();
-    }
-    this.pendingRegionControllers.clear();
+    cancelAllRequests(this.requestCanceller);
     const oldLevelIndex = this.currentLevelIndex;
     this.currentLevelIndex = newLevelIndex;
     try {
@@ -9090,21 +9154,44 @@ var UntiledMode = class {
       context.matrix,
       false
     );
-    this.renderRegions(renderer, shaderProgram, context.worldOffsets);
+    this.renderRegions(renderer, shaderProgram, context.worldOffsets, context.customShaderConfig);
   }
   /**
    * Render all loaded regions.
-   * Uses getRegionStates() to include both current and fallback regions.
+   * Iterates over region caches directly to access band data for custom shaders.
    * Note: Regions have geometry already positioned in mercator space,
    * so we disable the equirectangular shader correction to avoid double transformation.
    */
-  renderRegions(renderer, shaderProgram, worldOffsets) {
+  renderRegions(renderer, shaderProgram, worldOffsets, customShaderConfig) {
     const gl = renderer.gl;
     if (shaderProgram.isEquirectangularLoc) {
       gl.uniform1i(shaderProgram.isEquirectangularLoc, 0);
     }
-    const regionStates = this.getRegionStates();
-    for (const region of regionStates) {
+    if (shaderProgram.useCustomShader && customShaderConfig) {
+      let textureUnit = 2;
+      for (const bandName of customShaderConfig.bands) {
+        const loc = shaderProgram.bandTexLocs.get(bandName);
+        if (loc) {
+          gl.uniform1i(loc, textureUnit);
+        }
+        textureUnit++;
+      }
+    }
+    const isRegionValid = (region) => {
+      return !!(region.data && region.textureUploaded && region.texture && region.vertexBuffer && region.pixCoordBuffer && region.vertexArr && region.mercatorBounds);
+    };
+    const regionsToRender = [];
+    for (const region of this.previousRegionCache.values()) {
+      if (isRegionValid(region)) {
+        regionsToRender.push(region);
+      }
+    }
+    for (const region of this.regionCache.values()) {
+      if (isRegionValid(region)) {
+        regionsToRender.push(region);
+      }
+    }
+    for (const region of regionsToRender) {
       const bounds = region.mercatorBounds;
       const scaleX = (bounds.x1 - bounds.x0) / 2;
       const scaleY = (bounds.y1 - bounds.y0) / 2;
@@ -9126,6 +9213,50 @@ var UntiledMode = class {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, region.texture);
       gl.uniform1i(shaderProgram.texLoc, 0);
+      if (shaderProgram.useCustomShader && customShaderConfig) {
+        let textureUnit = 2;
+        let missingBandData = false;
+        for (const bandName of customShaderConfig.bands) {
+          const bandData = region.bandData.get(bandName);
+          if (!bandData) {
+            missingBandData = true;
+            break;
+          }
+          let bandTex = region.bandTextures.get(bandName);
+          if (!bandTex) {
+            bandTex = gl.createTexture();
+            if (!bandTex) {
+              missingBandData = true;
+              break;
+            }
+            region.bandTextures.set(bandName, bandTex);
+          }
+          gl.activeTexture(gl.TEXTURE0 + textureUnit);
+          gl.bindTexture(gl.TEXTURE_2D, bandTex);
+          if (!region.bandTexturesConfigured.has(bandName)) {
+            configureDataTexture(gl);
+            region.bandTexturesConfigured.add(bandName);
+          }
+          if (!region.bandTexturesUploaded.has(bandName)) {
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.R32F,
+              region.width,
+              region.height,
+              0,
+              gl.RED,
+              gl.FLOAT,
+              bandData
+            );
+            region.bandTexturesUploaded.add(bandName);
+          }
+          textureUnit++;
+        }
+        if (missingBandData) {
+          continue;
+        }
+      }
       const vertexCount = region.vertexArr.length / 2;
       for (const worldOffset of worldOffsets) {
         gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset);
@@ -9184,23 +9315,16 @@ var UntiledMode = class {
   }
   dispose(gl) {
     this.isRemoved = true;
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout);
-      this.throttleTimeout = null;
-    }
-    this.throttledFetchPromise = null;
-    for (const controller of this.pendingRegionControllers.values()) {
-      controller.abort();
-    }
-    this.pendingRegionControllers.clear();
+    clearThrottle(this.throttleState);
+    cancelAllRequests(this.requestCanceller);
     this.clearRegionCache(gl);
     this.clearPreviousRegionCache(gl);
     this.regionSize = null;
-    this.isLoadingData = false;
+    this.loadingManager.chunksLoading = false;
     this.emitLoadingState();
   }
   setLoadingCallback(callback) {
-    this.loadingCallback = callback;
+    setLoadingCallback(this.loadingManager, callback);
   }
   getCRS() {
     return this.crs;
@@ -9219,6 +9343,7 @@ var UntiledMode = class {
   }
   async setSelector(selector) {
     this.selector = selector;
+    this.bandNames = getBands(this.variable, selector);
     const gl = this.cachedGl;
     if (this.regionSize && gl) {
       this.selectorVersion++;
@@ -9237,12 +9362,10 @@ var UntiledMode = class {
     }
   }
   emitLoadingState() {
-    if (!this.loadingCallback) return;
-    this.loadingCallback({
-      loading: this.metadataLoading || this.isLoadingData,
-      metadata: this.metadataLoading,
-      chunks: this.isLoadingData
-    });
+    if (this.throttleState.throttledPending && !this.loadingManager.chunksLoading) {
+      this.loadingManager.chunksLoading = true;
+    }
+    emitLoadingState(this.loadingManager);
   }
   async resolveSelectionIndex(dimName, dimInfo, value, type) {
     if (type === "index") {
@@ -9273,17 +9396,16 @@ var UntiledMode = class {
     return typeof value === "number" ? value : 0;
   }
   /**
-   * Fetch data for a specific selector (used for queries with selector overrides).
-   * @param selector - The selector to use for non-spatial dimensions
-   * @param spatialBounds - Optional pixel bounds to limit spatial fetch
+   * Unified method to fetch query data for either point or region queries.
+   * Handles multi-value dimensions and channel combinations.
    */
-  async fetchDataForSelector(selector, spatialBounds) {
+  async fetchQueryData(selector, spatialQuery) {
     if (!this.zarrArray) return null;
     try {
       const { sliceArgs: baseSliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(selector, {
-        includeSpatialSlices: !spatialBounds,
+        includeSpatialSlices: spatialQuery.type !== "bbox",
         trackMultiValue: true,
-        spatialBounds: spatialBounds ? { type: "bbox", ...spatialBounds } : void 0
+        spatialBounds: spatialQuery
       });
       let channelCombinations = [[]];
       let channelLabelCombinations = [[]];
@@ -9303,11 +9425,43 @@ var UntiledMode = class {
       }
       const numChannels = channelCombinations.length || 1;
       const multiValueDimNames = multiValueDims.map((d) => d.dimName);
-      const fetchWidth = spatialBounds ? spatialBounds.maxX - spatialBounds.minX : this.width;
-      const fetchHeight = spatialBounds ? spatialBounds.maxY - spatialBounds.minY : this.height;
+      if (spatialQuery.type === "point") {
+        const values = [];
+        if (numChannels === 1) {
+          const result = await get2(this.zarrArray, baseSliceArgs);
+          const value = this.extractScalarValue(result);
+          if (value === null) return null;
+          values.push(value);
+        } else {
+          for (let c = 0; c < numChannels; c++) {
+            const sliceArgs = [...baseSliceArgs];
+            const combo = channelCombinations[c];
+            for (let i = 0; i < multiValueDims.length; i++) {
+              sliceArgs[multiValueDims[i].dimIndex] = combo[i];
+            }
+            const result = await get2(this.zarrArray, sliceArgs);
+            const value = this.extractScalarValue(result);
+            if (value !== null) values.push(value);
+          }
+        }
+        return {
+          type: "point",
+          values,
+          data: new Float32Array(0),
+          width: 1,
+          height: 1,
+          channels: numChannels,
+          channelLabels: channelLabelCombinations,
+          multiValueDimNames
+        };
+      }
+      const fetchWidth = spatialQuery.maxX - spatialQuery.minX;
+      const fetchHeight = spatialQuery.maxY - spatialQuery.minY;
       if (numChannels === 1) {
         const result = await get2(this.zarrArray, baseSliceArgs);
         return {
+          type: "bbox",
+          values: [],
           data: new Float32Array(result.data.buffer),
           width: fetchWidth,
           height: fetchHeight,
@@ -9315,116 +9469,49 @@ var UntiledMode = class {
           channelLabels: channelLabelCombinations,
           multiValueDimNames
         };
-      } else {
-        const packedData = new Float32Array(
-          fetchWidth * fetchHeight * numChannels
-        );
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs];
-          const combo = channelCombinations[c];
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i];
-          }
-          const bandData = await get2(this.zarrArray, sliceArgs);
-          const bandArray = new Float32Array(
-            bandData.data.buffer
-          );
-          for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
-          }
-        }
-        return {
-          data: packedData,
-          width: fetchWidth,
-          height: fetchHeight,
-          channels: numChannels,
-          channelLabels: channelLabelCombinations,
-          multiValueDimNames
-        };
       }
-    } catch (err) {
-      console.error("Error fetching data for query selector:", err);
-      return null;
-    }
-  }
-  /**
-   * Fetch data for a single point. Only fetches the chunk(s) containing that point.
-   */
-  async fetchPointData(selector, pixelX, pixelY) {
-    if (!this.zarrArray) return null;
-    try {
-      const { sliceArgs: baseSliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(selector, {
-        includeSpatialSlices: false,
-        // not used when spatialBounds provided
-        trackMultiValue: true,
-        spatialBounds: { type: "point", x: pixelX, y: pixelY }
-      });
-      let channelCombinations = [[]];
-      let channelLabelCombinations = [[]];
-      for (const { values: values2, labels } of multiValueDims) {
-        const next = [];
-        const nextLabels = [];
-        for (let idx = 0; idx < values2.length; idx++) {
-          const val = values2[idx];
-          const label = labels[idx];
-          for (let c = 0; c < channelCombinations.length; c++) {
-            next.push([...channelCombinations[c], val]);
-            nextLabels.push([...channelLabelCombinations[c], label]);
-          }
+      const packedData = new Float32Array(fetchWidth * fetchHeight * numChannels);
+      for (let c = 0; c < numChannels; c++) {
+        const sliceArgs = [...baseSliceArgs];
+        const combo = channelCombinations[c];
+        for (let i = 0; i < multiValueDims.length; i++) {
+          sliceArgs[multiValueDims[i].dimIndex] = combo[i];
         }
-        channelCombinations = next;
-        channelLabelCombinations = nextLabels;
-      }
-      const numChannels = channelCombinations.length || 1;
-      const multiValueDimNames = multiValueDims.map((d) => d.dimName);
-      const values = [];
-      if (numChannels === 1) {
-        const result = await get2(this.zarrArray, baseSliceArgs);
-        let value;
-        if (result && typeof result === "object" && "data" in result) {
-          const data = result.data;
-          value = data[0] ?? data;
-        } else if (typeof result === "number") {
-          value = result;
-        } else if (ArrayBuffer.isView(result)) {
-          value = result[0];
-        } else {
-          console.warn("Unexpected zarr.get result format:", result);
-          return null;
-        }
-        values.push(value);
-      } else {
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs];
-          const combo = channelCombinations[c];
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i];
-          }
-          const result = await get2(this.zarrArray, sliceArgs);
-          let value;
-          if (result && typeof result === "object" && "data" in result) {
-            const data = result.data;
-            value = data[0] ?? data;
-          } else if (typeof result === "number") {
-            value = result;
-          } else if (ArrayBuffer.isView(result)) {
-            value = result[0];
-          } else {
-            console.warn("Unexpected zarr.get result format:", result);
-            continue;
-          }
-          values.push(value);
+        const bandData = await get2(this.zarrArray, sliceArgs);
+        const bandArray = new Float32Array(bandData.data.buffer);
+        for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
+          packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
         }
       }
       return {
-        values,
+        type: "bbox",
+        values: [],
+        data: packedData,
+        width: fetchWidth,
+        height: fetchHeight,
+        channels: numChannels,
         channelLabels: channelLabelCombinations,
         multiValueDimNames
       };
     } catch (err) {
-      console.error("Error fetching point data:", err);
+      console.error("Error fetching query data:", err);
       return null;
     }
+  }
+  /**
+   * Extract a scalar value from zarr.get result (handles various return formats).
+   */
+  extractScalarValue(result) {
+    if (result && typeof result === "object" && "data" in result) {
+      const data = result.data;
+      return data[0] ?? data;
+    } else if (typeof result === "number") {
+      return result;
+    } else if (ArrayBuffer.isView(result)) {
+      return result[0];
+    }
+    console.warn("Unexpected zarr.get result format:", result);
+    return null;
   }
   /**
    * Query data for point or region geometries.
@@ -9459,10 +9546,9 @@ var UntiledMode = class {
           coordinates: coords
         };
       }
-      const pointData = await this.fetchPointData(
+      const pointData = await this.fetchQueryData(
         normalizedSelector,
-        pixel.x,
-        pixel.y
+        { type: "point", x: pixel.x, y: pixel.y }
       );
       if (!pointData) {
         return {
@@ -9544,9 +9630,9 @@ var UntiledMode = class {
         coordinates: { lat: [], lon: [] }
       };
     }
-    const fetched = await this.fetchDataForSelector(
+    const fetched = await this.fetchQueryData(
       normalizedSelector,
-      pixelBounds
+      { type: "bbox", ...pixelBounds }
     );
     if (!fetched) {
       return {

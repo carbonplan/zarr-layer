@@ -13,6 +13,22 @@ import type {
   Selector,
   CRS,
 } from './types'
+import {
+  type ThrottleState,
+  type RequestCanceller,
+  type LoadingManager,
+  createThrottleState,
+  createRequestCanceller,
+  createLoadingManager,
+  getThrottleWaitTime,
+  scheduleThrottledUpdate,
+  markFetchStart,
+  clearThrottle,
+  cancelOlderRequests,
+  cancelAllRequests,
+  setLoadingCallback as setLoadingCallbackUtil,
+  emitLoadingState as emitLoadingStateUtil,
+} from './mode-utils'
 import { ZarrStore } from './zarr-store'
 import { Tiles } from './tiles'
 import {
@@ -55,16 +71,15 @@ export class TiledMode implements ZarrMode {
   private crs: CRS = 'EPSG:4326'
   private xyLimits: XYLimits | null = null
   private tileBounds: Record<string, MercatorBounds> = {}
-  private loadingCallback: LoadingStateCallback | undefined
   private pendingChunks: Set<string> = new Set()
-  private metadataLoading: boolean = false
   private currentLevel: number | null = null
   private selectorVersion: number = 0
-  private pendingControllers: Map<number, AbortController> = new Map()
-  private lastFetchTime: number = 0
-  private throttleTimeout: ReturnType<typeof setTimeout> | null = null
   private throttleMs: number
-  private hasThrottledPending: boolean = false
+
+  // Shared state managers
+  private throttleState: ThrottleState = createThrottleState()
+  private requestCanceller: RequestCanceller = createRequestCanceller()
+  private loadingManager: LoadingManager = createLoadingManager()
 
   constructor(
     store: ZarrStore,
@@ -81,7 +96,7 @@ export class TiledMode implements ZarrMode {
   }
 
   async initialize(): Promise<void> {
-    this.metadataLoading = true
+    this.loadingManager.metadataLoading = true
     this.emitLoadingState()
 
     try {
@@ -106,7 +121,7 @@ export class TiledMode implements ZarrMode {
 
       this.updateGeometryForProjection(false)
     } finally {
-      this.metadataLoading = false
+      this.loadingManager.metadataLoading = false
       this.emitLoadingState()
     }
   }
@@ -145,26 +160,18 @@ export class TiledMode implements ZarrMode {
     }
 
     if (tilesToFetch.length > 0) {
-      // Throttle: if too soon since last fetch, schedule a trailing update (if not already scheduled)
-      const now = Date.now()
-      const timeSinceLastFetch = now - this.lastFetchTime
-      if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+      // Throttle: if too soon since last fetch, schedule a trailing update
+      const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs)
+      if (waitTime > 0) {
         // Set loading state even when throttled so callers know data is pending
-        if (!this.hasThrottledPending) {
-          this.hasThrottledPending = true
+        if (!this.throttleState.throttledPending) {
+          this.throttleState.throttledPending = true
           this.emitLoadingState()
         }
-        // Only schedule if no timeout is already pending
-        if (!this.throttleTimeout) {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null
-            this.hasThrottledPending = false
-            this.invalidate() // Trigger another update cycle
-          }, this.throttleMs - timeSinceLastFetch)
-        }
+        scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate)
         return
       }
-      this.lastFetchTime = now
+      markFetchStart(this.throttleState)
 
       const wasEmpty = this.pendingChunks.size === 0
       for (const tileTuple of tilesToFetch) {
@@ -258,16 +265,8 @@ export class TiledMode implements ZarrMode {
   }
 
   dispose(_gl: WebGL2RenderingContext): void {
-    if (this.throttleTimeout) {
-      clearTimeout(this.throttleTimeout)
-      this.throttleTimeout = null
-    }
-    this.hasThrottledPending = false
-    // Cancel any pending requests
-    for (const controller of this.pendingControllers.values()) {
-      controller.abort()
-    }
-    this.pendingControllers.clear()
+    clearThrottle(this.throttleState)
+    cancelAllRequests(this.requestCanceller)
     this.tileCache?.clear()
     this.tileCache = null
     this.pendingChunks.clear()
@@ -275,7 +274,7 @@ export class TiledMode implements ZarrMode {
   }
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
-    this.loadingCallback = callback
+    setLoadingCallbackUtil(this.loadingManager, callback)
   }
 
   getCRS(): CRS {
@@ -299,14 +298,10 @@ export class TiledMode implements ZarrMode {
   }
 
   private emitLoadingState(): void {
-    if (!this.loadingCallback) return
-    const chunksLoading =
-      this.pendingChunks.size > 0 || this.hasThrottledPending
-    this.loadingCallback({
-      loading: this.metadataLoading || chunksLoading,
-      metadata: this.metadataLoading,
-      chunks: chunksLoading,
-    })
+    // Update chunksLoading state based on pending chunks and throttle state
+    this.loadingManager.chunksLoading =
+      this.pendingChunks.size > 0 || this.throttleState.throttledPending
+    emitLoadingStateUtil(this.loadingManager)
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
@@ -424,7 +419,7 @@ export class TiledMode implements ZarrMode {
   ) {
     // Create AbortController for this version's requests
     const controller = new AbortController()
-    this.pendingControllers.set(version, controller)
+    this.requestCanceller.controllers.set(version, controller)
 
     try {
       const fetchPromises = tiles.map((tiletuple) =>
@@ -432,7 +427,7 @@ export class TiledMode implements ZarrMode {
       )
       await Promise.all(fetchPromises)
     } finally {
-      this.pendingControllers.delete(version)
+      this.requestCanceller.controllers.delete(version)
     }
   }
 
@@ -468,7 +463,7 @@ export class TiledMode implements ZarrMode {
       }
 
       // Cancel all older pending requests since a newer version has completed
-      this.cancelOlderRequests(version)
+      cancelOlderRequests(this.requestCanceller, version)
 
       this.emitLoadingState()
 
@@ -485,15 +480,6 @@ export class TiledMode implements ZarrMode {
         return null
       }
       throw err
-    }
-  }
-
-  private cancelOlderRequests(completedVersion: number) {
-    for (const [version, controller] of this.pendingControllers) {
-      if (version < completedVersion) {
-        controller.abort()
-        this.pendingControllers.delete(version)
-      }
     }
   }
 

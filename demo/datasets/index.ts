@@ -2,6 +2,7 @@ import carbonplan4d from './carbonplan-4d'
 import hurricane from './hurricane'
 import { createSimpleDataset } from './simple'
 import { createTimeDataset } from './time'
+import untiled4326 from './untiled-4326'
 import type { Dataset } from './types'
 
 export const DATASETS: Dataset<any>[] = [
@@ -76,22 +77,10 @@ export const DATASETS: Dataset<any>[] = [
     timeSelectorType: 'index',
     spatialDimensions: { lat: 'nlat', lon: 'nlon' },
     bounds: [-180, -90, 180, 90],
-    latIsAscending: true,
     info: 'Delta FG CO2 (single image, global)',
     sourceInfo: 'v2 single image (global)',
   }),
-  createSimpleDataset({
-    id: 'untiled_2level_4326',
-    source:
-      'https://carbonplan-share.s3.us-west-2.amazonaws.com/scratch/ndpyramid/2-lvl-test-4326.zarr',
-    variable: 'pr',
-    clim: [0, 20],
-    colormap: 'blues',
-    zarrVersion: 3,
-    info: 'Untiled 2-level (EPSG:4326)',
-    sourceInfo:
-      'zarr-conventions/multiscales format. Loads different resolutions based on current zoom.',
-  }),
+  untiled4326,
   createSimpleDataset({
     id: 'untiled_2level_3857',
     source:
@@ -102,7 +91,7 @@ export const DATASETS: Dataset<any>[] = [
     zarrVersion: 3,
     info: 'Untiled 2-level (EPSG:3857)',
     sourceInfo:
-      'zarr-conventions/multiscales format. Loads different resolutions based on current zoom.',
+      'zarr-conventions/multiscales format. Loads different resolutions based on current zoom and requests chunks based on current viewport.',
   }),
 ]
 

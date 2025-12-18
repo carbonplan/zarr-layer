@@ -321,9 +321,10 @@ export function renderMapboxTile({
 
       // Create SingleImageParams-like object for the region
       // Globe rendering uses linear (non-warped) tex coords - shader handles reprojection
-      // For latIsAscending data, apply the flip via texScale/texOffset
-      const baseTexScale: [number, number] = region.latIsAscending ? [1, -1] : [1, 1]
-      const baseTexOffset: [number, number] = region.latIsAscending ? [0, 1] : [0, 0]
+      // Default assumes ascending (like flat map) - only skip flip if explicitly false
+      const isAscending = region.latIsAscending !== false
+      const baseTexScale: [number, number] = isAscending ? [1, -1] : [1, 1]
+      const baseTexOffset: [number, number] = isAscending ? [0, 1] : [0, 0]
 
       // Get or create linear tex coord buffer (computed from vertex positions)
       const linearBuffer = getLinearPixCoordBuffer(context.gl, region)
@@ -337,14 +338,13 @@ export function renderMapboxTile({
         texture: region.texture,
         vertexBuffer: region.vertexBuffer,
         pixCoordBuffer: linearBuffer,
-        pixCoordArr: region.vertexArr, // Not used since geometryVersion=0, but required by interface
         geometryVersion: 0, // Buffer already has correct data, no re-upload needed
         dataVersion: 1, // Already uploaded
         texScale: baseTexScale,
         texOffset: baseTexOffset,
+        clim: uniforms.clim,
       }
 
-      // Don't pass latIsAscending - let it use default V=0 at north, base flip handles inversion
       renderSingleImageToTile(
         renderer,
         context,
@@ -352,7 +352,6 @@ export function renderMapboxTile({
         regionParams,
         region.vertexArr,
         bounds
-        // No latIsAscending parameter - handled via texScale/texOffset
       )
       anyRendered = true
     }
