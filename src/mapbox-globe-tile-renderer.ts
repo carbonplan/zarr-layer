@@ -14,9 +14,45 @@ import {
   type TileTuple,
 } from './map-utils'
 import type { ZarrRenderer } from './zarr-renderer'
-import type { ZarrMode, RenderContext, TileId } from './zarr-mode'
+import type { ZarrMode, RenderContext, TileId, RegionRenderState } from './zarr-mode'
 import type { SingleImageParams } from './renderer-types'
 import { computeTexOverride } from './webgl-utils'
+
+/**
+ * Cache for linear texture coordinate buffers used in globe rendering.
+ * Globe rendering needs linear (non-warped) texture coords - the shader handles reprojection.
+ * We compute these from vertex positions and cache the buffer per region.
+ */
+const linearBufferCache = new WeakMap<RegionRenderState, WebGLBuffer>()
+
+/**
+ * Get or create a linear texture coordinate buffer for globe rendering.
+ * Computes linear coords from vertex positions: u = (x+1)/2, v = (1-y)/2
+ */
+function getLinearPixCoordBuffer(
+  gl: WebGL2RenderingContext,
+  region: RegionRenderState
+): WebGLBuffer {
+  let buffer = linearBufferCache.get(region)
+  if (buffer) return buffer
+
+  // Compute linear tex coords from vertex positions
+  const vertexArr = region.vertexArr
+  const linearCoords = new Float32Array(vertexArr.length)
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const x = vertexArr[i]
+    const y = vertexArr[i + 1]
+    linearCoords[i] = (x + 1) / 2 // u
+    linearCoords[i + 1] = (1 - y) / 2 // v
+  }
+
+  buffer = gl.createBuffer()!
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
+  gl.bufferData(gl.ARRAY_BUFFER, linearCoords, gl.STATIC_DRAW)
+
+  linearBufferCache.set(region, buffer)
+  return buffer
+}
 
 /** Identity matrix for globe rendering (no additional transformation) */
 const IDENTITY_MATRIX = new Float32Array([
@@ -28,6 +64,8 @@ interface MapboxTileRenderParams {
   mode: ZarrMode
   tileId: TileId
   context: RenderContext
+  /** Regions to render (for untiled/region-based modes) */
+  regions?: RegionRenderState[]
 }
 
 /**
@@ -88,7 +126,8 @@ function renderSingleImageToTile(
   tileId: TileId,
   singleImage: SingleImageParams,
   vertexArr: Float32Array,
-  bounds: MercatorBounds
+  bounds: MercatorBounds,
+  latIsAscending?: boolean
 ): void {
   const { colormapTexture, uniforms, customShaderConfig } = context
 
@@ -159,9 +198,21 @@ function renderSingleImageToTile(
 
     // Map crop region's lat range to full image texture coordinates
     // Shader outputs v in [0,1] for crop region; we map to full image space
+    // The calculation depends on whether texture V=0 is at north or south:
+    // - Default (latIsAscending=false): V=0 at north (latMax), V=1 at south (latMin)
+    // - latIsAscending=true: V=0 at south (latMin), V=1 at north (latMax)
     const fullLatRange = bounds.latMax! - bounds.latMin!
-    const vNorth = (bounds.latMax! - cropLatNorth) / fullLatRange
-    const vSouth = (bounds.latMax! - cropLatSouth) / fullLatRange
+    let vNorth: number
+    let vSouth: number
+    if (latIsAscending) {
+      // Texture V=0 at south (latMin), V=1 at north (latMax)
+      vNorth = (cropLatNorth - bounds.latMin!) / fullLatRange
+      vSouth = (cropLatSouth - bounds.latMin!) / fullLatRange
+    } else {
+      // Texture V=0 at north (latMax), V=1 at south (latMin)
+      vNorth = (bounds.latMax! - cropLatNorth) / fullLatRange
+      vSouth = (bounds.latMax! - cropLatSouth) / fullLatRange
+    }
 
     // X mapping is linear in lon/Mercator space
     const imgWidth = bounds.x1 - bounds.x0
@@ -241,16 +292,14 @@ export function renderMapboxTile({
   mode,
   tileId,
   context,
+  regions,
 }: MapboxTileRenderParams): boolean {
   const { colormapTexture, uniforms, customShaderConfig } = context
 
-  // Handle single image (non-tiled) data
-  // This includes both single-level and multi-level UntiledMode datasets
-  const singleImageState = mode.getSingleImageState?.()
-  if (singleImageState) {
-    const { singleImage, vertexArr } = singleImageState
-    const bounds = singleImage.bounds
-    if (!bounds) return false
+  // Handle region-based loading (UntiledMode - both single-level and multi-level)
+  // Single images are treated as one region covering the full extent
+  if (regions) {
+    if (regions.length === 0) return true // Still loading
 
     const tilesPerSide = 2 ** tileId.z
     const tileX0 = tileId.x / tilesPerSide
@@ -258,24 +307,56 @@ export function renderMapboxTile({
     const tileY0 = tileId.y / tilesPerSide
     const tileY1 = (tileId.y + 1) / tilesPerSide
 
-    // Check if image intersects this tile
-    const intersects =
-      bounds.x0 < tileX1 &&
-      bounds.x1 > tileX0 &&
-      bounds.y0 < tileY1 &&
-      bounds.y1 > tileY0
+    let anyRendered = false
+    for (const region of regions) {
+      const bounds = region.mercatorBounds
+      // Check if region intersects this tile
+      const intersects =
+        bounds.x0 < tileX1 &&
+        bounds.x1 > tileX0 &&
+        bounds.y0 < tileY1 &&
+        bounds.y1 > tileY0
 
-    if (!intersects) return false
+      if (!intersects) continue
 
-    renderSingleImageToTile(
-      renderer,
-      context,
-      tileId,
-      singleImage,
-      vertexArr,
-      bounds
-    )
-    return false
+      // Create SingleImageParams-like object for the region
+      // Globe rendering uses linear (non-warped) tex coords - shader handles reprojection
+      // For latIsAscending data, apply the flip via texScale/texOffset
+      const baseTexScale: [number, number] = region.latIsAscending ? [1, -1] : [1, 1]
+      const baseTexOffset: [number, number] = region.latIsAscending ? [0, 1] : [0, 0]
+
+      // Get or create linear tex coord buffer (computed from vertex positions)
+      const linearBuffer = getLinearPixCoordBuffer(context.gl, region)
+
+      const regionParams: SingleImageParams = {
+        data: null, // Already uploaded to texture
+        width: region.width,
+        height: region.height,
+        channels: region.channels,
+        bounds, // Keep latMin/latMax for equirectangular shader
+        texture: region.texture,
+        vertexBuffer: region.vertexBuffer,
+        pixCoordBuffer: linearBuffer,
+        pixCoordArr: region.vertexArr, // Not used since geometryVersion=0, but required by interface
+        geometryVersion: 0, // Buffer already has correct data, no re-upload needed
+        dataVersion: 1, // Already uploaded
+        texScale: baseTexScale,
+        texOffset: baseTexOffset,
+      }
+
+      // Don't pass latIsAscending - let it use default V=0 at north, base flip handles inversion
+      renderSingleImageToTile(
+        renderer,
+        context,
+        tileId,
+        regionParams,
+        region.vertexArr,
+        bounds
+        // No latIsAscending parameter - handled via texScale/texOffset
+      )
+      anyRendered = true
+    }
+    return !anyRendered // Return true if nothing rendered (still loading)
   }
 
   // Handle tiled (pyramid) data

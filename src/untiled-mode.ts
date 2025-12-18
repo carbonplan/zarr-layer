@@ -9,12 +9,7 @@
  */
 
 import * as zarr from 'zarrita'
-import type {
-  ZarrMode,
-  RenderContext,
-  TileId,
-  SingleImageRenderState,
-} from './zarr-mode'
+import type { ZarrMode, RenderContext, TileId, RegionRenderState } from './zarr-mode'
 import type { QueryGeometry, QueryResult } from './query/types'
 import type {
   LoadingStateCallback,
@@ -28,45 +23,50 @@ import type {
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
+  mercatorNormToLat,
   type MercatorBounds,
   type XYLimits,
 } from './map-utils'
 import { loadDimensionValues, normalizeSelector } from './zarr-utils'
-import {
-  mustCreateBuffer,
-  mustCreateTexture,
-  createSubdividedQuad,
-} from './webgl-utils'
-import { SINGLE_IMAGE_TILE_SUBDIVISIONS } from './constants'
-import type { ZarrRenderer } from './zarr-renderer'
-import { isGlobeProjection } from './render-utils'
+import { createSubdividedQuad, normalizeDataForTexture } from './webgl-utils'
+import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
 import { queryRegionSingleImage } from './query/region-query'
 import { mercatorBoundsToPixel } from './query/query-utils'
 import { setObjectValues } from './query/selector-utils'
+import { geoToArrayIndex } from './map-utils'
+
+/** State for a single region (chunk/shard) in region-based loading */
+interface RegionState {
+  key: string
+  regionX: number
+  regionY: number
+  // Data
+  data: Float32Array | null
+  width: number
+  height: number
+  loading: boolean
+  // WebGL resources
+  texture: WebGLTexture | null
+  textureUploaded: boolean
+  vertexBuffer: WebGLBuffer | null
+  pixCoordBuffer: WebGLBuffer | null
+  // Geometry arrays for this region's quad
+  vertexArr: Float32Array | null
+  pixCoordArr: Float32Array | null // Pre-warped for flat map mercator rendering
+  // Mercator bounds for this region (for shader uniforms)
+  mercatorBounds: MercatorBounds | null
+  // Version tracking for selector changes
+  selectorVersion: number
+}
 
 export class UntiledMode implements ZarrMode {
   isMultiscale: boolean = false
 
   // Data state (single-level mode)
-  private data: Float32Array | null = null
   private width: number = 0
   private height: number = 0
   private channels: number = 1
-
-  // WebGL resources
-  private texture: WebGLTexture | null = null
-  private vertexBuffer: WebGLBuffer | null = null
-  private pixCoordBuffer: WebGLBuffer | null = null
-  private vertexArr: Float32Array = new Float32Array()
-  private pixCoordArr: Float32Array = new Float32Array()
-  private currentSubdivisions: number = 0
-  private geometryVersion: number = 0
-  private dataVersion: number = 0
-
-  // Texture transforms
-  private texScale: [number, number] = [1, 1]
-  private texOffset: [number, number] = [0, 0]
 
   // Bounds
   private mercatorBounds: MercatorBounds | null = null
@@ -91,19 +91,32 @@ export class UntiledMode implements ZarrMode {
   private loadingCallback: LoadingStateCallback | undefined
   private isLoadingData: boolean = false
   private metadataLoading: boolean = false
-  private fetchRequestId: number = 0
-  private lastRenderedRequestId: number = 0
-  private pendingControllers: Map<number, AbortController> = new Map()
-  private lastFetchTime: number = 0
   private throttleTimeout: ReturnType<typeof setTimeout> | null = null
-  private throttledFetchPromise: Promise<void> | null = null
   private throttleMs: number
+  private lastFetchTime: number = 0 // For throttling fetches
+  private throttledFetchPromise: Promise<void> | null = null
 
   // Dimension values cache
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
 
   // Data processing
   private clim: [number, number] = [0, 1]
+
+  // Region-based loading (for multi-level datasets with chunking/sharding)
+  private regionCache: Map<string, RegionState> = new Map()
+  private previousRegionCache: Map<string, RegionState> = new Map() // Fallback during level transitions
+  private previousLevelIndex: number = -1 // Track which level the previous cache is from
+  private regionSize: [number, number] | null = null // [height, width] of each region
+  private pendingRegionControllers: Map<number, AbortController> = new Map() // Keyed by request ID
+  private regionFetchRequestId: number = 0 // Incrementing request ID for region fetches
+  private lastViewportHash: string = ''
+  private baseSliceArgs: (number | zarr.Slice)[] = [] // Cached slice args for non-spatial dims
+  private selectorVersion: number = 0 // Incremented on selector change to track stale regions
+
+  // Cached WebGL context for use in setSelector
+  private cachedGl: WebGL2RenderingContext | null = null
+  // Track if base slice args have been built (ready for region fetching)
+  private baseSliceArgsReady: boolean = false
 
   constructor(
     store: ZarrStore,
@@ -151,9 +164,6 @@ export class UntiledMode implements ZarrMode {
       } else {
         console.warn('UntiledMode: No XY limits found')
       }
-
-      this.updateGeometryForProjection(false)
-      this.updateTexTransform()
     } finally {
       this.metadataLoading = false
       this.emitLoadingState()
@@ -173,20 +183,664 @@ export class UntiledMode implements ZarrMode {
     }
   }
 
-  update(map: MapLike, gl: WebGL2RenderingContext): void {
-    if (!this.texture) {
-      this.texture = mustCreateTexture(gl)
-    }
-    if (!this.vertexBuffer) {
-      this.vertexBuffer = mustCreateBuffer(gl)
-    }
-    if (!this.pixCoordBuffer) {
-      this.pixCoordBuffer = mustCreateBuffer(gl)
+  /**
+   * Detect optimal region size from array metadata.
+   * For sharded arrays: use shard chunk_shape
+   * For standard chunked arrays: use array chunks
+   */
+  private getRegionSize(array: zarr.Array<zarr.DataType>): [number, number] | null {
+    const latIdx = this.dimIndices.lat?.index
+    const lonIdx = this.dimIndices.lon?.index
+    if (latIdx === undefined || lonIdx === undefined) return null
+
+    // Check for sharding codec
+    const codecs = (array as any).codecs || []
+    for (const codec of codecs) {
+      if (codec.name === 'sharding_indexed' && codec.configuration?.chunk_shape) {
+        const shardShape = codec.configuration.chunk_shape as number[]
+        return [shardShape[latIdx], shardShape[lonIdx]]
+      }
     }
 
-    const projection = map.getProjection ? map.getProjection() : null
-    const isGlobe = isGlobeProjection(projection)
-    this.updateGeometryForProjection(isGlobe)
+    // Fall back to standard chunks
+    const chunks = array.chunks as number[] | undefined
+    if (chunks && chunks.length > Math.max(latIdx, lonIdx)) {
+      const chunkH = chunks[latIdx]
+      const chunkW = chunks[lonIdx]
+      // Only use region-based loading if chunks are smaller than the array
+      const shape = array.shape as number[]
+      if (chunkH < shape[latIdx] || chunkW < shape[lonIdx]) {
+        return [chunkH, chunkW]
+      }
+    }
+
+    return null // No chunking or single chunk
+  }
+
+  /**
+   * Clear region cache and dispose WebGL resources.
+   */
+  private clearRegionCache(gl: WebGL2RenderingContext): void {
+    this.disposeRegionCache(this.regionCache, gl)
+    this.regionCache.clear()
+    this.lastViewportHash = ''
+  }
+
+  /**
+   * Clear previous region cache (fallback during level transitions).
+   */
+  private clearPreviousRegionCache(gl: WebGL2RenderingContext): void {
+    this.disposeRegionCache(this.previousRegionCache, gl)
+    this.previousRegionCache.clear()
+    this.previousLevelIndex = -1
+  }
+
+  /**
+   * Dispose WebGL resources for a region cache.
+   */
+  private disposeRegionCache(cache: Map<string, RegionState>, gl: WebGL2RenderingContext): void {
+    for (const region of cache.values()) {
+      if (region.texture) gl.deleteTexture(region.texture)
+      if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
+      if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer)
+    }
+  }
+
+  /**
+   * Generic helper to cancel pending requests older than a given ID.
+   */
+  private cancelOlderRequestsInMap(
+    controllers: Map<number, AbortController>,
+    completedRequestId: number
+  ): void {
+    for (const [id, controller] of controllers) {
+      if (id < completedRequestId) {
+        controller.abort()
+        controllers.delete(id)
+      }
+    }
+  }
+
+  /**
+   * Cancel pending region requests older than the given request ID.
+   */
+  private cancelOlderRegionRequests(completedRequestId: number): void {
+    this.cancelOlderRequestsInMap(this.pendingRegionControllers, completedRequestId)
+  }
+
+  /**
+   * Calculate which regions are visible in the current viewport.
+   */
+  private getVisibleRegions(
+    map: MapLike
+  ): Array<{ regionX: number; regionY: number }> {
+    const bounds = map.getBounds?.()?.toArray?.()
+    if (!bounds || !this.xyLimits || !this.regionSize) return []
+
+    const [[west, south], [east, north]] = bounds
+    const { xMin, xMax, yMin, yMax } = this.xyLimits
+    const [regionH, regionW] = this.regionSize
+
+    // Convert geo bounds to pixel indices
+    const xMinIdx = geoToArrayIndex(west, xMin, xMax, this.width)
+    const xMaxIdx = geoToArrayIndex(east, xMin, xMax, this.width)
+
+    // For Y axis, geoToArrayIndex assumes yMin maps to row 0.
+    // But if latIsAscending=false (row 0 = north = yMax), we need to invert.
+    let ySouthIdx = geoToArrayIndex(south, yMin, yMax, this.height)
+    let yNorthIdx = geoToArrayIndex(north, yMin, yMax, this.height)
+
+    // Only invert if we explicitly know latIsAscending is false
+    // If null/undefined, assume ascending (yMin at row 0) as default
+    if (this.latIsAscending === false) {
+      // Invert Y indices: row 0 = north (yMax), row height-1 = south (yMin)
+      ySouthIdx = this.height - 1 - ySouthIdx
+      yNorthIdx = this.height - 1 - yNorthIdx
+    }
+
+    // Convert pixel indices to region indices
+    const regionXMin = Math.floor(Math.min(xMinIdx, xMaxIdx) / regionW)
+    const regionXMax = Math.floor(Math.max(xMinIdx, xMaxIdx) / regionW)
+    const regionYMin = Math.floor(Math.min(ySouthIdx, yNorthIdx) / regionH)
+    const regionYMax = Math.floor(Math.max(ySouthIdx, yNorthIdx) / regionH)
+
+    // Clamp to valid range
+    const numRegionsX = Math.ceil(this.width / regionW)
+    const numRegionsY = Math.ceil(this.height / regionH)
+    const clampedXMin = Math.max(0, regionXMin)
+    const clampedXMax = Math.min(numRegionsX - 1, regionXMax)
+    const clampedYMin = Math.max(0, regionYMin)
+    const clampedYMax = Math.min(numRegionsY - 1, regionYMax)
+
+    // Build list of visible region coordinates
+    const regions: Array<{ regionX: number; regionY: number }> = []
+    for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
+      for (let rx = clampedXMin; rx <= clampedXMax; rx++) {
+        regions.push({ regionX: rx, regionY: ry })
+      }
+    }
+    return regions
+  }
+
+  /**
+   * Create a new region state entry.
+   */
+  private createRegionState(regionX: number, regionY: number): RegionState {
+    return {
+      key: `${regionX},${regionY}`,
+      regionX,
+      regionY,
+      data: null,
+      width: 0,
+      height: 0,
+      loading: false,
+      texture: null,
+      textureUploaded: false,
+      vertexBuffer: null,
+      pixCoordBuffer: null,
+      vertexArr: null,
+      pixCoordArr: null,
+      mercatorBounds: null,
+      selectorVersion: this.selectorVersion,
+    }
+  }
+
+  /**
+   * Get geographic bounds for a region.
+   * Accounts for data orientation (latIsAscending).
+   */
+  private getRegionBounds(
+    regionX: number,
+    regionY: number
+  ): { xMin: number; xMax: number; yMin: number; yMax: number } {
+    if (!this.xyLimits || !this.regionSize) {
+      return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+    }
+
+    const [regionH, regionW] = this.regionSize
+    const { xMin, xMax, yMin, yMax } = this.xyLimits
+
+    // Calculate pixel bounds for this region
+    const pxXStart = regionX * regionW
+    const pxXEnd = Math.min(pxXStart + regionW, this.width)
+    const pxYStart = regionY * regionH
+    const pxYEnd = Math.min(pxYStart + regionH, this.height)
+
+    // Convert pixel bounds to geographic bounds (X is always left-to-right)
+    const geoXMin = xMin + (pxXStart / this.width) * (xMax - xMin)
+    const geoXMax = xMin + (pxXEnd / this.width) * (xMax - xMin)
+
+    // Y mapping depends on data orientation
+    // Default (null/undefined) assumes ascending (row 0 = south = yMin)
+    let geoYMin: number
+    let geoYMax: number
+    if (this.latIsAscending === false) {
+      // Data has lat decreasing with array index: pixel 0 = north (yMax)
+      geoYMax = yMax - (pxYStart / this.height) * (yMax - yMin)
+      geoYMin = yMax - (pxYEnd / this.height) * (yMax - yMin)
+    } else {
+      // Data has lat increasing with array index: pixel 0 = south (yMin)
+      // This is also the default when latIsAscending is null/unknown
+      geoYMin = yMin + (pxYStart / this.height) * (yMax - yMin)
+      geoYMax = yMin + (pxYEnd / this.height) * (yMax - yMin)
+    }
+
+    return { xMin: geoXMin, xMax: geoXMax, yMin: geoYMin, yMax: geoYMax }
+  }
+
+  /**
+   * Calculate the number of subdivisions needed for a region based on its
+   * geographic extent. Larger regions and higher latitudes need more subdivisions
+   * for accurate mercator warping.
+   */
+  private calculateRegionSubdivisions(geoBounds: {
+    xMin: number
+    xMax: number
+    yMin: number
+    yMax: number
+  }): number {
+    let latSpan: number
+    let lonSpan: number
+    let maxAbsLat: number
+
+    if (this.crs === 'EPSG:3857') {
+      // Convert mercator meters to approximate degrees for subdivision calculation
+      const WORLD_EXTENT = 20037508.342789244
+      // Normalize to 0-1 range then to degrees
+      latSpan = (Math.abs(geoBounds.yMax - geoBounds.yMin) / (2 * WORLD_EXTENT)) * 180
+      lonSpan = (Math.abs(geoBounds.xMax - geoBounds.xMin) / (2 * WORLD_EXTENT)) * 360
+      // Approximate max latitude from mercator Y
+      const maxAbsY = Math.max(Math.abs(geoBounds.yMin), Math.abs(geoBounds.yMax))
+      // mercatorY to lat: lat = atan(sinh(y / R)) where R = WORLD_EXTENT / PI
+      const R = WORLD_EXTENT / Math.PI
+      maxAbsLat = Math.abs(Math.atan(Math.sinh(maxAbsY / R)) * (180 / Math.PI))
+    } else {
+      // EPSG:4326 - already in degrees
+      latSpan = Math.abs(geoBounds.yMax - geoBounds.yMin)
+      lonSpan = Math.abs(geoBounds.xMax - geoBounds.xMin)
+      maxAbsLat = Math.max(Math.abs(geoBounds.yMin), Math.abs(geoBounds.yMax))
+    }
+
+    // Base subdivisions on latitude span (more span = more subdivisions)
+    // A full 180° span would need ~64 subdivisions, smaller spans proportionally less
+    let subdivisions = Math.ceil((latSpan / 180) * 64)
+
+    // Boost for high latitudes where mercator distortion is more severe
+    // At 60° latitude, mercator scale is 2x equatorial; at 80° it's ~6x
+    if (maxAbsLat > 60) {
+      const latBoost = 1 + (maxAbsLat - 60) / 25 // Up to 2x boost at 85°
+      subdivisions = Math.ceil(subdivisions * latBoost)
+    }
+
+    // Also consider longitude span for very wide regions
+    const lonFactor = Math.max(1, lonSpan / 180)
+    subdivisions = Math.ceil(subdivisions * Math.sqrt(lonFactor))
+
+    // Clamp to reasonable range: minimum 4, maximum 64
+    return Math.max(4, Math.min(64, subdivisions))
+  }
+
+  /**
+   * Create geometry (vertex positions and tex coords) for a region.
+   * Uses subdivided geometry with pre-warped texture coordinates to account
+   * for mercator distortion (since geometry is in mercator space but texture
+   * is in linear latitude space).
+   */
+  private createRegionGeometry(
+    regionX: number,
+    regionY: number,
+    gl: WebGL2RenderingContext,
+    region: RegionState
+  ): void {
+    const geoBounds = this.getRegionBounds(regionX, regionY)
+    const mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
+
+    // Store mercator bounds for shader uniforms
+    region.mercatorBounds = mercBounds
+
+    // Calculate subdivisions dynamically based on region size and latitude
+    const subdivisions = this.calculateRegionSubdivisions(geoBounds)
+    const subdivided = createSubdividedQuad(subdivisions)
+
+    region.vertexArr = subdivided.vertexArr
+
+    // Pre-warp texture coordinates to account for mercator distortion
+    // (Globe rendering computes linear coords from vertexArr on demand)
+    // For EPSG:4326 data, texture is in linear lat space but geometry is in mercator
+    if (this.crs === 'EPSG:4326') {
+      const warped = new Float32Array(subdivided.texCoordArr.length)
+      const { y0, y1 } = mercBounds
+      const latMin = geoBounds.yMin
+      const latMax = geoBounds.yMax
+      const latRange = latMax - latMin
+
+      for (let i = 0; i < subdivided.vertexArr.length; i += 2) {
+        const u = subdivided.texCoordArr[i]
+        const normY = subdivided.vertexArr[i + 1] // vertex Y in [-1, 1]
+
+        // Compute mercator Y for this vertex
+        // vertex y=-1 maps to y1 (south), y=1 maps to y0 (north)
+        const mercY = y0 + (1 - normY) / 2 * (y1 - y0)
+
+        // Convert mercator Y to latitude
+        const lat = mercatorNormToLat(mercY)
+
+        // Compute texture V for this latitude
+        let v = (lat - latMin) / latRange
+
+        // Handle latIsAscending (only flip if explicitly false, not null)
+        if (this.latIsAscending === false) {
+          // Data row 0 = north (latMax), so flip V
+          v = 1 - v
+        }
+
+        // Clamp to valid range
+        v = Math.max(0, Math.min(1, v))
+
+        warped[i] = u
+        warped[i + 1] = v
+      }
+      region.pixCoordArr = warped
+    } else {
+      // EPSG:3857 - texture is already in mercator space, use linear coords
+      // If latIsAscending (row 0 = south), flip V so V=0 samples north (row N-1)
+      // If not ascending (row 0 = north), use coords as-is
+      region.pixCoordArr = this.latIsAscending
+        ? this.flipTexCoordV(subdivided.texCoordArr)
+        : subdivided.texCoordArr
+    }
+
+    // Create/update buffers
+    if (!region.vertexBuffer) {
+      region.vertexBuffer = gl.createBuffer()
+    }
+    if (!region.pixCoordBuffer) {
+      region.pixCoordBuffer = gl.createBuffer()
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
+    gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
+    gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
+  }
+
+  private flipTexCoordV(texCoords: Float32Array): Float32Array {
+    const flipped = new Float32Array(texCoords.length)
+    for (let i = 0; i < texCoords.length; i += 2) {
+      flipped[i] = texCoords[i]
+      flipped[i + 1] = 1 - texCoords[i + 1]
+    }
+    return flipped
+  }
+
+  /**
+   * Classify a dimension by its name.
+   * Used to identify spatial (lat/lon) vs non-spatial dimensions.
+   */
+  private classifyDimension(dimKey: string): 'lon' | 'lat' | 'time' | 'other' {
+    const key = dimKey.toLowerCase()
+    if (key === 'lon' || key === 'x' || key === 'lng' || key.includes('lon')) {
+      return 'lon'
+    }
+    if (key === 'lat' || key === 'y' || key.includes('lat')) {
+      return 'lat'
+    }
+    if (key.includes('time')) {
+      return 'time'
+    }
+    return 'other'
+  }
+
+  /**
+   * Update visible regions based on current viewport.
+   */
+  private updateVisibleRegions(map: MapLike, gl: WebGL2RenderingContext): void {
+    const visible = this.getVisibleRegions(map)
+
+    // Separate regions into two categories:
+    // 1. New regions (no data) - viewport change, fetch immediately
+    // 2. Stale regions (have data, wrong selector) - selector change, throttle
+    const newRegions: Array<{ regionX: number; regionY: number }> = []
+    const staleRegions: Array<{ regionX: number; regionY: number }> = []
+
+    for (const { regionX, regionY } of visible) {
+      const key = `${regionX},${regionY}`
+      const cached = this.regionCache.get(key)
+
+      // Skip if already loading - when the load completes, invalidate() triggers
+      // another updateVisibleRegions() check to see if refetch is needed
+      if (cached?.loading) {
+        continue
+      }
+
+      if (!cached?.data) {
+        // No data yet - this is a new region (viewport change)
+        newRegions.push({ regionX, regionY })
+      } else if (cached.selectorVersion !== this.selectorVersion) {
+        // Has data but stale selector - this is a selector change
+        staleRegions.push({ regionX, regionY })
+      }
+    }
+
+    // Check if viewport changed (include selectorVersion in hash to detect selector changes)
+    const viewportHash = `${this.selectorVersion}:${visible.map((r) => `${r.regionX},${r.regionY}`).join('|')}`
+    const viewportChanged = viewportHash !== this.lastViewportHash
+    this.lastViewportHash = viewportHash
+
+    // Skip if nothing to do
+    if (newRegions.length === 0 && staleRegions.length === 0 && !viewportChanged) {
+      return
+    }
+
+    // Fetch new regions immediately (viewport changes - no throttle)
+    if (newRegions.length > 0) {
+      this.fetchRegions(newRegions, gl)
+    }
+
+    // Fetch stale regions with throttle (selector changes)
+    if (staleRegions.length > 0) {
+      this.fetchRegionsThrottled(staleRegions, gl)
+    }
+
+    // Clear previous level cache once all visible regions are loaded with current selector
+    if (this.previousRegionCache.size > 0 && newRegions.length === 0 && staleRegions.length === 0) {
+      this.clearPreviousRegionCache(gl)
+    }
+  }
+
+  /**
+   * Fetch regions with throttling (for selector changes).
+   */
+  private fetchRegionsThrottled(
+    regions: Array<{ regionX: number; regionY: number }>,
+    gl: WebGL2RenderingContext
+  ): void {
+    const now = Date.now()
+    const timeSinceLastFetch = now - this.lastFetchTime
+    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
+      // Set loading state even when throttled so callers know data is pending
+      this.isLoadingData = true
+      this.emitLoadingState()
+
+      // Only schedule if no timeout is already pending
+      if (!this.throttledFetchPromise) {
+        this.throttledFetchPromise = new Promise<void>((resolve) => {
+          this.throttleTimeout = setTimeout(() => {
+            this.throttleTimeout = null
+            this.throttledFetchPromise = null
+            // Re-trigger update to fetch with current state
+            this.invalidate()
+            resolve()
+          }, this.throttleMs - timeSinceLastFetch)
+        })
+      }
+      return
+    }
+    this.lastFetchTime = now
+
+    // Actually fetch the regions
+    this.fetchRegions(regions, gl)
+  }
+
+  /**
+   * Fetch multiple regions with limited concurrency to avoid overwhelming the browser.
+   */
+  private async fetchRegions(
+    regions: Array<{ regionX: number; regionY: number }>,
+    gl: WebGL2RenderingContext
+  ): Promise<void> {
+    // Emit loading state
+    this.isLoadingData = true
+    this.emitLoadingState()
+
+    // Mark ALL regions as loading upfront to prevent duplicate fetches
+    // from subsequent update() calls before we've processed them all
+    for (const { regionX, regionY } of regions) {
+      const key = `${regionX},${regionY}`
+      let region = this.regionCache.get(key)
+      if (!region) {
+        region = this.createRegionState(regionX, regionY)
+        this.regionCache.set(key, region)
+      }
+      region.loading = true
+    }
+
+    // Limit concurrent fetches to avoid ERR_INSUFFICIENT_RESOURCES
+    const MAX_CONCURRENT = 6
+    const executing: Promise<void>[] = []
+
+    for (const region of regions) {
+      const promise = this.fetchRegion(region.regionX, region.regionY, gl)
+        .then(() => {
+          executing.splice(executing.indexOf(promise), 1)
+        })
+        .catch(() => {
+          executing.splice(executing.indexOf(promise), 1)
+        })
+
+      executing.push(promise)
+
+      if (executing.length >= MAX_CONCURRENT) {
+        await Promise.race(executing)
+      }
+    }
+
+    // Wait for remaining requests
+    await Promise.allSettled(executing)
+
+    // Check if any regions are still loading
+    let stillLoading = false
+    for (const controller of this.pendingRegionControllers.values()) {
+      if (!controller.signal.aborted) {
+        stillLoading = true
+        break
+      }
+    }
+    if (!stillLoading) {
+      this.isLoadingData = false
+      this.emitLoadingState()
+    }
+  }
+
+  /**
+   * Fetch data for a single region.
+   */
+  private async fetchRegion(
+    regionX: number,
+    regionY: number,
+    gl: WebGL2RenderingContext
+  ): Promise<void> {
+    if (!this.zarrArray || !this.regionSize || this.isRemoved) {
+      return
+    }
+
+    const key = `${regionX},${regionY}`
+    const requestId = ++this.regionFetchRequestId
+    const fetchSelectorVersion = this.selectorVersion // Capture current version
+
+    const controller = new AbortController()
+    this.pendingRegionControllers.set(requestId, controller)
+
+    let region = this.regionCache.get(key)
+    if (!region) {
+      region = this.createRegionState(regionX, regionY)
+      this.regionCache.set(key, region)
+    }
+    region.loading = true
+
+    const [regionH, regionW] = this.regionSize
+
+    // Calculate pixel bounds for this region
+    const yStart = regionY * regionH
+    const yEnd = Math.min(yStart + regionH, this.height)
+    const xStart = regionX * regionW
+    const xEnd = Math.min(xStart + regionW, this.width)
+    const actualW = xEnd - xStart
+    const actualH = yEnd - yStart
+
+    try {
+      // Build slice args with spatial region bounds
+      const sliceArgs = [...this.baseSliceArgs]
+      const latIdx = this.dimIndices.lat.index
+      const lonIdx = this.dimIndices.lon.index
+      sliceArgs[latIdx] = zarr.slice(yStart, yEnd)
+      sliceArgs[lonIdx] = zarr.slice(xStart, xEnd)
+
+      // Fetch data - zarrita handles sharding/chunking transparently
+      const result = (await zarr.get(this.zarrArray, sliceArgs, {
+        opts: { signal: controller.signal },
+      })) as { data: ArrayLike<number> }
+
+      if (controller.signal.aborted || this.isRemoved) {
+        region.loading = false
+        return
+      }
+
+      // Only render if this is newer than what's already rendered for this region
+      // This allows incremental progress - older data renders first, newer replaces it
+      if (fetchSelectorVersion < region.selectorVersion) {
+        // Older data arrived after newer - skip it
+        region.loading = false
+        return
+      }
+
+      // Update region's selector version and cancel any older pending requests
+      region.selectorVersion = fetchSelectorVersion
+      this.cancelOlderRegionRequests(requestId)
+
+      // Store raw data and normalize for texture
+      const rawData = new Float32Array(result.data as ArrayLike<number>)
+      const desc = this.zarrStore.describe()
+      const fillValue = desc.fill_value
+      const { normalized } = normalizeDataForTexture(rawData, fillValue, this.clim)
+
+      region.data = normalized
+      region.width = actualW
+      region.height = actualH
+      region.loading = false
+
+      // Create texture for this region
+      if (!region.texture) {
+        region.texture = gl.createTexture()
+      }
+      gl.bindTexture(gl.TEXTURE_2D, region.texture)
+
+      // Determine texture format based on channels
+      const { format, internalFormat } = this.getTextureFormats(gl, this.channels)
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        internalFormat,
+        actualW,
+        actualH,
+        0,
+        format,
+        gl.FLOAT,
+        normalized
+      )
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+      region.textureUploaded = true
+
+      // Create geometry for this region
+      this.createRegionGeometry(regionX, regionY, gl, region)
+
+      this.invalidate()
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        console.error(`[fetchRegion] Error fetching region ${key}:`, err)
+      }
+      region.loading = false
+    } finally {
+      this.pendingRegionControllers.delete(requestId)
+    }
+  }
+
+  /**
+   * Get texture formats based on channel count.
+   */
+  private getTextureFormats(
+    gl: WebGL2RenderingContext,
+    channels: number
+  ): { format: number; internalFormat: number } {
+    switch (channels) {
+      case 1:
+        return { format: gl.RED, internalFormat: gl.R32F }
+      case 2:
+        return { format: gl.RG, internalFormat: gl.RG32F }
+      case 3:
+        return { format: gl.RGB, internalFormat: gl.RGB32F }
+      case 4:
+      default:
+        return { format: gl.RGBA, internalFormat: gl.RGBA32F }
+    }
+  }
+
+  update(map: MapLike, gl: WebGL2RenderingContext): void {
+    // Cache gl context for use in setSelector
+    this.cachedGl = gl
 
     // For multi-level datasets, select/switch levels based on zoom
     if (this.isMultiscale && this.levels.length > 0) {
@@ -196,30 +850,50 @@ export class UntiledMode implements ZarrMode {
       // Initial load or level switch needed
       if (this.currentLevelIndex === -1) {
         // First time - load the appropriate level for current zoom
-        this.initializeLevel(bestLevelIndex)
+        this.initializeLevel(bestLevelIndex, gl)
         return
       } else if (bestLevelIndex !== this.currentLevelIndex) {
         // Zoom changed enough to warrant level switch
-        this.switchToLevel(bestLevelIndex)
+        this.switchToLevel(bestLevelIndex, gl)
         return
       }
-    }
 
-    // Fetch data if not already loaded (single-level datasets)
-    if (!this.data && !this.isLoadingData) {
-      this.fetchData().then(() => {
-        this.invalidate()
-      })
+      // Update visible regions on viewport change (only if ready)
+      if (this.regionSize && this.baseSliceArgsReady) {
+        this.updateVisibleRegions(map, gl)
+      }
+    } else {
+      // Single-level dataset - set up region-based loading if not already done
+      if (!this.regionSize && this.zarrArray && !this.isLoadingData) {
+        const detectedRegionSize = this.getRegionSize(this.zarrArray)
+        this.regionSize = detectedRegionSize ?? [this.height, this.width]
+
+        // Build base slice args and let updateVisibleRegions handle loading
+        this.buildBaseSliceArgs().then(() => {
+          this.updateVisibleRegions(map, gl)
+        })
+        return
+      }
+
+      // Update visible regions for single-level dataset (only if ready)
+      if (this.regionSize && this.baseSliceArgsReady) {
+        this.updateVisibleRegions(map, gl)
+      }
     }
   }
 
-  private async initializeLevel(levelIndex: number): Promise<void> {
-    if (levelIndex < 0 || levelIndex >= this.levels.length) return
-    if (this.isLoadingData) return
+  private async initializeLevel(
+    levelIndex: number,
+    gl?: WebGL2RenderingContext
+  ): Promise<void> {
+    if (levelIndex < 0 || levelIndex >= this.levels.length) {
+      return
+    }
+    if (this.isLoadingData) {
+      return
+    }
 
     const level = this.levels[levelIndex]
-    console.log(`Initializing with level ${levelIndex} (${level.asset})`)
-
     this.currentLevelIndex = levelIndex
 
     try {
@@ -227,11 +901,66 @@ export class UntiledMode implements ZarrMode {
       this.width = this.zarrArray.shape[this.dimIndices.lon.index]
       this.height = this.zarrArray.shape[this.dimIndices.lat.index]
 
-      await this.fetchData()
+      // Always use region-based loading for unified rendering path
+      // If no chunk/shard boundaries, treat whole level as one region
+      const detectedRegionSize = this.getRegionSize(this.zarrArray)
+      this.regionSize = detectedRegionSize ?? [this.height, this.width]
+      this.regionCache.clear()
+
+      // Build base slice args for non-spatial dimensions
+      await this.buildBaseSliceArgs()
+
+      // Let update() trigger viewport-aware loading
       this.invalidate()
     } catch (err) {
       console.error(`Failed to initialize level ${level.asset}:`, err)
     }
+  }
+
+  /**
+   * Build base slice args for non-spatial dimensions.
+   * This caches the selector values for use in region fetching.
+   */
+  private async buildBaseSliceArgs(): Promise<void> {
+    if (!this.zarrArray) return
+
+    this.baseSliceArgsReady = false
+    this.baseSliceArgs = new Array(this.zarrArray.shape.length).fill(0)
+    const dimNames = Object.keys(this.dimIndices)
+
+    for (const dimName of dimNames) {
+      const dimInfo = this.dimIndices[dimName]
+      const dimType = this.classifyDimension(dimName)
+
+      if (dimType === 'lon' || dimType === 'lat') {
+        // Spatial dimensions will be filled in per-region
+        this.baseSliceArgs[dimInfo.index] = 0 // placeholder
+      } else {
+        // Non-spatial dimensions: resolve selector value
+        const selectionSpec =
+          this.selector[dimName] ||
+          (dimType === 'time' ? this.selector['time'] : undefined)
+
+        if (selectionSpec !== undefined) {
+          const selectionValue = selectionSpec.selected
+          const selectionType = selectionSpec.type
+          const primaryValue = Array.isArray(selectionValue)
+            ? selectionValue[0]
+            : selectionValue
+
+          this.baseSliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
+            dimName,
+            dimInfo,
+            primaryValue,
+            selectionType
+          )
+        } else {
+          this.baseSliceArgs[dimInfo.index] = 0
+        }
+      }
+    }
+
+    this.baseSliceArgsReady = true
   }
 
   private selectLevelForZoom(mapZoom: number): number {
@@ -282,187 +1011,59 @@ export class UntiledMode implements ZarrMode {
     return levelResolutions[levelResolutions.length - 1].index
   }
 
-  private async switchToLevel(newLevelIndex: number): Promise<void> {
+  private async switchToLevel(
+    newLevelIndex: number,
+    gl?: WebGL2RenderingContext
+  ): Promise<void> {
     if (newLevelIndex === this.currentLevelIndex) return
     if (newLevelIndex < 0 || newLevelIndex >= this.levels.length) return
     if (this.isLoadingData) return // Don't interrupt ongoing load
 
     const level = this.levels[newLevelIndex]
-    console.log(`Switching to level ${newLevelIndex} (${level.asset})`)
 
+    // Cancel any pending region requests
+    for (const controller of this.pendingRegionControllers.values()) {
+      controller.abort()
+    }
+    this.pendingRegionControllers.clear()
+
+    const oldLevelIndex = this.currentLevelIndex
     this.currentLevelIndex = newLevelIndex
-    // Keep this.data intact - previous level stays visible while loading
 
     try {
       const newArray = await this.zarrStore.getLevelArray(level.asset)
       const newWidth = newArray.shape[this.dimIndices.lon.index]
       const newHeight = newArray.shape[this.dimIndices.lat.index]
 
-      // Fetch new data into temporary storage
-      const result = await this.fetchDataForLevel(newArray, newWidth, newHeight)
+      // Always use region-based loading for unified rendering path
+      // If no chunk/shard boundaries, treat whole level as one region
+      const detectedRegionSize = this.getRegionSize(newArray)
+      const newRegionSize: [number, number] = detectedRegionSize ?? [newHeight, newWidth]
 
-      if (result && !this.isRemoved) {
-        // Atomic swap - only update state when new data is fully ready
-        this.zarrArray = newArray
-        this.width = newWidth
-        this.height = newHeight
-        this.data = result.data
-        this.channels = result.channels
-        this.dataVersion++
-        this.invalidate()
-      }
+      // Move current regions to previous cache (for fallback during transition)
+      // Clear any existing previous cache first
+      this.clearPreviousRegionCache(gl)
+      this.previousRegionCache = this.regionCache
+      this.previousLevelIndex = oldLevelIndex
+      this.regionCache = new Map()
+
+      this.zarrArray = newArray
+      this.width = newWidth
+      this.height = newHeight
+      this.regionSize = newRegionSize
+      this.lastViewportHash = '' // Force viewport recalculation
+
+      // Build base slice args for non-spatial dimensions
+      await this.buildBaseSliceArgs()
+
+      // Let update() trigger viewport-aware loading
+      this.invalidate()
     } catch (err) {
       console.error(`Failed to switch to level ${level.asset}:`, err)
     }
   }
 
-  private async fetchDataForLevel(
-    array: zarr.Array<zarr.DataType>,
-    width: number,
-    height: number
-  ): Promise<{ data: Float32Array; channels: number } | null> {
-    this.isLoadingData = true
-    this.emitLoadingState()
-
-    try {
-      const baseSliceArgs: (number | zarr.Slice)[] = new Array(
-        array.shape.length
-      ).fill(0)
-
-      const multiValueDims: Array<{
-        dimIndex: number
-        dimName: string
-        values: number[]
-        labels: (number | string)[]
-      }> = []
-
-      const dimNames = Object.keys(this.dimIndices)
-
-      for (const dimName of dimNames) {
-        const dimInfo = this.dimIndices[dimName]
-        const dimKey = dimName.toLowerCase()
-
-        const isLon =
-          dimKey === 'lon' ||
-          dimKey === 'x' ||
-          dimKey === 'lng' ||
-          dimKey.includes('lon')
-        const isLat =
-          dimKey === 'lat' || dimKey === 'y' || dimKey.includes('lat')
-
-        if (isLon) {
-          baseSliceArgs[dimInfo.index] = zarr.slice(0, width)
-        } else if (isLat) {
-          baseSliceArgs[dimInfo.index] = zarr.slice(0, height)
-        } else {
-          const selectionSpec =
-            this.selector[dimName] ||
-            (dimKey.includes('time') ? this.selector['time'] : undefined)
-          if (selectionSpec !== undefined) {
-            const selectionValue = selectionSpec.selected
-            const selectionType = selectionSpec.type
-
-            // Handle multi-value selectors (multiple bands/channels)
-            if (Array.isArray(selectionValue) && selectionValue.length > 1) {
-              const resolvedIndices: number[] = []
-              const labelValues: (number | string)[] = []
-              for (const val of selectionValue) {
-                const idx = await this.resolveSelectionIndex(
-                  dimName,
-                  dimInfo,
-                  val,
-                  selectionType
-                )
-                resolvedIndices.push(idx)
-                labelValues.push(val)
-              }
-              multiValueDims.push({
-                dimIndex: dimInfo.index,
-                dimName,
-                values: resolvedIndices,
-                labels: labelValues,
-              })
-              baseSliceArgs[dimInfo.index] = resolvedIndices[0]
-            } else {
-              const primaryValue = Array.isArray(selectionValue)
-                ? selectionValue[0]
-                : selectionValue
-              baseSliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
-                dimName,
-                dimInfo,
-                primaryValue,
-                selectionType
-              )
-            }
-          } else {
-            baseSliceArgs[dimInfo.index] = 0
-          }
-        }
-      }
-
-      // Build channel combinations from multi-value dimensions
-      let channelCombinations: number[][] = [[]]
-      for (const { values } of multiValueDims) {
-        const next: number[][] = []
-        for (const val of values) {
-          for (const combo of channelCombinations) {
-            next.push([...combo, val])
-          }
-        }
-        channelCombinations = next
-      }
-
-      const numChannels = channelCombinations.length || 1
-
-      if (numChannels === 1) {
-        const result = (await zarr.get(array, baseSliceArgs)) as {
-          data: ArrayLike<number>
-        }
-        return {
-          data: new Float32Array((result.data as Float32Array).buffer),
-          channels: 1,
-        }
-      } else {
-        // Multi-channel: fetch each band and pack interleaved
-        const packedData = new Float32Array(width * height * numChannels)
-
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs]
-          const combo = channelCombinations[c]
-
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i]
-          }
-
-          const bandData = (await zarr.get(array, sliceArgs)) as {
-            data: ArrayLike<number>
-          }
-
-          const bandArray = new Float32Array(
-            (bandData.data as Float32Array).buffer
-          )
-          for (let pixIdx = 0; pixIdx < width * height; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
-          }
-        }
-
-        return { data: packedData, channels: numChannels }
-      }
-    } catch (err) {
-      if (!(err instanceof DOMException && err.name === 'AbortError')) {
-        console.error('Error fetching level data:', err)
-      }
-      return null
-    } finally {
-      this.isLoadingData = false
-      this.emitLoadingState()
-    }
-  }
-
   render(renderer: ZarrRenderer, context: RenderContext): void {
-    const singleImageState = this.getSingleImageState()
-    if (!singleImageState) return
-
     const useMapboxGlobe = !!context.mapboxGlobe
     const shaderProgram = renderer.getProgram(
       context.shaderData,
@@ -483,28 +1084,76 @@ export class UntiledMode implements ZarrMode {
       false
     )
 
-    const bounds = singleImageState.singleImage.bounds
-    if (bounds) {
-      if (shaderProgram.isEquirectangularLoc) {
-        renderer.gl.uniform1i(
-          shaderProgram.isEquirectangularLoc,
-          bounds.latMin !== undefined ? 1 : 0
-        )
-      }
-      if (shaderProgram.latMinLoc && bounds.latMin !== undefined) {
-        renderer.gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin)
-      }
-      if (shaderProgram.latMaxLoc && bounds.latMax !== undefined) {
-        renderer.gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax)
-      }
+    // Always use region-based rendering (unified path)
+    this.renderRegions(renderer, shaderProgram, context.worldOffsets)
+  }
+
+  /**
+   * Render all loaded regions.
+   * Uses getRegionStates() to include both current and fallback regions.
+   * Note: Regions have geometry already positioned in mercator space,
+   * so we disable the equirectangular shader correction to avoid double transformation.
+   */
+  private renderRegions(
+    renderer: ZarrRenderer,
+    shaderProgram: ShaderProgram,
+    worldOffsets: number[]
+  ): void {
+    const gl = renderer.gl
+
+    // Disable equirectangular mode for regions - geometry is already in mercator space
+    if (shaderProgram.isEquirectangularLoc) {
+      gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
     }
 
-    renderer.renderSingleImage(
-      shaderProgram,
-      context.worldOffsets,
-      singleImageState.singleImage,
-      singleImageState.vertexArr
-    )
+    // Get all regions including fallback from previous level
+    const regionStates = this.getRegionStates()
+
+    // Render each region
+    for (const region of regionStates) {
+      const bounds = region.mercatorBounds
+
+      // Compute scale and shift from mercator bounds
+      // Transform: final = vertex * scale + shift
+      // vertex range is [-1, 1], maps to [x0, x1]
+      const scaleX = (bounds.x1 - bounds.x0) / 2
+      const scaleY = (bounds.y1 - bounds.y0) / 2
+      const shiftX = (bounds.x0 + bounds.x1) / 2
+      const shiftY = (bounds.y0 + bounds.y1) / 2
+
+      gl.uniform1f(shaderProgram.scaleLoc, 0)
+      gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
+      gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
+      gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
+      gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+
+      // For flat map, pixCoordArr already accounts for latIsAscending via pre-warping,
+      // so use identity texture transform (no additional flip needed)
+      gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)
+      gl.uniform2f(shaderProgram.texOffsetLoc, 0.0, 0.0)
+
+      // Bind vertex buffer
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
+      gl.enableVertexAttribArray(shaderProgram.vertexLoc)
+      gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0)
+
+      // Bind texture coordinate buffer (use warped pixCoordBuffer for flat map)
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
+      gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
+      gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+
+      // Bind texture
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, region.texture)
+      gl.uniform1i(shaderProgram.texLoc, 0)
+
+      // Draw for each world offset (for map wrapping)
+      const vertexCount = region.vertexArr.length / 2
+      for (const worldOffset of worldOffsets) {
+        gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, vertexCount)
+      }
+    }
   }
 
   renderToTile(
@@ -517,40 +1166,69 @@ export class UntiledMode implements ZarrMode {
       mode: this,
       tileId,
       context,
+      regions: this.getRegionStates(),
     })
   }
 
-  onProjectionChange(isGlobe: boolean): void {
-    this.updateGeometryForProjection(isGlobe)
+  onProjectionChange(_isGlobe: boolean): void {
+    // No-op: regions handle their own geometry
   }
 
   getTiledState() {
     return null
   }
 
-  getSingleImageState(): SingleImageRenderState | null {
-    if (!this.texture || !this.vertexBuffer || !this.pixCoordBuffer) {
-      return null
+  /**
+   * Get render states for all loaded regions (for multi-region rendering).
+   * Includes previous level regions as fallback during level transitions.
+   */
+  private getRegionStates(): RegionRenderState[] {
+    // Return empty if not yet initialized (regionSize not set)
+    if (!this.regionSize) {
+      return []
     }
-    return {
-      singleImage: {
-        data: this.data,
-        width: this.width,
-        height: this.height,
-        channels: this.channels,
-        bounds: this.mercatorBounds,
-        texture: this.texture,
-        vertexBuffer: this.vertexBuffer,
-        pixCoordBuffer: this.pixCoordBuffer,
-        pixCoordArr: this.pixCoordArr,
-        geometryVersion: this.geometryVersion,
-        dataVersion: this.dataVersion,
-        texScale: this.texScale,
-        texOffset: this.texOffset,
-        clim: this.clim,
-      },
-      vertexArr: this.vertexArr,
+
+    const states: RegionRenderState[] = []
+
+    // Helper to check if a region is valid for rendering
+    const isRegionValid = (region: RegionState): boolean => {
+      return !!(region.data &&
+        region.textureUploaded &&
+        region.texture &&
+        region.vertexBuffer &&
+        region.pixCoordBuffer &&
+        region.vertexArr &&
+        region.mercatorBounds)
     }
+
+    // Helper to create render state from region
+    const createRenderState = (region: RegionState): RegionRenderState => ({
+      texture: region.texture!,
+      vertexBuffer: region.vertexBuffer!,
+      pixCoordBuffer: region.pixCoordBuffer!,
+      vertexArr: region.vertexArr!,
+      mercatorBounds: region.mercatorBounds!,
+      width: region.width,
+      height: region.height,
+      channels: this.channels,
+      latIsAscending: this.latIsAscending ?? undefined,
+    })
+
+    // First, add previous level regions as fallback (rendered first/underneath)
+    for (const region of this.previousRegionCache.values()) {
+      if (isRegionValid(region)) {
+        states.push(createRenderState(region))
+      }
+    }
+
+    // Then add current level regions (rendered on top)
+    for (const region of this.regionCache.values()) {
+      if (isRegionValid(region)) {
+        states.push(createRenderState(region))
+      }
+    }
+
+    return states
   }
 
   dispose(gl: WebGL2RenderingContext): void {
@@ -560,18 +1238,15 @@ export class UntiledMode implements ZarrMode {
       this.throttleTimeout = null
     }
     this.throttledFetchPromise = null
-    // Cancel any pending requests
-    for (const controller of this.pendingControllers.values()) {
+    // Cancel pending region requests
+    for (const controller of this.pendingRegionControllers.values()) {
       controller.abort()
     }
-    this.pendingControllers.clear()
-    if (this.texture) gl.deleteTexture(this.texture)
-    if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer)
-    if (this.pixCoordBuffer) gl.deleteBuffer(this.pixCoordBuffer)
-    this.texture = null
-    this.vertexBuffer = null
-    this.pixCoordBuffer = null
-    this.data = null
+    this.pendingRegionControllers.clear()
+    // Clean up region caches
+    this.clearRegionCache(gl)
+    this.clearPreviousRegionCache(gl)
+    this.regionSize = null
     this.isLoadingData = false
     this.emitLoadingState()
   }
@@ -602,30 +1277,29 @@ export class UntiledMode implements ZarrMode {
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
-    await this.fetchData()
-  }
 
-  private updateGeometryForProjection(isGlobe: boolean) {
-    const targetSubdivisions = isGlobe ? SINGLE_IMAGE_TILE_SUBDIVISIONS : 1
-    if (this.currentSubdivisions === targetSubdivisions) return
+    // Use cached gl context (always available after first update())
+    const gl = this.cachedGl
 
-    const subdivided = createSubdividedQuad(targetSubdivisions)
-    this.vertexArr = subdivided.vertexArr
-    this.pixCoordArr = subdivided.texCoordArr
-    this.currentSubdivisions = targetSubdivisions
-    this.geometryVersion += 1
-    this.invalidate()
-  }
-
-  private updateTexTransform() {
-    if (this.latIsAscending) {
-      this.texScale = [1, -1]
-      this.texOffset = [0, 1]
+    if (this.regionSize && gl) {
+      // Region-based loading is active - update state and invalidate
+      // (throttling happens in fetchRegions)
+      this.selectorVersion++
+      await this.buildBaseSliceArgs()
+      this.lastViewportHash = '' // Force viewport recalculation
+      this.invalidate()
+    } else if (gl && this.zarrArray) {
+      // First time setup - initialize region size (no throttle)
+      const detectedRegionSize = this.getRegionSize(this.zarrArray)
+      this.regionSize = detectedRegionSize ?? [this.height, this.width]
+      this.selectorVersion++
+      await this.buildBaseSliceArgs()
+      this.lastViewportHash = ''
+      this.invalidate()
     } else {
-      this.texScale = [1, 1]
-      this.texOffset = [0, 0]
+      // No gl context yet - selector is stored, update() will handle loading
+      this.invalidate()
     }
-    this.geometryVersion += 1
   }
 
   private emitLoadingState(): void {
@@ -635,207 +1309,6 @@ export class UntiledMode implements ZarrMode {
       metadata: this.metadataLoading,
       chunks: this.isLoadingData,
     })
-  }
-
-  private async fetchData(): Promise<void> {
-    if (!this.zarrArray || this.isRemoved) return
-
-    // Throttle: if too soon since last fetch, schedule a trailing fetch
-    const now = Date.now()
-    const timeSinceLastFetch = now - this.lastFetchTime
-    if (this.throttleMs > 0 && timeSinceLastFetch < this.throttleMs) {
-      this.isLoadingData = true
-      this.emitLoadingState()
-
-      if (!this.throttledFetchPromise) {
-        this.throttledFetchPromise = new Promise((resolve) => {
-          this.throttleTimeout = setTimeout(() => {
-            this.throttleTimeout = null
-            this.throttledFetchPromise = null
-            this.fetchData().then(resolve)
-          }, this.throttleMs - timeSinceLastFetch)
-        })
-      }
-      return this.throttledFetchPromise
-    }
-    this.lastFetchTime = now
-
-    const requestId = ++this.fetchRequestId
-    const controller = new AbortController()
-    this.pendingControllers.set(requestId, controller)
-    const signal = controller.signal
-
-    this.isLoadingData = true
-    this.emitLoadingState()
-
-    try {
-      const baseSliceArgs: (number | zarr.Slice)[] = new Array(
-        this.zarrArray.shape.length
-      ).fill(0)
-
-      const multiValueDims: Array<{
-        dimIndex: number
-        dimName: string
-        values: number[]
-        labels: (number | string)[]
-      }> = []
-
-      const dimNames = Object.keys(this.dimIndices)
-
-      for (const dimName of dimNames) {
-        const dimInfo = this.dimIndices[dimName]
-        const dimKey = dimName.toLowerCase()
-
-        const isLon =
-          dimKey === 'lon' ||
-          dimKey === 'x' ||
-          dimKey === 'lng' ||
-          dimKey.includes('lon')
-        const isLat =
-          dimKey === 'lat' || dimKey === 'y' || dimKey.includes('lat')
-
-        if (isLon) {
-          baseSliceArgs[dimInfo.index] = zarr.slice(0, this.width)
-        } else if (isLat) {
-          baseSliceArgs[dimInfo.index] = zarr.slice(0, this.height)
-        } else {
-          const selectionSpec =
-            this.selector[dimName] ||
-            (dimKey.includes('time') ? this.selector['time'] : undefined) ||
-            (dimKey.includes('lat') ? this.selector['lat'] : undefined) ||
-            (dimKey.includes('lon') || dimKey.includes('lng')
-              ? this.selector['lon']
-              : undefined)
-          if (selectionSpec !== undefined) {
-            const selectionValue = selectionSpec.selected
-            const selectionType = selectionSpec.type
-
-            if (Array.isArray(selectionValue) && selectionValue.length > 1) {
-              const resolvedIndices: number[] = []
-              const labelValues: (number | string)[] = []
-              for (const val of selectionValue) {
-                const idx = await this.resolveSelectionIndex(
-                  dimName,
-                  dimInfo,
-                  val,
-                  selectionType
-                )
-                resolvedIndices.push(idx)
-                labelValues.push(val)
-              }
-              multiValueDims.push({
-                dimIndex: dimInfo.index,
-                dimName,
-                values: resolvedIndices,
-                labels: labelValues,
-              })
-              baseSliceArgs[dimInfo.index] = resolvedIndices[0]
-            } else {
-              const primaryValue = Array.isArray(selectionValue)
-                ? selectionValue[0]
-                : selectionValue
-
-              baseSliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
-                dimName,
-                dimInfo,
-                primaryValue,
-                selectionType
-              )
-            }
-          } else {
-            baseSliceArgs[dimInfo.index] = 0
-          }
-        }
-      }
-
-      let channelCombinations: number[][] = [[]]
-      let channelLabelCombinations: (number | string)[][] = [[]]
-      for (const { values, labels } of multiValueDims) {
-        const next: number[][] = []
-        const nextLabels: (number | string)[][] = []
-        for (let idx = 0; idx < values.length; idx++) {
-          const val = values[idx]
-          const label = labels[idx]
-          for (let c = 0; c < channelCombinations.length; c++) {
-            next.push([...channelCombinations[c], val])
-            nextLabels.push([...channelLabelCombinations[c], label])
-          }
-        }
-        channelCombinations = next
-        channelLabelCombinations = nextLabels
-      }
-
-      const numChannels = channelCombinations.length || 1
-      this.channels = numChannels
-
-      if (numChannels === 1) {
-        const data = (await zarr.get(this.zarrArray, baseSliceArgs, {
-          opts: { signal },
-        })) as {
-          data: ArrayLike<number>
-        }
-        if (this.isRemoved) return
-        if (requestId < this.lastRenderedRequestId) return
-        this.lastRenderedRequestId = requestId
-        this.cancelOlderRequests(requestId)
-        this.data = new Float32Array((data.data as Float32Array).buffer)
-        this.dataVersion++
-      } else {
-        const packedData = new Float32Array(
-          this.width * this.height * numChannels
-        )
-
-        for (let c = 0; c < numChannels; c++) {
-          const sliceArgs = [...baseSliceArgs]
-          const combo = channelCombinations[c]
-
-          for (let i = 0; i < multiValueDims.length; i++) {
-            sliceArgs[multiValueDims[i].dimIndex] = combo[i]
-          }
-
-          const bandData = (await zarr.get(this.zarrArray, sliceArgs, {
-            opts: { signal },
-          })) as {
-            data: ArrayLike<number>
-          }
-          if (this.isRemoved) return
-
-          const bandArray = new Float32Array(
-            (bandData.data as Float32Array).buffer
-          )
-          for (let pixIdx = 0; pixIdx < this.width * this.height; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
-          }
-        }
-
-        if (requestId < this.lastRenderedRequestId) return
-        this.lastRenderedRequestId = requestId
-        this.cancelOlderRequests(requestId)
-        this.data = packedData
-        this.dataVersion++
-      }
-
-      this.invalidate()
-    } catch (err) {
-      if (!(err instanceof DOMException && err.name === 'AbortError')) {
-        console.error('Error fetching data:', err)
-      }
-    } finally {
-      this.pendingControllers.delete(requestId)
-      if (requestId === this.fetchRequestId) {
-        this.isLoadingData = false
-        this.emitLoadingState()
-      }
-    }
-  }
-
-  private cancelOlderRequests(completedRequestId: number) {
-    for (const [id, controller] of this.pendingControllers) {
-      if (id < completedRequestId) {
-        controller.abort()
-        this.pendingControllers.delete(id)
-      }
-    }
   }
 
   private async resolveSelectionIndex(
@@ -911,28 +1384,16 @@ export class UntiledMode implements ZarrMode {
 
       for (const dimName of dimNames) {
         const dimInfo = this.dimIndices[dimName]
-        const dimKey = dimName.toLowerCase()
+        const dimType = this.classifyDimension(dimName)
 
-        const isLon =
-          dimKey === 'lon' ||
-          dimKey === 'x' ||
-          dimKey === 'lng' ||
-          dimKey.includes('lon')
-        const isLat =
-          dimKey === 'lat' || dimKey === 'y' || dimKey.includes('lat')
-
-        if (isLon) {
+        if (dimType === 'lon') {
           baseSliceArgs[dimInfo.index] = zarr.slice(0, this.width)
-        } else if (isLat) {
+        } else if (dimType === 'lat') {
           baseSliceArgs[dimInfo.index] = zarr.slice(0, this.height)
         } else {
           const selectionSpec =
             selector[dimName] ||
-            (dimKey.includes('time') ? selector['time'] : undefined) ||
-            (dimKey.includes('lat') ? selector['lat'] : undefined) ||
-            (dimKey.includes('lon') || dimKey.includes('lng')
-              ? selector['lon']
-              : undefined)
+            (dimType === 'time' ? selector['time'] : undefined)
 
           if (selectionSpec !== undefined) {
             const selectionValue = selectionSpec.selected

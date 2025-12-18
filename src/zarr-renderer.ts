@@ -10,12 +10,15 @@ import type {
   CustomShaderConfig,
   MapboxGlobeParams,
   RendererUniforms,
+  SingleImageParams,
 } from './renderer-types'
 import {
   renderSingleImage,
   type SingleImageState,
 } from './single-image-renderer'
 import { renderTiles } from './tile-renderer'
+import type { TileTuple, MercatorBounds } from './map-utils'
+import type { Tiles } from './tiles'
 
 export { type ShaderProgram } from './shader-program'
 
@@ -176,13 +179,13 @@ export class ZarrRenderer {
 
   renderTiles(
     shaderProgram: ShaderProgram,
-    visibleTiles: import('./map-utils').TileTuple[],
+    visibleTiles: TileTuple[],
     worldOffsets: number[],
-    tileCache: import('./tiles').Tiles,
+    tileCache: Tiles,
     tileSize: number,
     vertexArr: Float32Array,
     pixCoordArr: Float32Array,
-    tileBounds?: Record<string, import('./map-utils').MercatorBounds>,
+    tileBounds?: Record<string, MercatorBounds>,
     customShaderConfig?: CustomShaderConfig,
     isGlobeTileRender: boolean = false,
     tileTexOverrides?: Record<
@@ -209,7 +212,7 @@ export class ZarrRenderer {
   renderSingleImage(
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
-    params: import('./renderer-types').SingleImageParams,
+    params: SingleImageParams,
     vertexArr: Float32Array,
     tileOverride?: {
       scaleX: number

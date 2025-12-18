@@ -47,34 +47,44 @@ export function renderSingleImage(
     clim,
   } = params
 
+  // For region-based rendering (data=null, texture already uploaded), bypass state tracking
+  // Regions have pre-uploaded buffers and textures, just render directly
+  const isRegionRender = data === null
+
   let uploaded = state.uploaded
   let currentGeometryVersion = state.geometryVersion
   let currentDataVersion = state.dataVersion
   let normalizedData = state.normalizedData
 
-  const geometryChanged =
-    currentGeometryVersion === null ||
-    currentGeometryVersion !== geometryVersion
-  const dataChanged =
-    currentDataVersion === null || currentDataVersion !== dataVersion
+  // For region renders, don't use state tracking - each region is independent
+  // For regular single-image renders, track state to avoid redundant uploads
+  let dataChanged = false
+  if (!isRegionRender) {
+    const geometryChanged =
+      currentGeometryVersion === null ||
+      currentGeometryVersion !== geometryVersion
+    dataChanged =
+      currentDataVersion === null || currentDataVersion !== dataVersion
 
-  if (geometryChanged) {
-    uploaded = false
-    currentGeometryVersion = geometryVersion
+    if (geometryChanged) {
+      uploaded = false
+      currentGeometryVersion = geometryVersion
+    }
+
+    // Normalize data when it changes (use clim to determine scale)
+    if (dataChanged || !normalizedData) {
+      normalizedData = normalizeDataForTexture(data, fillValue, clim).normalized
+    }
   }
 
-  if (!data || !bounds || !texture || !vertexBuffer || !pixCoordBuffer) {
+  // Early return if required resources are missing
+  if (!bounds || !texture || !vertexBuffer || !pixCoordBuffer) {
     return {
       uploaded,
       geometryVersion: currentGeometryVersion,
       dataVersion: currentDataVersion,
       normalizedData,
     }
-  }
-
-  // Normalize data when it changes (use clim to determine scale)
-  if (dataChanged || !normalizedData) {
-    normalizedData = normalizeDataForTexture(data, fillValue, clim).normalized
   }
 
   const scaleX =
@@ -112,12 +122,14 @@ export function renderSingleImage(
   gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
   gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 
+  // For region-based rendering, buffers are pre-uploaded, just bind them
+  // For regular single-image rendering, upload if geometry changed
   gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer)
-  if (!uploaded) {
+  if (!uploaded && !isRegionRender) {
     gl.bufferData(gl.ARRAY_BUFFER, vertexArr, gl.STATIC_DRAW)
   }
   gl.bindBuffer(gl.ARRAY_BUFFER, pixCoordBuffer)
-  if (!uploaded) {
+  if (!uploaded && !isRegionRender) {
     gl.bufferData(gl.ARRAY_BUFFER, pixCoordArr, gl.STATIC_DRAW)
     uploaded = true
   }
@@ -127,7 +139,9 @@ export function renderSingleImage(
   gl.uniform1i(shaderProgram.texLoc, 0)
   configureDataTexture(gl)
 
-  if (dataChanged) {
+  // Only upload texture data if we have normalized data to upload
+  // Skip if data was null (texture already uploaded externally, e.g., region-based rendering)
+  if (dataChanged && normalizedData) {
     const { format, internalFormat } = getTextureFormats(gl, channels)
 
     gl.texImage2D(
