@@ -29,7 +29,10 @@ export function createThrottleState(): ThrottleState {
  * Check if we should throttle (wait before fetching).
  * Returns the wait time in ms if we should throttle, or 0 if we can proceed.
  */
-export function getThrottleWaitTime(state: ThrottleState, throttleMs: number): number {
+export function getThrottleWaitTime(
+  state: ThrottleState,
+  throttleMs: number
+): number {
   if (throttleMs <= 0) return 0
   const now = Date.now()
   const timeSinceLastFetch = now - state.lastFetchTime
@@ -119,14 +122,20 @@ export function registerController(
 /**
  * Remove a controller from tracking (typically after request completes).
  */
-export function removeController(canceller: RequestCanceller, version: number): void {
+export function removeController(
+  canceller: RequestCanceller,
+  version: number
+): void {
   canceller.controllers.delete(version)
 }
 
 /**
  * Cancel all requests older than the completed version.
  */
-export function cancelOlderRequests(canceller: RequestCanceller, completedVersion: number): void {
+export function cancelOlderRequests(
+  canceller: RequestCanceller,
+  completedVersion: number
+): void {
   for (const [version, controller] of canceller.controllers) {
     if (version < completedVersion) {
       controller.abort()
@@ -192,12 +201,18 @@ export function emitLoadingState(manager: LoadingManager): void {
   manager.callback(state)
 }
 
-export function setMetadataLoading(manager: LoadingManager, loading: boolean): void {
+export function setMetadataLoading(
+  manager: LoadingManager,
+  loading: boolean
+): void {
   manager.metadataLoading = loading
   emitLoadingState(manager)
 }
 
-export function setChunksLoading(manager: LoadingManager, loading: boolean): void {
+export function setChunksLoading(
+  manager: LoadingManager,
+  loading: boolean
+): void {
   manager.chunksLoading = loading
   emitLoadingState(manager)
 }

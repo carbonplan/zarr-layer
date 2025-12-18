@@ -96,7 +96,7 @@ export const DATASETS: Dataset<any>[] = [
 ]
 
 export const DATASET_MAP = Object.fromEntries(
-  DATASETS.map((d) => [d.id, d]),
+  DATASETS.map((d) => [d.id, d])
 ) as Record<string, Dataset<any>>
 
 export const DEFAULT_DATASET_ID = DATASETS[0].id

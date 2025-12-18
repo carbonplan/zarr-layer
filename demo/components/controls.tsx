@@ -156,7 +156,7 @@ const clamp = (value: number, min: number, max: number) =>
 const collectNumbers = (
   values: QueryDataValues | undefined,
   fillValue: number,
-  depth: number = 0,
+  depth: number = 0
 ): number[] => {
   if (!values) return []
 
@@ -171,7 +171,7 @@ const collectNumbers = (
       (value): value is number =>
         value !== fillValue &&
         typeof value === 'number' &&
-        Number.isFinite(value),
+        Number.isFinite(value)
     )
   }
 
@@ -185,7 +185,7 @@ const collectNumbers = (
     const collected = collectNumbers(
       entry as QueryDataValues,
       fillValue,
-      depth + 1,
+      depth + 1
     )
     results = results.concat(collected)
   }
@@ -194,7 +194,7 @@ const collectNumbers = (
 
 const getRegionMean = (
   result: QueryResult | null,
-  fillValue: number,
+  fillValue: number
 ): number | null => {
   if (!result) return null
 
@@ -211,7 +211,7 @@ const getRegionMean = (
     try {
       // Use concat instead of spread to avoid stack overflow with large arrays
       numbers = numbers.concat(
-        collectNumbers(value as QueryDataValues, fillValue, 0),
+        collectNumbers(value as QueryDataValues, fillValue, 0)
       )
     } catch (error) {
       console.error('Error collecting numbers from', key, error)
@@ -241,7 +241,7 @@ const Controls = () => {
   const [zoomLevel, setZoomLevel] = useState<number | null>(() =>
     typeof (mapInstance as any)?.getZoom === 'function'
       ? (mapInstance as any).getZoom()
-      : null,
+      : null
   )
 
   useEffect(() => {
@@ -281,7 +281,7 @@ const Controls = () => {
   const setGlobeProjection = useAppStore((state) => state.setGlobeProjection)
   const setMapProvider = useAppStore((state) => state.setMapProvider)
   const setActiveDatasetState = useAppStore(
-    (state) => state.setActiveDatasetState,
+    (state) => state.setActiveDatasetState
   )
   const setRegionResult = useAppStore((state) => state.setRegionResult)
   const setPointResult = useAppStore((state) => state.setPointResult)
@@ -289,7 +289,7 @@ const Controls = () => {
 
   const layerConfig = useMemo(
     () => datasetModule.buildLayerProps(datasetState as any),
-    [datasetModule, datasetState],
+    [datasetModule, datasetState]
   )
 
   const isCarbonplan4d = datasetModule.id === 'carbonplan_4d'
@@ -315,7 +315,7 @@ const Controls = () => {
     if (!pointResult) return null
     const values = collectNumbers(
       pointResult[currentVariable] as QueryDataValues,
-      fillValue,
+      fillValue
     )
     if (values.length === 0) return null
     // For range bands or multi-values, show mean of collected values
@@ -325,11 +325,11 @@ const Controls = () => {
 
   const regionMean = useMemo(
     () => getRegionMean(regionResult, fillValue),
-    [regionResult, fillValue],
+    [regionResult, fillValue]
   )
 
   const handleClimChange = (
-    next: (prev: [number, number]) => [number, number],
+    next: (prev: [number, number]) => [number, number]
   ) => {
     const base = datasetModule.clim
     const resolved = next(clim)
@@ -342,7 +342,7 @@ const Controls = () => {
     const lower = base[0] - span * 0.5
     const upper = base[1] + span * 0.5
     const [lo, hiRaw] = [Math.min(rawLo, rawHi), Math.max(rawLo, rawHi)].map(
-      (value) => clamp(value, lower, upper),
+      (value) => clamp(value, lower, upper)
     )
     const hi = hiRaw === lo ? lo + span * 0.001 : hiRaw
 
@@ -378,13 +378,15 @@ const Controls = () => {
         const baseBand = currentBand === 'tavg_range' ? 'tavg' : 'prec'
         querySelector = { band: baseBand, month: monthRange }
         console.log(
-          `Querying range mode: band=${baseBand}, months=${monthRange.join(',')}`,
+          `Querying range mode: band=${baseBand}, months=${monthRange.join(
+            ','
+          )}`
         )
       }
 
       const result = (await zarrLayer.queryData(
         geometry,
-        querySelector,
+        querySelector
       )) as QueryResult
       console.log('Query result:', result)
       setRegionResult(result)

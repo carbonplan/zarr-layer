@@ -30,11 +30,7 @@ import {
   pixelIntersectsGeometryTiled,
   tilePixelToLatLon,
 } from './query-utils'
-import {
-  setObjectValues,
-  getChunks,
-  getPointValues,
-} from './selector-utils'
+import { setObjectValues, getChunks, getPointValues } from './selector-utils'
 
 /**
  * Apply scale_factor/add_offset transforms and filter invalid values.

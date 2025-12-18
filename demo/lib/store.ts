@@ -2,7 +2,11 @@ import { create } from 'zustand'
 import { DATASET_MAP, DEFAULT_DATASET_ID } from '../datasets'
 import type { Dataset } from '../datasets'
 import type { MapProvider, MapInstance } from '../components/map-shared'
-import type { ZarrLayer, QueryResult, LoadingState } from '@carbonplan/zarr-layer'
+import type {
+  ZarrLayer,
+  QueryResult,
+  LoadingState,
+} from '@carbonplan/zarr-layer'
 
 interface AppState {
   sidebarWidth: number

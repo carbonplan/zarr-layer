@@ -9,8 +9,4 @@ export type {
 } from './types'
 
 // Query interface exports
-export type {
-  QueryResult,
-  QueryDataValues,
-  QueryGeometry,
-} from './query/types'
+export type { QueryResult, QueryDataValues, QueryGeometry } from './query/types'

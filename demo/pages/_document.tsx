@@ -17,4 +17,3 @@ class MyDocument extends Document {
 }
 
 export default MyDocument
-

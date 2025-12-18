@@ -378,10 +378,18 @@ export class Tiles {
    */
   private applyNormalization(
     tile: TileData,
-    sliced: { data: Float32Array; channels: number; bandData: Map<string, Float32Array> }
+    sliced: {
+      data: Float32Array
+      channels: number
+      bandData: Map<string, Float32Array>
+    }
   ): void {
     // Normalize main data using clim to determine scale
-    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim)
+    const { normalized, scale } = normalizeDataForTexture(
+      sliced.data,
+      this.fillValue,
+      this.clim
+    )
     tile.data = normalized
     tile.dataScale = scale
     tile.channels = sliced.channels
@@ -390,7 +398,11 @@ export class Tiles {
     tile.bandData = new Map()
     tile.bandDataScales = new Map()
     for (const [bandName, bandData] of sliced.bandData) {
-      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim)
+      const bandResult = normalizeDataForTexture(
+        bandData,
+        this.fillValue,
+        this.clim
+      )
       tile.bandData.set(bandName, bandResult.normalized)
       tile.bandDataScales.set(bandName, bandResult.scale)
     }
@@ -598,7 +610,9 @@ export class Tiles {
         return tile
       }
 
-      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal })
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, {
+        signal,
+      })
       const chunkShape = (chunk.shape as number[]).map((n) => Number(n))
       const chunkData =
         chunk.data instanceof Float32Array

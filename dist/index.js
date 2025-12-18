@@ -5684,7 +5684,8 @@ function tileToScale(tile) {
   return [scale, shiftX, shiftY];
 }
 function zoomToLevel(zoom, maxLevelIndex) {
-  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex);
+  if (maxLevelIndex)
+    return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex);
   return Math.max(0, Math.floor(zoom));
 }
 function parseLevelZoom(levelPath, fallback = 0) {
@@ -5812,7 +5813,9 @@ function boundsToMercatorNorm(xyLimits, crs) {
 }
 function geoToArrayIndex(geo, geoMin, geoMax, arraySize) {
   const normalized = (geo - geoMin) / (geoMax - geoMin);
-  return Math.floor(Math.max(0, Math.min(arraySize - 1, normalized * arraySize)));
+  return Math.floor(
+    Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
+  );
 }
 
 // src/tile-renderer.ts
@@ -6101,7 +6104,11 @@ var ZarrRenderer = class _ZarrRenderer {
       gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset);
     }
     if (shaderProgram.dataScaleLoc) {
-      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1);
+      const dataScale = Math.max(
+        Math.abs(uniforms.clim[0]),
+        Math.abs(uniforms.clim[1]),
+        1
+      );
       gl.uniform1f(shaderProgram.dataScaleLoc, dataScale);
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1, 1);
@@ -7347,14 +7354,22 @@ var Tiles = class {
    * Updates tile.data, tile.bandData with normalized values and stores scale factors.
    */
   applyNormalization(tile, sliced) {
-    const { normalized, scale } = normalizeDataForTexture(sliced.data, this.fillValue, this.clim);
+    const { normalized, scale } = normalizeDataForTexture(
+      sliced.data,
+      this.fillValue,
+      this.clim
+    );
     tile.data = normalized;
     tile.dataScale = scale;
     tile.channels = sliced.channels;
     tile.bandData = /* @__PURE__ */ new Map();
     tile.bandDataScales = /* @__PURE__ */ new Map();
     for (const [bandName, bandData] of sliced.bandData) {
-      const bandResult = normalizeDataForTexture(bandData, this.fillValue, this.clim);
+      const bandResult = normalizeDataForTexture(
+        bandData,
+        this.fillValue,
+        this.clim
+      );
       tile.bandData.set(bandName, bandResult.normalized);
       tile.bandDataScales.set(bandName, bandResult.scale);
     }
@@ -7517,7 +7532,9 @@ var Tiles = class {
         tile.loading = false;
         return tile;
       }
-      const chunk = await this.store.getChunk(levelPath, chunkIndices, { signal });
+      const chunk = await this.store.getChunk(levelPath, chunkIndices, {
+        signal
+      });
       const chunkShape = chunk.shape.map((n) => Number(n));
       const chunkData = chunk.data instanceof Float32Array ? new Float32Array(chunk.data.buffer) : Float32Array.from(chunk.data);
       if (version < tile.selectorVersion) {
@@ -8639,7 +8656,10 @@ var UntiledMode = class {
       const WORLD_EXTENT = 20037508342789244e-9;
       latSpan = Math.abs(geoBounds.yMax - geoBounds.yMin) / (2 * WORLD_EXTENT) * 180;
       lonSpan = Math.abs(geoBounds.xMax - geoBounds.xMin) / (2 * WORLD_EXTENT) * 360;
-      const maxAbsY = Math.max(Math.abs(geoBounds.yMin), Math.abs(geoBounds.yMax));
+      const maxAbsY = Math.max(
+        Math.abs(geoBounds.yMin),
+        Math.abs(geoBounds.yMax)
+      );
       const R = WORLD_EXTENT / Math.PI;
       maxAbsLat = Math.abs(Math.atan(Math.sinh(maxAbsY / R)) * (180 / Math.PI));
     } else {
@@ -8654,6 +8674,7 @@ var UntiledMode = class {
     }
     const lonFactor = Math.max(1, lonSpan / 180);
     subdivisions = Math.ceil(subdivisions * Math.sqrt(lonFactor));
+    console.log("subdivisions", subdivisions);
     return Math.max(4, Math.min(64, subdivisions));
   }
   /**
@@ -8979,7 +9000,11 @@ var UntiledMode = class {
       }
       region.selectorVersion = fetchSelectorVersion;
       cancelOlderRequests(this.requestCanceller, requestId);
-      const { normalized } = normalizeDataForTexture(packedData, fillValue, this.clim);
+      const { normalized } = normalizeDataForTexture(
+        packedData,
+        fillValue,
+        this.clim
+      );
       region.data = normalized;
       region.width = actualW;
       region.height = actualH;
@@ -9087,12 +9112,15 @@ var UntiledMode = class {
   async buildBaseSliceArgs() {
     if (!this.zarrArray) return;
     this.baseSliceArgsReady = false;
-    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(this.selector, {
-      includeSpatialSlices: false,
-      // placeholders for region fetching
-      trackMultiValue: true
-      // track multi-value dims for band extraction
-    });
+    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(
+      this.selector,
+      {
+        includeSpatialSlices: false,
+        // placeholders for region fetching
+        trackMultiValue: true
+        // track multi-value dims for band extraction
+      }
+    );
     this.baseSliceArgs = sliceArgs;
     this.baseMultiValueDims = multiValueDims;
     this.baseSliceArgsReady = true;
@@ -9139,7 +9167,10 @@ var UntiledMode = class {
       const newWidth = newArray.shape[this.dimIndices.lon.index];
       const newHeight = newArray.shape[this.dimIndices.lat.index];
       const detectedRegionSize = this.getRegionSize(newArray);
-      const newRegionSize = detectedRegionSize ?? [newHeight, newWidth];
+      const newRegionSize = detectedRegionSize ?? [
+        newHeight,
+        newWidth
+      ];
       this.clearPreviousRegionCache(gl);
       this.previousRegionCache = this.regionCache;
       this.previousLevelIndex = oldLevelIndex;
@@ -9173,7 +9204,12 @@ var UntiledMode = class {
       context.matrix,
       false
     );
-    this.renderRegions(renderer, shaderProgram, context.worldOffsets, context.customShaderConfig);
+    this.renderRegions(
+      renderer,
+      shaderProgram,
+      context.worldOffsets,
+      context.customShaderConfig
+    );
   }
   /**
    * Render all loaded regions.
@@ -9228,7 +9264,14 @@ var UntiledMode = class {
       gl.vertexAttribPointer(shaderProgram.vertexLoc, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer);
       gl.enableVertexAttribArray(shaderProgram.pixCoordLoc);
-      gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribPointer(
+        shaderProgram.pixCoordLoc,
+        2,
+        gl.FLOAT,
+        false,
+        0,
+        0
+      );
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, region.texture);
       gl.uniform1i(shaderProgram.texLoc, 0);
@@ -9489,7 +9532,9 @@ var UntiledMode = class {
           multiValueDimNames
         };
       }
-      const packedData = new Float32Array(fetchWidth * fetchHeight * numChannels);
+      const packedData = new Float32Array(
+        fetchWidth * fetchHeight * numChannels
+      );
       for (let c = 0; c < numChannels; c++) {
         const sliceArgs = [...baseSliceArgs];
         const combo = channelCombinations[c];
@@ -9497,7 +9542,9 @@ var UntiledMode = class {
           sliceArgs[multiValueDims[i].dimIndex] = combo[i];
         }
         const bandData = await get2(this.zarrArray, sliceArgs);
-        const bandArray = new Float32Array(bandData.data.buffer);
+        const bandArray = new Float32Array(
+          bandData.data.buffer
+        );
         for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
           packedData[pixIdx * numChannels + c] = bandArray[pixIdx];
         }
@@ -9565,10 +9612,11 @@ var UntiledMode = class {
           coordinates: coords
         };
       }
-      const pointData = await this.fetchQueryData(
-        normalizedSelector,
-        { type: "point", x: pixel.x, y: pixel.y }
-      );
+      const pointData = await this.fetchQueryData(normalizedSelector, {
+        type: "point",
+        x: pixel.x,
+        y: pixel.y
+      });
       if (!pointData) {
         return {
           [this.variable]: [],
@@ -9649,10 +9697,10 @@ var UntiledMode = class {
         coordinates: { lat: [], lon: [] }
       };
     }
-    const fetched = await this.fetchQueryData(
-      normalizedSelector,
-      { type: "bbox", ...pixelBounds }
-    );
+    const fetched = await this.fetchQueryData(normalizedSelector, {
+      type: "bbox",
+      ...pixelBounds
+    });
     if (!fetched) {
       return {
         [this.variable]: [],

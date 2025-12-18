@@ -14,7 +14,12 @@ import {
   type TileTuple,
 } from './map-utils'
 import type { ZarrRenderer } from './zarr-renderer'
-import type { ZarrMode, RenderContext, TileId, RegionRenderState } from './zarr-mode'
+import type {
+  ZarrMode,
+  RenderContext,
+  TileId,
+  RegionRenderState,
+} from './zarr-mode'
 import type { SingleImageParams } from './renderer-types'
 import { computeTexOverride } from './webgl-utils'
 

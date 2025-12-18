@@ -9,7 +9,12 @@
  */
 
 import * as zarr from 'zarrita'
-import type { ZarrMode, RenderContext, TileId, RegionRenderState } from './zarr-mode'
+import type {
+  ZarrMode,
+  RenderContext,
+  TileId,
+  RegionRenderState,
+} from './zarr-mode'
 import type { QueryGeometry, QueryResult } from './query/types'
 import type {
   LoadingStateCallback,
@@ -28,7 +33,12 @@ import {
   type XYLimits,
 } from './map-utils'
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
-import { createSubdividedQuad, normalizeDataForTexture, configureDataTexture, getTextureFormats } from './webgl-utils'
+import {
+  createSubdividedQuad,
+  normalizeDataForTexture,
+  configureDataTexture,
+  getTextureFormats,
+} from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
@@ -221,7 +231,9 @@ export class UntiledMode implements ZarrMode {
    * For sharded arrays: use shard chunk_shape
    * For standard chunked arrays: use array chunks
    */
-  private getRegionSize(array: zarr.Array<zarr.DataType>): [number, number] | null {
+  private getRegionSize(
+    array: zarr.Array<zarr.DataType>
+  ): [number, number] | null {
     const latIdx = this.dimIndices.lat?.index
     const lonIdx = this.dimIndices.lon?.index
     if (latIdx === undefined || lonIdx === undefined) return null
@@ -229,7 +241,10 @@ export class UntiledMode implements ZarrMode {
     // Check for sharding codec
     const codecs = (array as any).codecs || []
     for (const codec of codecs) {
-      if (codec.name === 'sharding_indexed' && codec.configuration?.chunk_shape) {
+      if (
+        codec.name === 'sharding_indexed' &&
+        codec.configuration?.chunk_shape
+      ) {
         const shardShape = codec.configuration.chunk_shape as number[]
         return [shardShape[latIdx], shardShape[lonIdx]]
       }
@@ -271,7 +286,10 @@ export class UntiledMode implements ZarrMode {
   /**
    * Dispose WebGL resources for a region cache.
    */
-  private disposeRegionCache(cache: Map<string, RegionState>, gl: WebGL2RenderingContext): void {
+  private disposeRegionCache(
+    cache: Map<string, RegionState>,
+    gl: WebGL2RenderingContext
+  ): void {
     for (const region of cache.values()) {
       if (region.texture) gl.deleteTexture(region.texture)
       if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
@@ -427,10 +445,15 @@ export class UntiledMode implements ZarrMode {
       // Convert mercator meters to approximate degrees for subdivision calculation
       const WORLD_EXTENT = 20037508.342789244
       // Normalize to 0-1 range then to degrees
-      latSpan = (Math.abs(geoBounds.yMax - geoBounds.yMin) / (2 * WORLD_EXTENT)) * 180
-      lonSpan = (Math.abs(geoBounds.xMax - geoBounds.xMin) / (2 * WORLD_EXTENT)) * 360
+      latSpan =
+        (Math.abs(geoBounds.yMax - geoBounds.yMin) / (2 * WORLD_EXTENT)) * 180
+      lonSpan =
+        (Math.abs(geoBounds.xMax - geoBounds.xMin) / (2 * WORLD_EXTENT)) * 360
       // Approximate max latitude from mercator Y
-      const maxAbsY = Math.max(Math.abs(geoBounds.yMin), Math.abs(geoBounds.yMax))
+      const maxAbsY = Math.max(
+        Math.abs(geoBounds.yMin),
+        Math.abs(geoBounds.yMax)
+      )
       // mercatorY to lat: lat = atan(sinh(y / R)) where R = WORLD_EXTENT / PI
       const R = WORLD_EXTENT / Math.PI
       maxAbsLat = Math.abs(Math.atan(Math.sinh(maxAbsY / R)) * (180 / Math.PI))
@@ -457,6 +480,7 @@ export class UntiledMode implements ZarrMode {
     subdivisions = Math.ceil(subdivisions * Math.sqrt(lonFactor))
 
     // Clamp to reasonable range: minimum 4, maximum 64
+    console.log('subdivisions', subdivisions)
     return Math.max(4, Math.min(64, subdivisions))
   }
 
@@ -500,7 +524,7 @@ export class UntiledMode implements ZarrMode {
 
         // Compute mercator Y for this vertex
         // vertex y=-1 maps to y1 (south), y=1 maps to y0 (north)
-        const mercY = y0 + (1 - normY) / 2 * (y1 - y0)
+        const mercY = y0 + ((1 - normY) / 2) * (y1 - y0)
 
         // Convert mercator Y to latitude
         const lat = mercatorNormToLat(mercY)
@@ -585,7 +609,13 @@ export class UntiledMode implements ZarrMode {
       /** Spatial bounds for fetch - point for single pixel, bbox for region subset */
       spatialBounds?:
         | { type: 'point'; x: number; y: number }
-        | { type: 'bbox'; minX: number; maxX: number; minY: number; maxY: number }
+        | {
+            type: 'bbox'
+            minX: number
+            maxX: number
+            minY: number
+            maxY: number
+          }
     }
   ): Promise<{
     sliceArgs: (number | zarr.Slice)[]
@@ -732,12 +762,18 @@ export class UntiledMode implements ZarrMode {
     }
 
     // Check if viewport changed (include selectorVersion in hash to detect selector changes)
-    const viewportHash = `${this.selectorVersion}:${visible.map((r) => `${r.regionX},${r.regionY}`).join('|')}`
+    const viewportHash = `${this.selectorVersion}:${visible
+      .map((r) => `${r.regionX},${r.regionY}`)
+      .join('|')}`
     const viewportChanged = viewportHash !== this.lastViewportHash
     this.lastViewportHash = viewportHash
 
     // Skip if nothing to do
-    if (newRegions.length === 0 && staleRegions.length === 0 && !viewportChanged) {
+    if (
+      newRegions.length === 0 &&
+      staleRegions.length === 0 &&
+      !viewportChanged
+    ) {
       return
     }
 
@@ -752,7 +788,11 @@ export class UntiledMode implements ZarrMode {
     }
 
     // Clear previous level cache once all visible regions are loaded with current selector
-    if (this.previousRegionCache.size > 0 && newRegions.length === 0 && staleRegions.length === 0) {
+    if (
+      this.previousRegionCache.size > 0 &&
+      newRegions.length === 0 &&
+      staleRegions.length === 0
+    ) {
       this.clearPreviousRegionCache(gl)
     }
   }
@@ -956,7 +996,11 @@ export class UntiledMode implements ZarrMode {
       cancelOlderRequests(this.requestCanceller, requestId)
 
       // Normalize and store data
-      const { normalized } = normalizeDataForTexture(packedData, fillValue, this.clim)
+      const { normalized } = normalizeDataForTexture(
+        packedData,
+        fillValue,
+        this.clim
+      )
       region.data = normalized
       region.width = actualW
       region.height = actualH
@@ -1041,7 +1085,11 @@ export class UntiledMode implements ZarrMode {
       }
     } else {
       // Single-level dataset - set up region-based loading if not already done
-      if (!this.regionSize && this.zarrArray && !this.loadingManager.chunksLoading) {
+      if (
+        !this.regionSize &&
+        this.zarrArray &&
+        !this.loadingManager.chunksLoading
+      ) {
         const detectedRegionSize = this.getRegionSize(this.zarrArray)
         this.regionSize = detectedRegionSize ?? [this.height, this.width]
 
@@ -1104,10 +1152,13 @@ export class UntiledMode implements ZarrMode {
 
     this.baseSliceArgsReady = false
 
-    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(this.selector, {
-      includeSpatialSlices: false, // placeholders for region fetching
-      trackMultiValue: true, // track multi-value dims for band extraction
-    })
+    const { sliceArgs, multiValueDims } = await this.buildSliceArgsForSelector(
+      this.selector,
+      {
+        includeSpatialSlices: false, // placeholders for region fetching
+        trackMultiValue: true, // track multi-value dims for band extraction
+      }
+    )
 
     this.baseSliceArgs = sliceArgs
     this.baseMultiValueDims = multiValueDims
@@ -1186,7 +1237,10 @@ export class UntiledMode implements ZarrMode {
       // Always use region-based loading for unified rendering path
       // If no chunk/shard boundaries, treat whole level as one region
       const detectedRegionSize = this.getRegionSize(newArray)
-      const newRegionSize: [number, number] = detectedRegionSize ?? [newHeight, newWidth]
+      const newRegionSize: [number, number] = detectedRegionSize ?? [
+        newHeight,
+        newWidth,
+      ]
 
       // Move current regions to previous cache (for fallback during transition)
       // Clear any existing previous cache first
@@ -1233,7 +1287,12 @@ export class UntiledMode implements ZarrMode {
     )
 
     // Always use region-based rendering (unified path)
-    this.renderRegions(renderer, shaderProgram, context.worldOffsets, context.customShaderConfig)
+    this.renderRegions(
+      renderer,
+      shaderProgram,
+      context.worldOffsets,
+      context.customShaderConfig
+    )
   }
 
   /**
@@ -1269,13 +1328,15 @@ export class UntiledMode implements ZarrMode {
 
     // Helper to check if a region is valid for rendering
     const isRegionValid = (region: RegionState): boolean => {
-      return !!(region.data &&
+      return !!(
+        region.data &&
         region.textureUploaded &&
         region.texture &&
         region.vertexBuffer &&
         region.pixCoordBuffer &&
         region.vertexArr &&
-        region.mercatorBounds)
+        region.mercatorBounds
+      )
     }
 
     // Collect regions to render (previous cache for fallback, then current)
@@ -1322,7 +1383,14 @@ export class UntiledMode implements ZarrMode {
       // Bind texture coordinate buffer (use warped pixCoordBuffer for flat map)
       gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
       gl.enableVertexAttribArray(shaderProgram.pixCoordLoc)
-      gl.vertexAttribPointer(shaderProgram.pixCoordLoc, 2, gl.FLOAT, false, 0, 0)
+      gl.vertexAttribPointer(
+        shaderProgram.pixCoordLoc,
+        2,
+        gl.FLOAT,
+        false,
+        0,
+        0
+      )
 
       // Bind main texture
       gl.activeTexture(gl.TEXTURE0)
@@ -1431,13 +1499,15 @@ export class UntiledMode implements ZarrMode {
 
     // Helper to check if a region is valid for rendering
     const isRegionValid = (region: RegionState): boolean => {
-      return !!(region.data &&
+      return !!(
+        region.data &&
         region.textureUploaded &&
         region.texture &&
         region.vertexBuffer &&
         region.pixCoordBuffer &&
         region.vertexArr &&
-        region.mercatorBounds)
+        region.mercatorBounds
+      )
     }
 
     // Helper to create render state from region
@@ -1536,7 +1606,10 @@ export class UntiledMode implements ZarrMode {
 
   private emitLoadingState(): void {
     // Update chunksLoading to include throttle state
-    if (this.throttleState.throttledPending && !this.loadingManager.chunksLoading) {
+    if (
+      this.throttleState.throttledPending &&
+      !this.loadingManager.chunksLoading
+    ) {
       this.loadingManager.chunksLoading = true
     }
     emitLoadingStateUtil(this.loadingManager)
@@ -1692,7 +1765,9 @@ export class UntiledMode implements ZarrMode {
         }
       }
 
-      const packedData = new Float32Array(fetchWidth * fetchHeight * numChannels)
+      const packedData = new Float32Array(
+        fetchWidth * fetchHeight * numChannels
+      )
       for (let c = 0; c < numChannels; c++) {
         const sliceArgs = [...baseSliceArgs]
         const combo = channelCombinations[c]
@@ -1703,7 +1778,9 @@ export class UntiledMode implements ZarrMode {
         const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
           data: ArrayLike<number>
         }
-        const bandArray = new Float32Array((bandData.data as Float32Array).buffer)
+        const bandArray = new Float32Array(
+          (bandData.data as Float32Array).buffer
+        )
         for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
           packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
         }
@@ -1787,10 +1864,11 @@ export class UntiledMode implements ZarrMode {
       }
 
       // Fetch only the chunk(s) containing this point
-      const pointData = await this.fetchQueryData(
-        normalizedSelector,
-        { type: 'point', x: pixel.x, y: pixel.y }
-      )
+      const pointData = await this.fetchQueryData(normalizedSelector, {
+        type: 'point',
+        x: pixel.x,
+        y: pixel.y,
+      })
 
       if (!pointData) {
         return {
@@ -1899,10 +1977,10 @@ export class UntiledMode implements ZarrMode {
       }
     }
 
-    const fetched = await this.fetchQueryData(
-      normalizedSelector,
-      { type: 'bbox', ...pixelBounds }
-    )
+    const fetched = await this.fetchQueryData(normalizedSelector, {
+      type: 'bbox',
+      ...pixelBounds,
+    })
     if (!fetched) {
       return {
         [this.variable]: [],

@@ -148,7 +148,11 @@ export class ZarrRenderer {
     }
     if (shaderProgram.dataScaleLoc) {
       // Compute data scale from clim (same formula used in normalizeDataForTexture)
-      const dataScale = Math.max(Math.abs(uniforms.clim[0]), Math.abs(uniforms.clim[1]), 1)
+      const dataScale = Math.max(
+        Math.abs(uniforms.clim[0]),
+        Math.abs(uniforms.clim[1]),
+        1
+      )
       gl.uniform1f(shaderProgram.dataScaleLoc, dataScale)
     }
     gl.uniform2f(shaderProgram.texScaleLoc, 1.0, 1.0)

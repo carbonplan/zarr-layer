@@ -212,7 +212,8 @@ export function tileToScale(tile: TileTuple): [number, number, number] {
  * @returns Pyramid level index (integer).
  */
 export function zoomToLevel(zoom: number, maxLevelIndex: number): number {
-  if (maxLevelIndex) return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex)
+  if (maxLevelIndex)
+    return Math.min(Math.max(0, Math.floor(zoom)), maxLevelIndex)
   return Math.max(0, Math.floor(zoom))
 }
 
@@ -223,7 +224,10 @@ export function zoomToLevel(zoom: number, maxLevelIndex: number): number {
  * @param fallback - Fallback value if path can't be parsed as a number.
  * @returns The parsed zoom number.
  */
-export function parseLevelZoom(levelPath: string, fallback: number = 0): number {
+export function parseLevelZoom(
+  levelPath: string,
+  fallback: number = 0
+): number {
   // Try to parse the path directly as a number
   const parsed = parseInt(levelPath, 10)
   if (!isNaN(parsed)) return parsed
@@ -460,7 +464,9 @@ export function geoToArrayIndex(
   arraySize: number
 ): number {
   const normalized = (geo - geoMin) / (geoMax - geoMin)
-  return Math.floor(Math.max(0, Math.min(arraySize - 1, normalized * arraySize)))
+  return Math.floor(
+    Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
+  )
 }
 
 /**
