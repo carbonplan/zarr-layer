@@ -17,7 +17,7 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js).
 
-For best performance, tiled data (EPSG:3857 or 4326) is preferred (see [ndpyramid](https://github.com/carbonplan/ndpyramid)). The library also supports some 'single image' datasets that are untiled (4326 or 3857 coordinate systems). Support for single image w/ generic [multiscales](https://github.com/zarr-conventions/multiscales) (non-slippy map conforming) is in progress!
+For best performance, tiled data (EPSG:3857 or 4326) is preferred (see [ndpyramid](https://github.com/carbonplan/ndpyramid)). The library also supports datasets that are untiled (4326 or 3857 coordinate systems) and tries to load chunks efficiently based on viewport intersections. Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental!
 
 ## install
 
