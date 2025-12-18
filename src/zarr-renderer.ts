@@ -178,6 +178,7 @@ export class ZarrRenderer {
     tileBounds?: Record<string, MercatorBounds>,
     customShaderConfig?: CustomShaderConfig,
     isGlobeTileRender: boolean = false,
+    datasetMaxZoom?: number,
     tileTexOverrides?: Record<
       string,
       { texScale: [number, number]; texOffset: [number, number] }
@@ -196,6 +197,7 @@ export class ZarrRenderer {
       tileBounds,
       customShaderConfig,
       isGlobeTileRender,
+      datasetMaxZoom,
       tileTexOverrides
     )
   }

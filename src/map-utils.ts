@@ -185,6 +185,14 @@ export function tileToKey(tile: TileTuple): string {
 }
 
 /**
+ * Parses a tile key back into a TileTuple [z, x, y].
+ */
+export function keyToTile(key: string): TileTuple {
+  const parts = key.split(',').map(Number)
+  return [parts[0], parts[1], parts[2]] as TileTuple
+}
+
+/**
  * Computes scale and shift parameters for positioning a tile in mercator coordinates.
  * Used in vertex shader to position tiles correctly on the map.
  *
@@ -406,6 +414,126 @@ export function findBestParentTile<T extends TileDataLike>(
     ancestorX = Math.floor(ancestorX / 2)
     ancestorY = Math.floor(ancestorY / 2)
   }
+  return null
+}
+
+/**
+ * Find cached child tiles that cover a target tile (for zoom-out fallback).
+ * Walks DOWN the pyramid to find higher-resolution tiles that cover the target.
+ * Limited to maxDepth levels to avoid excessive searching.
+ *
+ * @param tileCache - Cache to look up tiles
+ * @param z - Target tile zoom level
+ * @param x - Target tile x coordinate
+ * @param y - Target tile y coordinate
+ * @param datasetMaxZoom - Maximum zoom level in the dataset pyramid
+ * @param maxDepth - Maximum levels to descend (default: 2)
+ * @returns Array of child tiles with their coordinates, or null if no children found
+ */
+export function findBestChildTiles<T extends TileDataLike>(
+  tileCache: TileCacheLike<T>,
+  z: number,
+  x: number,
+  y: number,
+  datasetMaxZoom: number,
+  maxDepth: number = 2
+): Array<{
+  tile: T
+  childZ: number
+  childX: number
+  childY: number
+}> | null {
+  let bestCoverage = 0
+  let bestChildren: Array<{
+    tile: T
+    childZ: number
+    childX: number
+    childY: number
+  }> = []
+
+  // Search up to maxDepth levels down
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const childZ = z + depth
+    if (childZ > datasetMaxZoom) break
+
+    const scale = Math.pow(2, depth)
+    const baseX = x * scale
+    const baseY = y * scale
+    const totalChildren = scale * scale
+
+    const foundChildren: Array<{
+      tile: T
+      childZ: number
+      childX: number
+      childY: number
+    }> = []
+
+    // Check all child tiles at this level
+    for (let dy = 0; dy < scale; dy++) {
+      for (let dx = 0; dx < scale; dx++) {
+        const childX = baseX + dx
+        const childY = baseY + dy
+        const childKey = tileToKey([childZ, childX, childY])
+        const childTile = tileCache.get(childKey)
+
+        if (childTile && childTile.data) {
+          foundChildren.push({
+            tile: childTile,
+            childZ,
+            childX,
+            childY,
+          })
+        }
+      }
+    }
+
+    const coverage = foundChildren.length / totalChildren
+
+    // Full coverage at this level - return immediately
+    if (coverage === 1) {
+      return foundChildren
+    }
+
+    // Better coverage than previous best - update
+    if (coverage > bestCoverage) {
+      bestCoverage = coverage
+      bestChildren = foundChildren
+    }
+  }
+
+  return bestChildren.length > 0 ? bestChildren : null
+}
+
+/**
+ * Check if a tile key has an overlapping ancestor in the rendered keys list.
+ * Used to prevent rendering both a parent tile AND its children at the same location.
+ *
+ * @param childKey - The child tile key to check
+ * @param renderedKeys - Array of tile keys currently being rendered
+ * @returns The overlapping ancestor key if found, null otherwise
+ */
+export function getOverlappingAncestor(
+  childKey: string,
+  renderedKeys: string[]
+): string | null {
+  const [childX, childY, childZ] = keyToTile(childKey)
+
+  for (const parentKey of renderedKeys) {
+    const [parentX, parentY, parentZ] = keyToTile(parentKey)
+
+    // Can't be an ancestor if at same or higher zoom level
+    if (childZ <= parentZ) continue
+
+    // Check if parent covers the child
+    const factor = Math.pow(2, childZ - parentZ)
+    const coversX = Math.floor(childX / factor) === parentX
+    const coversY = Math.floor(childY / factor) === parentY
+
+    if (coversX && coversY) {
+      return parentKey
+    }
+  }
+
   return null
 }
 
