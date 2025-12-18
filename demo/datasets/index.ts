@@ -82,16 +82,16 @@ export const DATASETS: Dataset<any>[] = [
   }),
   untiled4326,
   createSimpleDataset({
-    id: 'untiled_2level_3857',
+    id: 'Burn Probability over CONUS',
     source:
-      'https://carbonplan-share.s3.us-west-2.amazonaws.com/scratch/ndpyramid/2-lvl-test-web-mercator.zarr',
-    variable: 'pr',
-    clim: [0, 20],
-    colormap: 'blues',
+      'https://carbonplan-share.s3.us-west-2.amazonaws.com/zarr-layer-examples/13-lvl-30m-4326-scott-BP.zarr',
+    variable: 'BP',
+    clim: [0, 0.13],
+    colormap: 'fire',
     zarrVersion: 3,
-    info: 'Untiled 2-level (EPSG:3857)',
+    info: 'Burn Probability over CONUS',
     sourceInfo:
-      'zarr-conventions/multiscales format. Loads different resolutions based on current zoom and requests chunks based on current viewport.',
+      '30m resolution 1 level multiscale Zarr pyramid created from resampling and reprojecting the  \n \n "Wildfire Risk to Communities: Spatial datasets of landscape-wide wildfire risk components for the United States (2nd Edition)" dataset. \n DOI: https://doi.org/10.2737/RDS-2020-0016-2',
   }),
 ]
 
