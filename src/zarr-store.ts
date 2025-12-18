@@ -179,6 +179,18 @@ export class ZarrStore {
   latIsAscending: boolean | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
 
+  /**
+   * Returns the coarsest (lowest resolution) level path.
+   * - Tiled pyramids: level 0 is coarsest
+   * - Untiled multiscale: last level (maxLevelIndex) is coarsest
+   */
+  get coarsestLevel(): string | undefined {
+    if (this.levels.length === 0) return undefined
+    return this.multiscaleType === 'untiled'
+      ? this.levels[this.maxLevelIndex]
+      : this.levels[0]
+  }
+
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
   private _arrayHandles = new Map<
@@ -555,8 +567,9 @@ export class ZarrStore {
         )
       ) {
         try {
-          const coordKey =
-            this.levels.length > 0 ? `${this.levels[0]}/${dimName}` : dimName
+          const coordKey = this.coarsestLevel
+            ? `${this.coarsestLevel}/${dimName}`
+            : dimName
           const coordArray = await this._getArray(coordKey)
           coordinates[dimName] = coordArray
         } catch (err) {
@@ -609,8 +622,17 @@ export class ZarrStore {
     if (!this.dimIndices.lon || !this.dimIndices.lat || !this.root) return
 
     try {
+      // Use coarsest level for bounds detection:
+      // - Tiled pyramids: level 0 is coarsest
+      // - Untiled multiscale: last level (maxLevelIndex) is coarsest
+      const coarsestLevel =
+        this.multiscaleType === 'untiled'
+          ? this.levels[this.maxLevelIndex]
+          : this.levels[0]
       const levelRoot =
-        this.levels.length > 0 ? this.root.resolve(this.levels[0]) : this.root
+        this.levels.length > 0 && coarsestLevel
+          ? this.root.resolve(coarsestLevel)
+          : this.root
 
       const openArray = (loc: zarr.Location<Readable>) => {
         if (this.version === 2) {
@@ -634,22 +656,33 @@ export class ZarrStore {
       const xdata = await zarr.get(xarr)
       const ydata = await zarr.get(yarr)
 
-      const xValues = Array.from(xdata.data as ArrayLike<number>)
-      const yValues = Array.from(ydata.data as ArrayLike<number>)
+      const xValues = xdata.data as ArrayLike<number>
+      const yValues = ydata.data as ArrayLike<number>
 
-      const detected = this._detectAscending(yValues)
-      if (this.latIsAscending === null) {
-        this.latIsAscending = detected
+      // Determine ascending from first two values
+      if (this.latIsAscending === null && yValues.length >= 2) {
+        this.latIsAscending = yValues[1] > yValues[0]
       }
 
-      this.xyLimits = {
-        xMin: Math.min(...xValues),
-        xMax: Math.max(...xValues),
-        yMin: Math.min(...yValues),
-        yMax: Math.max(...yValues),
+      // Use for-loop instead of spread to avoid stack overflow with large arrays
+      let xMin = xValues[0],
+        xMax = xValues[0]
+      for (let i = 1; i < xValues.length; i++) {
+        const v = xValues[i]
+        if (v < xMin) xMin = v
+        if (v > xMax) xMax = v
       }
+      let yMin = yValues[0],
+        yMax = yValues[0]
+      for (let i = 1; i < yValues.length; i++) {
+        const v = yValues[i]
+        if (v < yMin) yMin = v
+        if (v > yMax) yMax = v
+      }
+
+      this.xyLimits = { xMin, xMax, yMin, yMax }
     } catch (err) {
-      // Use explicit bounds if provided, otherwise fall back to defaults
+      // Use explicit bounds if provided, otherwise throw
       if (this.explicitBounds) {
         const [west, south, east, north] = this.explicitBounds
         this.xyLimits = {
@@ -663,29 +696,11 @@ export class ZarrStore {
           this.explicitBounds
         )
       } else {
-        console.warn(
-          'Failed to load XY limits from coordinate arrays, using defaults:',
-          err
+        throw new Error(
+          `Failed to load XY limits from coordinate arrays. ` +
+            `Provide explicit bounds via the 'bounds' option. ` +
+            `Original error: ${err instanceof Error ? err.message : err}`
         )
-        if (this.crs === 'EPSG:3857') {
-          const worldExtent = 20037508.342789244
-          this.xyLimits = {
-            xMin: -worldExtent,
-            xMax: worldExtent,
-            yMin: -worldExtent,
-            yMax: worldExtent,
-          }
-        } else {
-          this.xyLimits = {
-            xMin: -180,
-            xMax: 180,
-            yMin: -90,
-            yMax: 90,
-          }
-        }
-      }
-      if (this.latIsAscending === null) {
-        this.latIsAscending = null
       }
     }
 
@@ -711,11 +726,13 @@ export class ZarrStore {
     multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
   ): PyramidMetadata {
     if (!multiscales) {
+      // No multiscale metadata - single level untiled dataset
+      this.multiscaleType = 'untiled'
       return {
         levels: [],
         maxLevelIndex: 0,
         tileSize: 128,
-        crs: 'EPSG:4326',
+        crs: this.crs,
       }
     }
 
@@ -751,11 +768,13 @@ export class ZarrStore {
       }
     }
 
+    // Unrecognized multiscale format - treat as single level untiled
+    this.multiscaleType = 'untiled'
     return {
       levels: [],
       maxLevelIndex: 0,
       tileSize: 128,
-      crs: 'EPSG:4326',
+      crs: this.crs,
     }
   }
 
@@ -764,11 +783,12 @@ export class ZarrStore {
   ): PyramidMetadata {
     const layout = metadata.layout
     if (!layout || layout.length === 0) {
+      this.multiscaleType = 'untiled'
       return {
         levels: [],
         maxLevelIndex: 0,
         tileSize: 128,
-        crs: 'EPSG:4326',
+        crs: this.crs,
       }
     }
 
@@ -785,9 +805,9 @@ export class ZarrStore {
 
     this.multiscaleType = 'untiled'
 
-    // Check for explicit CRS in metadata, otherwise default to EPSG:4326
+    // Check for explicit CRS in metadata, otherwise use configured CRS
     // (bounds-based inference will happen after coordinate arrays are loaded)
-    const crs: CRS = metadata.crs ?? 'EPSG:4326'
+    const crs: CRS = metadata.crs ?? this.crs
     if (metadata.crs) {
       this._crsFromMetadata = true
     }
@@ -803,26 +823,5 @@ export class ZarrStore {
   static clearCache() {
     ZarrStore._cache.clear()
     ZarrStore._storeCache.clear()
-  }
-
-  private _detectAscending(values: number[]): boolean | null {
-    if (!values || values.length < 2) return null
-
-    let direction = 0
-    for (let i = 0; i < values.length - 1; i++) {
-      const diff = values[i + 1] - values[i]
-      if (Math.abs(diff) < 1e-12) {
-        continue
-      }
-      const sign = diff > 0 ? 1 : -1
-      if (direction === 0) {
-        direction = sign
-      } else if (direction !== sign) {
-        return null
-      }
-    }
-
-    if (direction === 0) return null
-    return direction > 0
   }
 }

@@ -1,6 +1,7 @@
 import {
   createWarpedTexCoords,
   findBestParentTile,
+  findBestChildTiles,
   tileToKey,
   tileToScale,
   type MercatorBounds,
@@ -116,6 +117,7 @@ export function renderTiles(
   tileBounds?: Record<string, MercatorBounds>,
   customShaderConfig?: CustomShaderConfig,
   isGlobeTileRender: boolean = false,
+  datasetMaxZoom?: number,
   tileTexOverrides?: Record<
     string,
     { texScale: [number, number]; texOffset: [number, number] }
@@ -141,6 +143,7 @@ export function renderTiles(
     if (tile && tile.data) {
       tileToRender = tile
     } else {
+      // Try parent first (zoom-in case)
       const parent = findBestParentTile(tileCache, z, x, y)
       if (parent) {
         tileToRender = parent.tile
@@ -155,6 +158,120 @@ export function renderTiles(
         const localY = y % divisor
         texScale = [1 / divisor, 1 / divisor]
         texOffset = [localX / divisor, localY / divisor]
+      } else if (datasetMaxZoom !== undefined) {
+        // Try children (zoom-out case)
+        const children = findBestChildTiles(tileCache, z, x, y, datasetMaxZoom)
+        if (children && children.length > 0) {
+          // Compute target tile's mercator bounds
+          let targetBounds: MercatorBounds
+          if (bounds) {
+            targetBounds = bounds
+          } else {
+            const [scale, shiftX, shiftY] = tileToScale(tileTuple)
+            targetBounds = {
+              x0: shiftX - scale,
+              x1: shiftX + scale,
+              y0: shiftY - scale,
+              y1: shiftY + scale,
+            }
+          }
+
+          // Render each child tile at its sub-position within target bounds
+          for (const child of children) {
+            if (
+              !child.tile.data ||
+              !child.tile.vertexBuffer ||
+              !child.tile.pixCoordBuffer ||
+              !child.tile.tileTexture
+            ) {
+              continue
+            }
+
+            const levelDiff = child.childZ - z
+            const divisor = Math.pow(2, levelDiff)
+
+            // Calculate which sub-position this child covers
+            const localX = child.childX % divisor
+            const localY = child.childY % divisor
+
+            // Compute child's mercator bounds as a sub-region of target bounds
+            const xSpan = targetBounds.x1 - targetBounds.x0
+            const ySpan = targetBounds.y1 - targetBounds.y0
+            const childBounds: MercatorBounds = {
+              x0: targetBounds.x0 + (localX / divisor) * xSpan,
+              x1: targetBounds.x0 + ((localX + 1) / divisor) * xSpan,
+              y0: targetBounds.y0 + (localY / divisor) * ySpan,
+              y1: targetBounds.y0 + ((localY + 1) / divisor) * ySpan,
+            }
+
+            // Preserve lat bounds if present (scale them for the child's portion)
+            if (bounds?.latMin !== undefined && bounds?.latMax !== undefined) {
+              const latSpan = bounds.latMax - bounds.latMin
+              childBounds.latMin = bounds.latMin + (localY / divisor) * latSpan
+              childBounds.latMax =
+                bounds.latMin + ((localY + 1) / divisor) * latSpan
+            }
+
+            const childTileKey = tileToKey([
+              child.childZ,
+              child.childX,
+              child.childY,
+            ])
+
+            // Prepare geometry for this child tile
+            const childPixCoordBuffer = prepareTileGeometry(
+              gl,
+              child.tile,
+              vertexArr,
+              pixCoordArr,
+              childBounds,
+              latIsAscending,
+              isGlobeTileRender
+            )
+
+            // Set equirectangular mode for child
+            if (shaderProgram.isEquirectangularLoc) {
+              const useShaderReproject =
+                isGlobeTileRender && childBounds.latMin !== undefined
+              gl.uniform1i(
+                shaderProgram.isEquirectangularLoc,
+                useShaderReproject ? 1 : 0
+              )
+            }
+
+            // Set lat uniforms for globe rendering
+            if (isGlobeTileRender) {
+              if (childBounds.latMin !== undefined && shaderProgram.latMinLoc) {
+                gl.uniform1f(shaderProgram.latMinLoc, childBounds.latMin)
+              }
+              if (childBounds.latMax !== undefined && shaderProgram.latMaxLoc) {
+                gl.uniform1f(shaderProgram.latMaxLoc, childBounds.latMax)
+              }
+            }
+
+            // Child uses full texture (texScale=1, texOffset=0)
+            const childRenderable = tileToRenderable(
+              child.tile,
+              childBounds,
+              childPixCoordBuffer,
+              vertexCount,
+              tileSize,
+              [1, 1],
+              [0, 0],
+              tileCache,
+              childTileKey
+            )
+
+            renderRegion(
+              gl,
+              shaderProgram,
+              childRenderable,
+              isGlobeTileRender ? [0] : worldOffsets,
+              customShaderConfig
+            )
+          }
+          continue // Skip normal tile render - we've rendered children
+        }
       }
     }
 

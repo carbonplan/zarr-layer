@@ -745,11 +745,19 @@ export class UntiledMode implements ZarrMode {
       this.fetchRegionsThrottled(staleRegions, gl)
     }
 
-    // Clear previous level cache once all visible regions are loaded with current selector
+    // Clear previous level cache once all visible regions are fully loaded with current selector
+    // This ensures previous (potentially higher-res) data stays visible as fallback during zoom-out
+    const allVisibleLoaded = visible.every(({ regionX, regionY }) => {
+      const key = `${regionX},${regionY}`
+      const region = this.regionCache.get(key)
+      return region && region.data && !region.loading
+    })
+
     if (
       this.previousRegionCache.size > 0 &&
       newRegions.length === 0 &&
-      staleRegions.length === 0
+      staleRegions.length === 0 &&
+      allVisibleLoaded
     ) {
       this.clearPreviousRegionCache(gl)
     }

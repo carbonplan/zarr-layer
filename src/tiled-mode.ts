@@ -226,6 +226,10 @@ export class TiledMode implements ZarrMode {
       false
     )
 
+    // Calculate datasetMaxZoom from the highest resolution level
+    const maxLevelPath = this.zarrStore.levels[this.maxLevelIndex]
+    const datasetMaxZoom = parseLevelZoom(maxLevelPath, this.maxLevelIndex)
+
     renderer.renderTiles(
       shaderProgram,
       this.visibleTiles,
@@ -237,7 +241,8 @@ export class TiledMode implements ZarrMode {
       this.zarrStore.latIsAscending,
       Object.keys(this.tileBounds).length > 0 ? this.tileBounds : undefined,
       context.customShaderConfig,
-      false
+      false,
+      datasetMaxZoom
     )
   }
 

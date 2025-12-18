@@ -1,5 +1,6 @@
 import {
   findBestParentTile,
+  findBestChildTiles,
   mercatorTileToGeoBounds,
   getOverlapping4326Tiles,
   get4326TileGeoBounds,
@@ -529,6 +530,10 @@ export function renderMapboxTile({
     )
     renderer.gl.useProgram(shaderProgram.program)
 
+    // Compute datasetMaxZoom for child tile fallback
+    const maxZoomLevelPath = levels[maxLevelIndex] ?? ''
+    const datasetMaxZoom = parseLevelZoom(maxZoomLevelPath, maxLevelIndex)
+
     let anyTileRendered = false
     let anyMissing = false
     for (const zarrTile of overlappingZarrTiles) {
@@ -538,16 +543,130 @@ export function renderMapboxTile({
       let renderTileTuple: TileTuple = zarrTile
       if (!tileData?.data) {
         anyMissing = true
+        // Try parent first (zoom-in case)
         const parent = findBestParentTile(
           tileCache,
           zarrTile[0],
           zarrTile[1],
           zarrTile[2]
         )
-        if (!parent) continue
-        tileData = parent.tile
-        renderTileTuple = [parent.ancestorZ, parent.ancestorX, parent.ancestorY]
-        renderTileKey = tileToKey(renderTileTuple)
+        if (parent) {
+          tileData = parent.tile
+          renderTileTuple = [
+            parent.ancestorZ,
+            parent.ancestorX,
+            parent.ancestorY,
+          ]
+          renderTileKey = tileToKey(renderTileTuple)
+        } else {
+          // Try children (zoom-out case)
+          const children = findBestChildTiles(
+            tileCache,
+            zarrTile[0],
+            zarrTile[1],
+            zarrTile[2],
+            datasetMaxZoom
+          )
+          if (children && children.length > 0) {
+            // Render each child tile
+            for (const child of children) {
+              if (!child.tile.data) continue
+
+              const childTileTuple: TileTuple = [
+                child.childZ,
+                child.childX,
+                child.childY,
+              ]
+              const childTileKey = tileToKey(childTileTuple)
+              const childGeoBounds = get4326TileGeoBounds(
+                child.childZ,
+                child.childX,
+                child.childY,
+                xyLimits
+              )
+
+              const childMercX0 = lonToMercatorNorm(childGeoBounds.west)
+              const childMercX1 = lonToMercatorNorm(childGeoBounds.east)
+              const childMercY0 = latToMercatorNorm(childGeoBounds.north)
+              const childMercY1 = latToMercatorNorm(childGeoBounds.south)
+
+              const childOverlapX0 = Math.max(childMercX0, mapboxMercX0)
+              const childOverlapX1 = Math.min(childMercX1, mapboxMercX1)
+              const childOverlapY0 = Math.max(childMercY0, mapboxMercY0)
+              const childOverlapY1 = Math.min(childMercY1, mapboxMercY1)
+
+              if (
+                childOverlapX1 <= childOverlapX0 ||
+                childOverlapY1 <= childOverlapY0
+              )
+                continue
+
+              const childLonWidth = childGeoBounds.east - childGeoBounds.west
+              const childOverlapWest = mercatorNormToLon(childOverlapX0)
+              const childOverlapEast = mercatorNormToLon(childOverlapX1)
+              const childTexScaleX =
+                childLonWidth > 0
+                  ? (childOverlapEast - childOverlapWest) / childLonWidth
+                  : 1
+              const childTexOffsetX =
+                childLonWidth > 0
+                  ? (childOverlapWest - childGeoBounds.west) / childLonWidth
+                  : 0
+
+              const childTileBoundsForRender = {
+                [childTileKey]: {
+                  x0: childOverlapX0,
+                  y0: childOverlapY0,
+                  x1: childOverlapX1,
+                  y1: childOverlapY1,
+                  latMin: childGeoBounds.south,
+                  latMax: childGeoBounds.north,
+                },
+              }
+
+              renderer.applyCommonUniforms(
+                shaderProgram,
+                colormapTexture,
+                uniforms,
+                customShaderConfig,
+                context.projectionData,
+                {
+                  projection: { name: 'globe' },
+                  globeToMercatorMatrix: IDENTITY_MATRIX,
+                  transition: 0,
+                },
+                tileMatrix,
+                true
+              )
+
+              renderer.renderTiles(
+                shaderProgram,
+                [childTileTuple],
+                [0],
+                tileCache,
+                tileSize,
+                vertexArr,
+                pixCoordArr,
+                latIsAscending,
+                childTileBoundsForRender,
+                customShaderConfig,
+                true,
+                undefined,
+                {
+                  [childTileKey]: {
+                    texScale: [childTexScaleX, 1.0],
+                    texOffset: [childTexOffsetX, 0.0],
+                  },
+                }
+              )
+
+              anyTileRendered = true
+            }
+            continue // Skip normal processing for this zarrTile - we've rendered children
+          }
+          // No parent or children found - skip this tile
+          continue
+        }
       }
 
       const [z, tx, ty] = renderTileTuple
@@ -613,6 +732,7 @@ export function renderMapboxTile({
         tileBoundsForRender,
         customShaderConfig,
         true,
+        undefined,
         {
           [renderTileKey]: {
             texScale: [texScaleX, texScaleY],
@@ -641,6 +761,10 @@ export function renderMapboxTile({
       latMax: boundsForTile?.latMax,
     },
   }
+
+  // Compute datasetMaxZoom for child tile fallback
+  const maxZoomLevelPath = levels[maxLevelIndex] ?? ''
+  const datasetMaxZoom = parseLevelZoom(maxZoomLevelPath, maxLevelIndex)
 
   const shaderProgram = renderer.getProgram(
     context.shaderData,
@@ -675,7 +799,8 @@ export function renderMapboxTile({
     latIsAscending,
     tileBoundsOverride,
     customShaderConfig,
-    true
+    true,
+    datasetMaxZoom
   )
 
   const tileHasData = tileCache.get(tileKey)?.data
