@@ -24,6 +24,6 @@ export const SELECTOR_SECTIONS: SelectorSection[] = [
   },
   {
     label: 'Untiled Multiscale',
-    datasetIds: ['untiled_2level_4326', 'untiled_2level_3857'],
+    datasetIds: ['untiled_2level_4326', 'Burn Probability over CONUS'],
   },
 ]
