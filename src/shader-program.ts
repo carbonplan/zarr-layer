@@ -49,9 +49,6 @@ export interface ShaderProgram {
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
   tileRenderLoc?: WebGLUniformLocation | null
-  isEquirectangularLoc: WebGLUniformLocation | null
-  latMinLoc: WebGLUniformLocation | null
-  latMaxLoc: WebGLUniformLocation | null
   dataScaleLoc: WebGLUniformLocation | null
 }
 
@@ -209,9 +206,6 @@ export function createShaderProgram(
       projectionMode === 'mapbox-globe'
         ? gl.getUniformLocation(program, 'u_tile_render')
         : null,
-    isEquirectangularLoc: gl.getUniformLocation(program, 'u_isEquirectangular'),
-    latMinLoc: gl.getUniformLocation(program, 'u_latMin'),
-    latMaxLoc: gl.getUniformLocation(program, 'u_latMax'),
     dataScaleLoc: gl.getUniformLocation(program, 'u_dataScale'),
   }
 

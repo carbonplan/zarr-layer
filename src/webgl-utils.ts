@@ -149,30 +149,6 @@ export function configureDataTexture(gl: WebGL2RenderingContext) {
 }
 
 /**
- * Computes texture override parameters for composing crop and flip transforms.
- *
- * Background: Some renderers apply transforms in crop(flip(v)) order, but
- * for correct lat/lon reprojection we need flip(crop(v)) order. This function
- * computes the override values that achieve the correct result.
- *
- * Formula: overrideOffset = baseScale * cropOffset + baseOffset * (1 - cropScale)
- */
-export function computeTexOverride(
-  cropScale: [number, number],
-  cropOffset: [number, number],
-  baseScale: [number, number],
-  baseOffset: [number, number]
-): { texScale: [number, number]; texOffset: [number, number] } {
-  return {
-    texScale: cropScale,
-    texOffset: [
-      baseScale[0] * cropOffset[0] + baseOffset[0] * (1 - cropScale[0]),
-      baseScale[1] * cropOffset[1] + baseOffset[1] * (1 - cropScale[1]),
-    ],
-  }
-}
-
-/**
  * Normalize data for texture upload to ensure half-float safe range on mobile GPUs.
  * Uses clim to determine scale (avoids scanning all data).
  * Fill values are converted to NaN for reliable detection.
@@ -239,4 +215,25 @@ export function createSubdividedQuad(subdivisions: number): {
     vertexArr: new Float32Array(vertices),
     texCoordArr: new Float32Array(texCoords),
   }
+}
+
+/**
+ * Create linear texture coordinates from vertex positions.
+ * Used as a starting point for CPU-based texture coordinate warping.
+ * Formula: u = (x+1)/2, v = (1-y)/2
+ *
+ * @param vertexArr - Vertex positions in clip space [-1,1]
+ * @returns Texture coordinates in [0,1] range
+ */
+export function createLinearTexCoordsFromVertices(
+  vertexArr: Float32Array
+): Float32Array {
+  const linearCoords = new Float32Array(vertexArr.length)
+  for (let i = 0; i < vertexArr.length; i += 2) {
+    const x = vertexArr[i]
+    const y = vertexArr[i + 1]
+    linearCoords[i] = (x + 1) / 2 // u
+    linearCoords[i + 1] = (1 - y) / 2 // v
+  }
+  return linearCoords
 }

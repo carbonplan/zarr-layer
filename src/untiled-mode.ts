@@ -1284,11 +1284,6 @@ export class UntiledMode implements ZarrMode {
   ): void {
     const gl = renderer.gl
 
-    // Disable equirectangular mode for regions - geometry is already in mercator space
-    if (shaderProgram.isEquirectangularLoc) {
-      gl.uniform1i(shaderProgram.isEquirectangularLoc, 0)
-    }
-
     // Set up band texture uniforms once per frame
     setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
 

@@ -14,12 +14,32 @@ import { setupBandTextureUniforms } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 
 /**
+ * Cache for Mapbox tile-specific warped buffers.
+ * Key format: `${tileKey}_${boundsKey}` where boundsKey is the Mapbox tile bounds.
+ */
+const mapboxWarpedBufferCache = new Map<string, WebGLBuffer>()
+
+/**
+ * Create a cache key for Mapbox warped buffers.
+ */
+function mapboxWarpedKey(
+  tileKey: string,
+  bounds: { x0: number; y0: number; x1: number; y1: number }
+): string {
+  return `${tileKey}_${bounds.x0},${bounds.y0},${bounds.x1},${bounds.y1}`
+}
+
+/**
  * Prepare tile geometry by uploading vertex and texture coordinate buffers.
  * Handles both regular geometry and pre-warped coords for EPSG:4326.
+ *
+ * For flat map: uses tile's warpedPixCoordBuffer (warped for tile's own bounds)
+ * For Mapbox tiles: computes warped coords for the specific Mapbox tile bounds
  */
 function prepareTileGeometry(
   gl: WebGL2RenderingContext,
   tile: TileData,
+  tileKey: string,
   vertexArr: Float32Array,
   pixCoordArr: Float32Array,
   bounds: MercatorBounds | undefined,
@@ -37,38 +57,66 @@ function prepareTileGeometry(
     tile.geometryUploaded = true
   }
 
-  // For EPSG:4326 data on flat map, compute and upload pre-warped tex coords
-  const useWarpedCoords =
-    !isGlobeTileRender &&
-    tile.latBounds &&
-    bounds?.latMin !== undefined &&
-    tile.warpedPixCoordBuffer
+  // For EPSG:4326 data, compute and use pre-warped tex coords
+  const hasLatBounds = tile.latBounds && bounds?.latMin !== undefined
 
-  if (useWarpedCoords && !tile.warpedGeometryUploaded) {
-    const warpedCoords = createWarpedTexCoords(
-      vertexArr,
-      pixCoordArr,
-      {
-        x0: bounds!.x0,
-        x1: bounds!.x1,
-        y0: bounds!.y0,
-        y1: bounds!.y1,
-      },
-      {
-        latMin: tile.latBounds!.min,
-        latMax: tile.latBounds!.max,
-      },
-      latIsAscending
-    )
-    gl.bindBuffer(gl.ARRAY_BUFFER, tile.warpedPixCoordBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, warpedCoords, gl.STATIC_DRAW)
-    tile.warpedGeometryUploaded = true
+  if (hasLatBounds) {
+    if (isGlobeTileRender) {
+      // Mapbox tile rendering: warp for the specific Mapbox tile bounds
+      const cacheKey = mapboxWarpedKey(tileKey, bounds!)
+      let warpedBuffer = mapboxWarpedBufferCache.get(cacheKey)
+
+      if (!warpedBuffer) {
+        const warpedCoords = createWarpedTexCoords(
+          vertexArr,
+          pixCoordArr,
+          {
+            x0: bounds!.x0,
+            x1: bounds!.x1,
+            y0: bounds!.y0,
+            y1: bounds!.y1,
+          },
+          {
+            latMin: tile.latBounds!.min,
+            latMax: tile.latBounds!.max,
+          },
+          latIsAscending
+        )
+        warpedBuffer = gl.createBuffer()!
+        gl.bindBuffer(gl.ARRAY_BUFFER, warpedBuffer)
+        gl.bufferData(gl.ARRAY_BUFFER, warpedCoords, gl.STATIC_DRAW)
+        mapboxWarpedBufferCache.set(cacheKey, warpedBuffer)
+      }
+
+      return warpedBuffer
+    } else if (tile.warpedPixCoordBuffer) {
+      // Flat map rendering: use tile's own warped buffer
+      if (!tile.warpedGeometryUploaded) {
+        const warpedCoords = createWarpedTexCoords(
+          vertexArr,
+          pixCoordArr,
+          {
+            x0: bounds!.x0,
+            x1: bounds!.x1,
+            y0: bounds!.y0,
+            y1: bounds!.y1,
+          },
+          {
+            latMin: tile.latBounds!.min,
+            latMax: tile.latBounds!.max,
+          },
+          latIsAscending
+        )
+        gl.bindBuffer(gl.ARRAY_BUFFER, tile.warpedPixCoordBuffer)
+        gl.bufferData(gl.ARRAY_BUFFER, warpedCoords, gl.STATIC_DRAW)
+        tile.warpedGeometryUploaded = true
+      }
+      return tile.warpedPixCoordBuffer
+    }
   }
 
-  // Return the appropriate pixCoord buffer
-  return useWarpedCoords && tile.warpedGeometryUploaded
-    ? tile.warpedPixCoordBuffer!
-    : tile.pixCoordBuffer!
+  // No warping needed (EPSG:3857 or no lat bounds)
+  return tile.pixCoordBuffer!
 }
 
 /**
@@ -218,36 +266,17 @@ export function renderTiles(
               child.childY,
             ])
 
-            // Prepare geometry for this child tile
+            // Prepare geometry for this child tile (CPU warp baked into coords)
             const childPixCoordBuffer = prepareTileGeometry(
               gl,
               child.tile,
+              childTileKey,
               vertexArr,
               pixCoordArr,
               childBounds,
               latIsAscending,
               isGlobeTileRender
             )
-
-            // Set equirectangular mode for child
-            if (shaderProgram.isEquirectangularLoc) {
-              const useShaderReproject =
-                isGlobeTileRender && childBounds.latMin !== undefined
-              gl.uniform1i(
-                shaderProgram.isEquirectangularLoc,
-                useShaderReproject ? 1 : 0
-              )
-            }
-
-            // Set lat uniforms for globe rendering
-            if (isGlobeTileRender) {
-              if (childBounds.latMin !== undefined && shaderProgram.latMinLoc) {
-                gl.uniform1f(shaderProgram.latMinLoc, childBounds.latMin)
-              }
-              if (childBounds.latMax !== undefined && shaderProgram.latMaxLoc) {
-                gl.uniform1f(shaderProgram.latMaxLoc, childBounds.latMax)
-              }
-            }
 
             // Child uses full texture (texScale=1, texOffset=0)
             const childRenderable = tileToRenderable(
@@ -286,38 +315,19 @@ export function renderTiles(
       continue
     }
 
-    // Set equirectangular mode per-tile:
-    // - Flat map with pre-warped coords: disabled (coords handle reprojection)
-    // - Globe with EPSG:4326 data (has latMin): enabled (shader does reprojection)
-    // - Globe with EPSG:3857 data (no latMin): disabled (already in Mercator)
-    if (shaderProgram.isEquirectangularLoc) {
-      const useShaderReproject =
-        isGlobeTileRender && bounds?.latMin !== undefined
-      gl.uniform1i(
-        shaderProgram.isEquirectangularLoc,
-        useShaderReproject ? 1 : 0
-      )
+    // For globe tile rendering, handle texture overrides
+    if (isGlobeTileRender && tileTexOverrides?.[tileKey]) {
+      const override = tileTexOverrides[tileKey]
+      texScale = override.texScale
+      texOffset = override.texOffset
     }
 
-    // For globe tile rendering, handle texture overrides and lat uniforms
-    if (isGlobeTileRender) {
-      if (tileTexOverrides?.[tileKey]) {
-        const override = tileTexOverrides[tileKey]
-        texScale = override.texScale
-        texOffset = override.texOffset
-      }
-      if (bounds?.latMin !== undefined && shaderProgram.latMinLoc) {
-        gl.uniform1f(shaderProgram.latMinLoc, bounds.latMin)
-      }
-      if (bounds?.latMax !== undefined && shaderProgram.latMaxLoc) {
-        gl.uniform1f(shaderProgram.latMaxLoc, bounds.latMax)
-      }
-    }
-
-    // Prepare geometry (upload buffers, compute warped coords)
+    // Prepare geometry (upload buffers, compute warped coords for EPSG:4326)
+    // CPU warp is baked into the coords, no shader reprojection needed
     const pixCoordBuffer = prepareTileGeometry(
       gl,
       tileToRender,
+      renderTileKey,
       vertexArr,
       pixCoordArr,
       bounds,
