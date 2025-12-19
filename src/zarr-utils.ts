@@ -14,6 +14,7 @@ import {
   type SpatialDimensions,
   type DimIndicesProps,
 } from './types'
+import { SPATIAL_DIMENSION_ALIASES } from './constants'
 
 type CoordinateArray = zarr.Array<zarr.DataType> & {
   attrs?: Record<string, unknown>
@@ -24,12 +25,6 @@ const resolveOpenFunc = (zarrVersion: 2 | 3 | null): typeof zarr.open => {
   if (zarrVersion === 2) return zarr.open.v2 as typeof zarr.open
   if (zarrVersion === 3) return zarr.open.v3 as typeof zarr.open
   return zarr.open
-}
-
-/** Common names for spatial dimensions. These are matched case-insensitively. */
-const SPATIAL_DIMENSION_ALIASES: Record<'lat' | 'lon', string[]> = {
-  lat: ['lat', 'latitude', 'y'],
-  lon: ['lon', 'longitude', 'x', 'lng'],
 }
 
 /**
@@ -108,17 +103,12 @@ export async function loadDimensionValues(
   slice?: [number, number]
 ): Promise<Float64Array | number[]> {
   if (dimensionValues[dimIndices.name]) return dimensionValues[dimIndices.name]
-  let targetRoot
-  if (levelInfo) {
-    targetRoot = await root.resolve(levelInfo)
-  } else {
-    targetRoot = root
-  }
+  const targetRoot = levelInfo ? root.resolve(levelInfo) : root
   let coordArr
   if (dimIndices.array) {
     coordArr = dimIndices.array
   } else {
-    const coordVar = await targetRoot.resolve(dimIndices.name)
+    const coordVar = targetRoot.resolve(dimIndices.name)
     const localFunc = resolveOpenFunc(zarrVersion)
     coordArr = await localFunc(coordVar, { kind: 'array' })
   }

@@ -211,16 +211,25 @@ export class UntiledMode implements ZarrMode {
   }
 
   private async loadLevelMetadata(): Promise<void> {
-    for (let i = 0; i < this.levels.length; i++) {
-      const level = this.levels[i]
-      try {
-        const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
-        level.shape = meta.shape
-        level.chunks = meta.chunks
-      } catch (err) {
-        console.warn(`Failed to load metadata for level ${level.asset}:`, err)
-      }
+    // Filter to only levels that don't already have shapes from consolidated metadata
+    const levelsNeedingFetch = this.levels.filter((level) => !level.shape)
+
+    if (levelsNeedingFetch.length === 0) {
+      // All shapes pre-populated from consolidated metadata - no fetches needed
+      return
     }
+
+    await Promise.all(
+      levelsNeedingFetch.map(async (level) => {
+        try {
+          const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+          level.shape = meta.shape
+          level.chunks = meta.chunks
+        } catch (err) {
+          console.warn(`Failed to load metadata for level ${level.asset}:`, err)
+        }
+      })
+    )
   }
 
   /**

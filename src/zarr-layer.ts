@@ -35,6 +35,7 @@ import {
   isGlobeProjection as checkGlobeProjection,
 } from './map-utils'
 import type { QueryGeometry, QueryResult } from './query/types'
+import { SPATIAL_DIM_NAMES } from './constants'
 
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
@@ -454,7 +455,8 @@ export class ZarrLayer {
       this.normalizedSelector[dimName] = toSelectorProps(value)
     }
     for (const dimName of Object.keys(this.dimIndices)) {
-      if (dimName !== 'lon' && dimName !== 'lat') {
+      // Skip spatial dimensions - don't load coordinate arrays for these
+      if (!SPATIAL_DIM_NAMES.has(dimName.toLowerCase())) {
         try {
           this.dimensionValues[dimName] = await loadDimensionValues(
             this.dimensionValues,

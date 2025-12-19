@@ -557,35 +557,9 @@ export class ZarrStore {
   private async _computeDimIndices() {
     if (this.dimensions.length === 0) return
 
-    const coordinates: Record<string, zarr.Array<zarr.DataType, Readable>> = {}
-
-    // Load coordinate arrays for spatial dimensions (used for bounds calculation)
-    for (const dimName of this.dimensions) {
-      if (
-        ['x', 'lon', 'longitude', 'y', 'lat', 'latitude'].includes(
-          dimName.toLowerCase()
-        )
-      ) {
-        try {
-          const coordKey = this.coarsestLevel
-            ? `${this.coarsestLevel}/${dimName}`
-            : dimName
-          const coordArray = await this._getArray(coordKey)
-          coordinates[dimName] = coordArray
-        } catch (err) {
-          console.debug(
-            `Could not load coordinate array for '${dimName}':`,
-            err
-          )
-        }
-      }
-    }
-
-    // Use identifyDimensionIndices for spatial dimensions (lat, lon)
     this.dimIndices = identifyDimensionIndices(
       this.dimensions,
-      this.spatialDimensions,
-      coordinates
+      this.spatialDimensions
     )
 
     // Add ALL dimensions to dimIndices so selectors can reference them by name
@@ -618,13 +592,72 @@ export class ZarrStore {
     return null
   }
 
+  /**
+   * Find the highest resolution level for untiled bounds detection.
+   * Coarse levels have larger pixels, so padding offsets are more significant.
+   * Trade-off is higher bandwidth. Users can provide explicit `bounds` to skip.
+   */
+  private async _findBoundsLevel(): Promise<string | undefined> {
+    if (this.levels.length === 0 || !this.root) return undefined
+    if (this.levels.length === 1) return this.levels[0]
+
+    const openArray = (loc: zarr.Location<Readable>) => {
+      if (this.version === 2) {
+        return zarr.open.v2(loc, { kind: 'array' })
+      } else if (this.version === 3) {
+        return zarr.open.v3(loc, { kind: 'array' })
+      }
+      return zarr.open(loc, { kind: 'array' })
+    }
+
+    // Compare first and last levels to determine which has higher resolution
+    const firstLevel = this.levels[0]
+    const lastLevel = this.levels[this.levels.length - 1]
+
+    try {
+      const firstArray = await openArray(
+        this.root.resolve(`${firstLevel}/${this.variable}`)
+      )
+      const lastArray = await openArray(
+        this.root.resolve(`${lastLevel}/${this.variable}`)
+      )
+
+      // Compare total pixels (product of dimensions)
+      const firstSize = firstArray.shape.reduce((a, b) => a * b, 1)
+      const lastSize = lastArray.shape.reduce((a, b) => a * b, 1)
+
+      return firstSize >= lastSize ? firstLevel : lastLevel
+    } catch {
+      // If we can't determine, default to first level
+      return firstLevel
+    }
+  }
+
   private async _loadXYLimits() {
+    // If explicit bounds provided, use them directly
+    if (this.explicitBounds) {
+      const [west, south, east, north] = this.explicitBounds
+      this.xyLimits = {
+        xMin: west,
+        xMax: east,
+        yMin: south,
+        yMax: north,
+      }
+      return
+    }
+
+    // Tiled pyramids use standard global extent (no coord array fetch needed)
+    if (this.multiscaleType === 'tiled') {
+      this.xyLimits = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
+      return
+    }
+
     if (!this.dimIndices.lon || !this.dimIndices.lat || !this.root) return
 
     try {
-      const levelRoot = this.coarsestLevel
-        ? this.root.resolve(this.coarsestLevel)
-        : this.root
+      // Untiled: use highest res level for accuracy (see _findBoundsLevel)
+      const boundsLevel = await this._findBoundsLevel()
+      const levelRoot = boundsLevel ? this.root.resolve(boundsLevel) : this.root
 
       const openArray = (loc: zarr.Location<Readable>) => {
         if (this.version === 2) {
@@ -638,54 +671,62 @@ export class ZarrStore {
       const lonName = this.spatialDimensions.lon ?? this.dimIndices.lon.name
       const latName = this.spatialDimensions.lat ?? this.dimIndices.lat.name
 
-      const xarr =
-        this.dimIndices.lon.array ||
-        (await openArray(levelRoot.resolve(lonName)))
-      const yarr =
-        this.dimIndices.lat.array ||
-        (await openArray(levelRoot.resolve(latName)))
+      const xarr = await openArray(levelRoot.resolve(lonName))
+      const yarr = await openArray(levelRoot.resolve(latName))
 
-      const xdata = await zarr.get(xarr)
-      const ydata = await zarr.get(yarr)
+      // Only fetch first and last values (coordinate arrays are monotonic)
+      // This avoids loading all chunks for large arrays
+      const xLen = xarr.shape[0]
+      const yLen = yarr.shape[0]
 
-      const xValues = xdata.data as ArrayLike<number>
-      const yValues = ydata.data as ArrayLike<number>
+      type ZarrResult = { data: ArrayLike<number> }
+      // Fetch first 2 elements together (same chunk) and last element separately
+      const [xFirst, xLast, yFirstTwo, yLast] = (await Promise.all([
+        zarr.get(xarr, [zarr.slice(0, 1)]),
+        zarr.get(xarr, [zarr.slice(xLen - 1, xLen)]),
+        zarr.get(yarr, [zarr.slice(0, 2)]),
+        zarr.get(yarr, [zarr.slice(yLen - 1, yLen)]),
+      ])) as ZarrResult[]
+
+      const x0 = xFirst.data[0]
+      const x1 = xLast.data[0]
+      const y0 = yFirstTwo.data[0]
+      const y1 = yFirstTwo.data[1]
+      const yN = yLast.data[0]
 
       // Determine ascending from first two values
-      if (this.latIsAscending === null && yValues.length >= 2) {
-        this.latIsAscending = yValues[1] > yValues[0]
+      if (this.latIsAscending === null) {
+        this.latIsAscending = y1 > y0
       }
 
-      // Use for-loop instead of spread to avoid stack overflow with large arrays
-      let xMin = xValues[0],
-        xMax = xValues[0]
-      for (let i = 1; i < xValues.length; i++) {
-        const v = xValues[i]
-        if (v < xMin) xMin = v
-        if (v > xMax) xMax = v
-      }
-      let yMin = yValues[0],
-        yMax = yValues[0]
-      for (let i = 1; i < yValues.length; i++) {
-        const v = yValues[i]
-        if (v < yMin) yMin = v
-        if (v > yMax) yMax = v
-      }
+      // Min/max from first and last (works for ascending or descending)
+      const xMin = Math.min(x0, x1)
+      const xMax = Math.max(x0, x1)
+      const yMin = Math.min(y0, yN)
+      const yMax = Math.max(y0, yN)
 
-      this.xyLimits = { xMin, xMax, yMin, yMax }
-    } catch (err) {
-      // Use explicit bounds if provided, otherwise throw
-      if (this.explicitBounds) {
-        const [west, south, east, north] = this.explicitBounds
-        this.xyLimits = {
-          xMin: west,
-          xMax: east,
-          yMin: south,
-          yMax: north,
+      // Only set xyLimits if not already set by explicit bounds
+      if (!this.xyLimits) {
+        this.xyLimits = { xMin, xMax, yMin, yMax }
+
+        // Warn users so they can set explicit bounds to avoid fetching large coord arrays
+        // (only for untiled where we fetch full-res arrays; tiled arrays are small)
+        if (this.multiscaleType === 'untiled') {
+          // Only include latIsAscending if non-default (false)
+          const latAscendingHint =
+            this.latIsAscending === false ? `, latIsAscending: false` : ''
+          console.warn(
+            `[zarr-layer] Detected bounds from coordinate arrays. ` +
+              `Set these options to skip the fetch: bounds: [${xMin}, ${yMin}, ${xMax}, ${yMax}]${latAscendingHint}`
+          )
         }
+      }
+    } catch (err) {
+      // If we already have bounds (from explicit config), just warn about latIsAscending detection
+      if (this.xyLimits) {
         console.debug(
-          'Using explicit bounds for XY limits:',
-          this.explicitBounds
+          'Could not detect latIsAscending from coordinate arrays:',
+          err instanceof Error ? err.message : err
         )
       } else {
         throw new Error(
@@ -714,6 +755,25 @@ export class ZarrStore {
     }
   }
 
+  /**
+   * Parse multiscale metadata to determine pyramid structure.
+   *
+   * Supports three multiscale formats:
+   *
+   * 1. **zarr-conventions/multiscales** (layout format):
+   *    Uses `layout` array with transform info. Parsed by `_parseUntiledMultiscale()`.
+   *    Example: `{ layout: [{ asset: "0", transform: { scale: [...] } }, ...] }`
+   *
+   * 2. **OME-NGFF style** (datasets format):
+   *    Uses `datasets` array. If `pixels_per_tile` is present, treated as tiled pyramid.
+   *    Otherwise treated as untiled multi-level.
+   *    Example: `[{ datasets: [{ path: "0", crs: "EPSG:4326" }, ...] }]`
+   *
+   * 3. **Single level**: No multiscale metadata, treated as single untiled image.
+   *
+   * For untiled formats, shapes are extracted from consolidated metadata when available
+   * to avoid per-level network requests.
+   */
   private _getPyramidMetadata(
     multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
   ): PyramidMetadata {
@@ -728,12 +788,14 @@ export class ZarrStore {
       }
     }
 
-    // Detect zarr-conventions/multiscales format (has 'layout' key)
+    // Format 1: zarr-conventions/multiscales (has 'layout' key)
+    // See: https://github.com/zarr-conventions/multiscales
     if ('layout' in multiscales && Array.isArray(multiscales.layout)) {
       return this._parseUntiledMultiscale(multiscales)
     }
 
-    // OME-NGFF style format (array with 'datasets' key)
+    // Format 2: OME-NGFF style (array with 'datasets' key)
+    // See: https://ngff.openmicroscopy.org/latest/
     if (Array.isArray(multiscales) && multiscales[0]?.datasets?.length) {
       const datasets = multiscales[0].datasets
       const levels = datasets.map((dataset) => String(dataset.path))
@@ -750,11 +812,37 @@ export class ZarrStore {
         return { levels, maxLevelIndex, tileSize, crs }
       } else {
         // Multi-level but not tiled - use UntiledMode
-        this.untiledLevels = levels.map((level) => ({
-          asset: level,
-          scale: [1.0, 1.0] as [number, number],
-          translation: [0.0, 0.0] as [number, number],
-        }))
+        // Try to extract shapes from consolidated metadata to avoid per-level fetches
+        const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
+          ?.consolidated_metadata?.metadata
+
+        this.untiledLevels = levels.map((level) => {
+          const untiledLevel: UntiledLevel = {
+            asset: level,
+            scale: [1.0, 1.0] as [number, number],
+            translation: [0.0, 0.0] as [number, number],
+          }
+
+          // Extract shape/chunks from consolidated metadata if available
+          if (consolidatedMeta) {
+            const arrayKey = `${level}/${this.variable}`
+            const arrayMeta = consolidatedMeta[arrayKey] as
+              | ZarrV3ArrayMetadata
+              | undefined
+            if (arrayMeta?.shape) {
+              untiledLevel.shape = arrayMeta.shape
+              // Extract chunks from chunk_grid or sharding codec
+              const gridChunks =
+                arrayMeta.chunk_grid?.configuration?.chunk_shape
+              const shardChunks = arrayMeta.codecs?.find(
+                (c) => c.name === 'sharding_indexed'
+              )?.configuration?.chunk_shape as number[] | undefined
+              untiledLevel.chunks = shardChunks || gridChunks || arrayMeta.shape
+            }
+          }
+
+          return untiledLevel
+        })
         this.multiscaleType = 'untiled'
         return { levels, maxLevelIndex, tileSize: 128, crs }
       }
@@ -770,6 +858,26 @@ export class ZarrStore {
     }
   }
 
+  /**
+   * Parse zarr-conventions/multiscales format (layout-based).
+   *
+   * This format uses a `layout` array where each entry specifies:
+   * - `asset`: path to the level (e.g., "0", "1", ...)
+   * - `transform`: optional scale/translation for georeferencing
+   *
+   * Example metadata:
+   * ```json
+   * {
+   *   "layout": [
+   *     { "asset": "0", "transform": { "scale": [1.0, 1.0], "translation": [0, 0] } },
+   *     { "asset": "1", "transform": { "scale": [2.0, 2.0], "translation": [0, 0] } }
+   *   ],
+   *   "crs": "EPSG:4326"
+   * }
+   * ```
+   *
+   * @see https://github.com/zarr-conventions/multiscales
+   */
   private _parseUntiledMultiscale(
     metadata: UntiledMultiscaleMetadata
   ): PyramidMetadata {
@@ -788,12 +896,37 @@ export class ZarrStore {
     const levels = layout.map((entry) => entry.asset)
     const maxLevelIndex = levels.length - 1
 
-    // Build untiledLevels with transform info
-    this.untiledLevels = layout.map((entry) => ({
-      asset: entry.asset,
-      scale: entry.transform?.scale ?? [1.0, 1.0],
-      translation: entry.transform?.translation ?? [0.0, 0.0],
-    }))
+    // Try to extract shapes from consolidated metadata to avoid per-level fetches
+    const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
+      ?.consolidated_metadata?.metadata
+
+    // Build untiledLevels with transform info and shapes from consolidated metadata
+    this.untiledLevels = layout.map((entry) => {
+      const level: UntiledLevel = {
+        asset: entry.asset,
+        scale: entry.transform?.scale ?? [1.0, 1.0],
+        translation: entry.transform?.translation ?? [0.0, 0.0],
+      }
+
+      // Extract shape/chunks from consolidated metadata if available
+      if (consolidatedMeta) {
+        const arrayKey = `${entry.asset}/${this.variable}`
+        const arrayMeta = consolidatedMeta[arrayKey] as
+          | ZarrV3ArrayMetadata
+          | undefined
+        if (arrayMeta?.shape) {
+          level.shape = arrayMeta.shape
+          // Extract chunks from chunk_grid or sharding codec
+          const gridChunks = arrayMeta.chunk_grid?.configuration?.chunk_shape
+          const shardChunks = arrayMeta.codecs?.find(
+            (c) => c.name === 'sharding_indexed'
+          )?.configuration?.chunk_shape as number[] | undefined
+          level.chunks = shardChunks || gridChunks || arrayMeta.shape
+        }
+      }
+
+      return level
+    })
 
     this.multiscaleType = 'untiled'
 
