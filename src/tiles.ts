@@ -11,6 +11,7 @@ import { resolveSelectorValue } from './zarr-utils'
 import {
   configureDataTexture,
   getTextureFormats,
+  interleaveBands,
   mustCreateBuffer,
   mustCreateTexture,
   normalizeDataForTexture,
@@ -251,6 +252,7 @@ export class Tiles {
 
   /**
    * Extract a 2D slice (+ optional extra channels) from a loaded chunk.
+   * Returns band-separate format only; interleaving is done later if needed.
    */
   private extractSliceFromChunk(
     chunkData: Float32Array,
@@ -258,7 +260,6 @@ export class Tiles {
     levelArray: zarr.Array<zarr.DataType>,
     chunkIndices: number[]
   ): {
-    data: Float32Array
     channels: number
     bandData: Map<string, Float32Array>
   } {
@@ -340,9 +341,7 @@ export class Tiles {
     })
     channels = channelSelections.length || 1
 
-    const paddedData = new Float32Array(tileWidth * tileHeight * channels)
-    paddedData.fill(this.fillValue)
-
+    // Create only band-separate arrays (interleaving done later if needed)
     const bandData = new Map<string, Float32Array>()
     const bandArrays: Float32Array[] = []
     for (let c = 0; c < channels; c++) {
@@ -364,13 +363,10 @@ export class Tiles {
           }
 
           const srcIdx = getChunkIndex(indices)
-          const baseDstIdx = latIdx * tileWidth + lonIdx
-          const dstIdx = baseDstIdx * channels + channelIdx
+          const dstIdx = latIdx * tileWidth + lonIdx
 
           if (srcIdx < chunkData.length) {
-            const val = chunkData[srcIdx]
-            paddedData[dstIdx] = val
-            bandArrays[channelIdx][baseDstIdx] = val
+            bandArrays[channelIdx][dstIdx] = chunkData[srcIdx]
           }
         })
       }
@@ -381,27 +377,23 @@ export class Tiles {
       bandData.set(bandName, bandArrays[c])
     }
 
-    return { data: paddedData, channels, bandData }
+    return { channels, bandData }
   }
 
   /**
    * Apply normalization to tile data and upload texture.
-   * Updates tile.data, tile.bandData with normalized values and stores scale factors.
+   * Processes bands once: resample (if needed) → normalize → interleave.
    */
   private applyNormalization(
     tile: TileData,
     sliced: {
-      data: Float32Array
       channels: number
       bandData: Map<string, Float32Array>
     }
   ): void {
-    let dataToNormalize = sliced.data
-    const bandDataToNormalize = new Map(sliced.bandData)
+    let bandDataToProcess = sliced.bandData
 
-    // Resample EPSG:4326 data to Mercator space before normalization
-    // Must resample bands separately since they are single-channel arrays,
-    // then reconstruct interleaved data for multi-channel tiles
+    // Resample EPSG:4326 bands to Mercator space if needed
     if (needsResampling(this.crs) && tile.geoBounds && tile.mercatorBounds) {
       const tileSize = this.store.tileSize
       const latIsAscending = this.store.latIsAscending ?? null
@@ -424,59 +416,40 @@ export class Tiles {
         latIsAscending,
       }
 
-      // Resample each band separately (bands are already single-channel)
-      const resampledBands: Float32Array[] = []
+      bandDataToProcess = new Map()
       for (const [bandName, bandData] of sliced.bandData) {
-        const resampled = resampleToMercator({
-          sourceData: bandData,
-          ...resampleOpts,
-        })
-        resampledBands.push(resampled)
-        bandDataToNormalize.set(bandName, resampled)
-      }
-
-      // Reconstruct interleaved data from resampled bands
-      if (sliced.channels > 1 && resampledBands.length === sliced.channels) {
-        const pixelCount = tileSize * tileSize
-        dataToNormalize = new Float32Array(pixelCount * sliced.channels)
-        for (let i = 0; i < pixelCount; i++) {
-          for (let c = 0; c < sliced.channels; c++) {
-            dataToNormalize[i * sliced.channels + c] = resampledBands[c][i]
-          }
-        }
-      } else if (resampledBands.length > 0) {
-        // Single channel - use first band directly
-        dataToNormalize = resampledBands[0]
+        bandDataToProcess.set(
+          bandName,
+          resampleToMercator({ sourceData: bandData, ...resampleOpts })
+        )
       }
     }
 
-    // Normalize main data using clim to determine scale
-    const { normalized, scale } = normalizeDataForTexture(
-      dataToNormalize,
-      this.fillValue,
-      this.clim
-    )
-    tile.data = normalized
-    tile.dataScale = scale
-    tile.channels = sliced.channels
-
-    // Upload texture immediately
-    if (this.gl && tile.tileTexture) {
-      this.uploadTileTexture(tile)
-    }
-
-    // Normalize each band's data (use same scale for consistency)
+    // Normalize bands (single pass) and collect for interleaving
     tile.bandData = new Map()
     tile.bandDataScales = new Map()
     tile.bandTexturesUploaded.clear()
-    for (const [bandName, bandData] of bandDataToNormalize) {
-      const bandResult = normalizeDataForTexture(
+    const normalizedBands: Float32Array[] = []
+
+    for (const [bandName, bandData] of bandDataToProcess) {
+      const { normalized, scale } = normalizeDataForTexture(
         bandData,
         this.fillValue,
         this.clim
       )
-      tile.bandData.set(bandName, bandResult.normalized)
-      tile.bandDataScales.set(bandName, bandResult.scale)
+      tile.bandData.set(bandName, normalized)
+      tile.bandDataScales.set(bandName, scale)
+      normalizedBands.push(normalized)
+    }
+
+    // Construct interleaved data from normalized bands
+    tile.data = interleaveBands(normalizedBands, sliced.channels)
+    tile.dataScale = tile.bandDataScales.values().next().value ?? 1.0
+    tile.channels = sliced.channels
+
+    // Upload texture
+    if (this.gl && tile.tileTexture) {
+      this.uploadTileTexture(tile)
     }
   }
 

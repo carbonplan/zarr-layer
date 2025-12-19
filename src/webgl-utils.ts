@@ -182,6 +182,27 @@ export function normalizeDataForTexture(
   return { normalized, scale }
 }
 
+/**
+ * Interleave separate band arrays into a single packed array.
+ * For single-channel data, returns the band directly (no copy).
+ */
+export function interleaveBands(
+  bands: Float32Array[],
+  channels: number
+): Float32Array {
+  if (channels === 1 && bands.length === 1) {
+    return bands[0]
+  }
+  const pixelCount = bands[0].length
+  const result = new Float32Array(pixelCount * channels)
+  for (let i = 0; i < pixelCount; i++) {
+    for (let c = 0; c < channels; c++) {
+      result[i * channels + c] = bands[c][i]
+    }
+  }
+  return result
+}
+
 export function createSubdividedQuad(subdivisions: number): {
   vertexArr: Float32Array
   texCoordArr: Float32Array

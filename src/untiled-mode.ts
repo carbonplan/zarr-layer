@@ -33,7 +33,11 @@ import {
   type XYLimits,
 } from './map-utils'
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
-import { createSubdividedQuad, normalizeDataForTexture } from './webgl-utils'
+import {
+  createSubdividedQuad,
+  interleaveBands,
+  normalizeDataForTexture,
+} from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-globe-tile-renderer'
@@ -963,83 +967,59 @@ export class UntiledMode implements ZarrMode {
       region.selectorVersion = fetchSelectorVersion
       cancelOlderRequests(this.requestCanceller, requestId)
 
-      // Resample EPSG:4326 data to Mercator space before normalization
-      let dataToNormalize = packedData
-      const bandDataToNormalize = [...bandArrays]
+      // Resample EPSG:4326 bands to Mercator space if needed
+      let bandDataToProcess = bandArrays
 
       if (needsResampling(this.crs) && this.xyLimits) {
         const geoBounds = this.getRegionBounds(regionX, regionY)
         const mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
-
-        // Resample EPSG:4326 data to Mercator space
-        dataToNormalize = resampleToMercator({
-          sourceData: packedData,
-          sourceSize: [actualW, actualH],
+        const resampleOpts = {
+          sourceSize: [actualW, actualH] as [number, number],
           sourceBounds: [
             geoBounds.xMin,
             geoBounds.yMin,
             geoBounds.xMax,
             geoBounds.yMax,
-          ],
-          targetSize: [actualW, actualH],
+          ] as [number, number, number, number],
+          targetSize: [actualW, actualH] as [number, number],
           targetMercatorBounds: [
             mercBounds.x0,
             mercBounds.y0,
             mercBounds.x1,
             mercBounds.y1,
-          ],
+          ] as [number, number, number, number],
           fillValue: fillValue ?? 0,
           latIsAscending: this.latIsAscending,
-        })
-
-        // Resample each band the same way
-        for (let c = 0; c < bandArrays.length; c++) {
-          bandDataToNormalize[c] = resampleToMercator({
-            sourceData: bandArrays[c],
-            sourceSize: [actualW, actualH],
-            sourceBounds: [
-              geoBounds.xMin,
-              geoBounds.yMin,
-              geoBounds.xMax,
-              geoBounds.yMax,
-            ],
-            targetSize: [actualW, actualH],
-            targetMercatorBounds: [
-              mercBounds.x0,
-              mercBounds.y0,
-              mercBounds.x1,
-              mercBounds.y1,
-            ],
-            fillValue: fillValue ?? 0,
-            latIsAscending: this.latIsAscending,
-          })
         }
+
+        // Resample each band once (no duplicate resampling)
+        bandDataToProcess = bandArrays.map((bandData) =>
+          resampleToMercator({ sourceData: bandData, ...resampleOpts })
+        )
       }
 
-      // Normalize and store data
-      const { normalized } = normalizeDataForTexture(
-        dataToNormalize,
-        fillValue,
-        this.clim
-      )
-      region.data = normalized
-      region.width = actualW
-      region.height = actualH
-      region.channels = numChannels
-      region.loading = false
-
-      // Store band data with bandNames as keys
+      // Normalize bands (single pass) and collect for interleaving
       region.bandData.clear()
       region.bandTexturesUploaded.clear()
-      for (let c = 0; c < bandDataToNormalize.length; c++) {
+      const normalizedBands: Float32Array[] = []
+
+      for (let c = 0; c < bandDataToProcess.length; c++) {
         const bandName = this.bandNames[c] || `band_${c}`
         const { normalized: bandNormalized } = normalizeDataForTexture(
-          bandDataToNormalize[c],
+          bandDataToProcess[c],
           fillValue,
           this.clim
         )
         region.bandData.set(bandName, bandNormalized)
+        normalizedBands.push(bandNormalized)
       }
+
+      // Construct interleaved data from normalized bands
+      region.data = interleaveBands(normalizedBands, numChannels)
+      region.width = actualW
+      region.height = actualH
+      region.channels = numChannels
+      region.loading = false
 
       // Create/update main texture for this region
       if (!region.texture) {
@@ -1049,7 +1029,7 @@ export class UntiledMode implements ZarrMode {
       // Upload texture using shared helper
       const result = uploadDataTexture(gl, {
         texture: region.texture!,
-        data: normalized,
+        data: region.data!,
         width: actualW,
         height: actualH,
         channels: numChannels,
