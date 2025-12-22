@@ -8,17 +8,6 @@ import type { Dataset } from './types'
 export const DATASETS: Dataset<any>[] = [
   carbonplan4d,
   createTimeDataset({
-    id: 'salinity_v2',
-    source:
-      'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/nemotest101/pyramid2/T1d/sos_abs.zarr',
-    variable: 'sos_abs',
-    clim: [30, 37],
-    colormap: 'blues',
-    zarrVersion: 2,
-    info: 'Ocean salinity (v2 pyramid, EPSG:3857)',
-    sourceInfo: 'v2 pyramid format (EPSG:3857)',
-  }),
-  createTimeDataset({
     id: 'temperature_v3',
     source:
       'https://atlantis-vis-o.s3-ext.jc.rl.ac.uk/noc-npd-era5-demo/npd-eorca1-era5v1/gn/T1y/tos_con',
@@ -40,18 +29,6 @@ export const DATASETS: Dataset<any>[] = [
     zarrVersion: 2,
     info: 'tasmax v2 pyramid (EPSG:4326)',
     sourceInfo: 'v2 pyramid (EPSG:4326)',
-    maxTime: 729,
-  }),
-  createTimeDataset({
-    id: 'tasmax_pyramid_v3_4326',
-    source:
-      'https://carbonplan-benchmarks.s3.us-west-2.amazonaws.com/data/NEX-GDDP-CMIP6/ACCESS-CM2/historical/r1i1p1f1/tasmax/tasmax_day_ACCESS-CM2_historical_r1i1p1f1_gn/pyramids-v3-4326-True-128-1-0-0-f4-0-0-gzipL1-100',
-    variable: 'tasmax',
-    clim: [220, 320],
-    colormap: 'fire',
-    zarrVersion: 3,
-    info: 'tasmax v3 pyramid (EPSG:4326)',
-    sourceInfo: 'v3 pyramid (EPSG:4326)',
     maxTime: 729,
   }),
   createTimeDataset({
@@ -91,12 +68,12 @@ export const DATASETS: Dataset<any>[] = [
     zarrVersion: 3,
     info: 'Burn Probability over CONUS',
     sourceInfo:
-      '30m resolution untiled multiscale dataset created by resampling and reprojecting the "Wildfire Risk to Communities: Spatial datasets of landscape-wide wildfire risk components for the United States (2nd Edition)" dataset.'
+      '30m resolution untiled multiscale dataset created by resampling and reprojecting the "Wildfire Risk to Communities: Spatial datasets of landscape-wide wildfire risk components for the United States (2nd Edition)" dataset.',
   }),
 ]
 
 export const DATASET_MAP = Object.fromEntries(
-  DATASETS.map((d) => [d.id, d])
+  DATASETS.map((d) => [d.id, d]),
 ) as Record<string, Dataset<any>>
 
 export const DEFAULT_DATASET_ID = DATASETS[0].id
