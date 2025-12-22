@@ -8,6 +8,7 @@ import { useAppStore } from '../lib/store'
 
 export default function Home() {
   const mapProvider = useAppStore((state) => state.mapProvider)
+  const sidebarWidth = useAppStore((state) => state.sidebarWidth)
 
   return (
     <>
@@ -32,7 +33,7 @@ export default function Home() {
         }}
       >
         <Sidebar />
-        <Map key={mapProvider} />
+        {sidebarWidth > 0 && <Map key={mapProvider} />}
       </Box>
     </>
   )
