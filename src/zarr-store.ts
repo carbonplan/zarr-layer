@@ -562,12 +562,25 @@ export class ZarrStore {
       this.spatialDimensions
     )
 
+    // Collect the actual names of identified spatial dimensions
+    // (e.g., 'projection_y_coordinate' if mapped to 'lat')
+    const spatialDimNames = new Set(
+      ['lat', 'lon']
+        .filter((key) => this.dimIndices[key])
+        .map((key) => this.dimIndices[key].name.toLowerCase())
+    )
+
     // Add ALL dimensions to dimIndices so selectors can reference them by name
     // (e.g., 'time', 'level', etc. - not just lat/lon)
     for (let i = 0; i < this.dimensions.length; i++) {
       const dimName = this.dimensions[i]
       // Skip if already added (e.g., 'lat' was already mapped with its coordinate array)
       if (this.dimIndices[dimName] || this.dimIndices[dimName.toLowerCase()]) {
+        continue
+      }
+      // Skip if this is the name of an identified spatial dimension
+      // (already tracked under 'lat' or 'lon' keys)
+      if (spatialDimNames.has(dimName.toLowerCase())) {
         continue
       }
       this.dimIndices[dimName] = {
