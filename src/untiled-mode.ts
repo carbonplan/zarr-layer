@@ -9,6 +9,7 @@
  */
 
 import * as zarr from 'zarrita'
+import { WEB_MERCATOR_EXTENT } from './constants'
 import type {
   ZarrMode,
   RenderContext,
@@ -46,6 +47,12 @@ import {
   mercatorBoundsToPixel,
   computePixelBoundsFromGeometry,
 } from './query/query-utils'
+import {
+  createTransformer,
+  createWGS84ToSourceTransformer,
+  pixelToSourceCRS,
+  sampleEdgesToMercatorBounds,
+} from './projection-utils'
 import { setObjectValues } from './query/selector-utils'
 import { geoToArrayIndex } from './map-utils'
 import { resampleToMercator, needsResampling } from './resampler'
@@ -125,6 +132,26 @@ export class UntiledMode implements ZarrMode {
   // Multi-level support
   private levels: UntiledLevel[] = []
   private currentLevelIndex: number = 0
+  private proj4def: string | null = null
+
+  // Cached transformers for proj4 reprojection (created once, reused everywhere)
+  private cachedMercatorTransformer: ReturnType<
+    typeof createTransformer
+  > | null = null
+  private cachedWGS84Transformer: ReturnType<
+    typeof createWGS84ToSourceTransformer
+  > | null = null
+
+  // Global mercator grid for seamless chunk stitching
+  // All chunks resample to this shared grid to avoid seams at boundaries
+  private globalMercatorGrid: {
+    x0: number // Left edge in normalized mercator [0,1]
+    y0: number // Top edge in normalized mercator [0,1]
+    cellW: number // Cell width in normalized mercator
+    cellH: number // Cell height in normalized mercator
+    gridW: number // Total grid width in pixels
+    gridH: number // Total grid height in pixels
+  } | null = null
 
   // Loading state
   private isRemoved: boolean = false
@@ -186,6 +213,24 @@ export class UntiledMode implements ZarrMode {
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending ?? null
+      this.proj4def = desc.proj4 ?? null
+
+      // Cache transformers once for reuse (major performance optimization)
+      if (this.proj4def && this.xyLimits) {
+        const bounds: [number, number, number, number] = [
+          this.xyLimits.xMin,
+          this.xyLimits.yMin,
+          this.xyLimits.xMax,
+          this.xyLimits.yMax,
+        ]
+        this.cachedMercatorTransformer = createTransformer(
+          this.proj4def,
+          bounds
+        )
+        this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
+          this.proj4def
+        )
+      }
 
       if (this.crs !== 'EPSG:4326' && this.crs !== 'EPSG:3857') {
         console.warn(
@@ -210,7 +255,14 @@ export class UntiledMode implements ZarrMode {
       }
 
       if (this.xyLimits) {
-        this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs)
+        // For proj4, compute mercator bounds by transforming corners
+        if (this.proj4def) {
+          this.mercatorBounds = this.computeMercatorBoundsFromProjection()
+        } else {
+          this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs)
+        }
+        // Compute global grid for seamless chunk stitching
+        this.computeGlobalMercatorGrid()
       } else {
         console.warn('UntiledMode: No XY limits found')
       }
@@ -329,7 +381,66 @@ export class UntiledMode implements ZarrMode {
     const { xMin, xMax, yMin, yMax } = this.xyLimits
     const [regionH, regionW] = this.regionSize
 
-    // Convert geo bounds to pixel indices
+    if (this.proj4def && this.cachedWGS84Transformer) {
+      // For projected data, check each region's geographic footprint against viewport
+      const transformer = this.cachedWGS84Transformer
+      const numRegionsX = Math.ceil(this.width / regionW)
+      const numRegionsY = Math.ceil(this.height / regionH)
+
+      const regions: Array<{ regionX: number; regionY: number }> = []
+
+      for (let ry = 0; ry < numRegionsY; ry++) {
+        for (let rx = 0; rx < numRegionsX; rx++) {
+          // Get region bounds in source CRS
+          const regBounds = this.getRegionBounds(rx, ry)
+          const xMid = (regBounds.xMin + regBounds.xMax) / 2
+          const yMid = (regBounds.yMin + regBounds.yMax) / 2
+
+          // Transform region corners and edge midpoints to WGS84
+          // Edge midpoints are needed for curved projections where extrema may not be at corners
+          const samplePoints = [
+            // Corners
+            transformer.inverse(regBounds.xMin, regBounds.yMin),
+            transformer.inverse(regBounds.xMax, regBounds.yMin),
+            transformer.inverse(regBounds.xMax, regBounds.yMax),
+            transformer.inverse(regBounds.xMin, regBounds.yMax),
+            // Edge midpoints
+            transformer.inverse(xMid, regBounds.yMin),
+            transformer.inverse(xMid, regBounds.yMax),
+            transformer.inverse(regBounds.xMin, yMid),
+            transformer.inverse(regBounds.xMax, yMid),
+          ]
+
+          // Filter out invalid points but continue if we have at least one valid point
+          const validPoints = samplePoints.filter(
+            (c) => isFinite(c[0]) && isFinite(c[1])
+          )
+          if (validPoints.length === 0) {
+            continue
+          }
+
+          // Get geographic bounds of this region
+          const regWest = Math.min(...validPoints.map((c) => c[0]))
+          const regEast = Math.max(...validPoints.map((c) => c[0]))
+          const regSouth = Math.min(...validPoints.map((c) => c[1]))
+          const regNorth = Math.max(...validPoints.map((c) => c[1]))
+
+          // Check if region overlaps with viewport
+          if (
+            regEast >= west &&
+            regWest <= east &&
+            regNorth >= south &&
+            regSouth <= north
+          ) {
+            regions.push({ regionX: rx, regionY: ry })
+          }
+        }
+      }
+
+      return regions
+    }
+
+    // Standard case: viewport bounds are in same CRS as xyLimits
     const xMinIdx = geoToArrayIndex(west, xMin, xMax, this.width)
     const xMaxIdx = geoToArrayIndex(east, xMin, xMax, this.width)
 
@@ -367,6 +478,7 @@ export class UntiledMode implements ZarrMode {
         regions.push({ regionX: rx, regionY: ry })
       }
     }
+
     return regions
   }
 
@@ -508,7 +620,16 @@ export class UntiledMode implements ZarrMode {
     region: RegionState
   ): void {
     const geoBounds = this.getRegionBounds(regionX, regionY)
-    const mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
+
+    // Compute mercator bounds - use grid-aligned bounds for proj4 reprojection
+    let mercBounds: MercatorBounds
+    if (this.proj4def) {
+      const gridAligned = this.getGridAlignedRegionBounds(regionX, regionY)
+      mercBounds =
+        gridAligned?.mercBounds ?? this.computeRegionMercatorBounds(geoBounds)
+    } else {
+      mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
+    }
 
     // Store mercator bounds for shader uniforms
     region.mercatorBounds = mercBounds
@@ -967,12 +1088,29 @@ export class UntiledMode implements ZarrMode {
       region.selectorVersion = fetchSelectorVersion
       cancelOlderRequests(this.requestCanceller, requestId)
 
-      // Resample EPSG:4326 bands to Mercator space if needed
+      // Resample bands to Mercator space if needed (EPSG:4326 or custom projection)
       let bandDataToProcess = bandArrays
+      let outputW = actualW
+      let outputH = actualH
 
-      if (needsResampling(this.crs) && this.xyLimits) {
+      if (needsResampling(this.crs, this.proj4def) && this.xyLimits) {
         const geoBounds = this.getRegionBounds(regionX, regionY)
-        const mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
+
+        // For proj4 reprojection, use grid-aligned bounds to eliminate seams
+        let mercBounds: MercatorBounds
+        if (this.proj4def) {
+          const gridAligned = this.getGridAlignedRegionBounds(regionX, regionY)
+          if (gridAligned) {
+            mercBounds = gridAligned.mercBounds
+            outputW = gridAligned.outputW
+            outputH = gridAligned.outputH
+          } else {
+            mercBounds = this.computeRegionMercatorBounds(geoBounds)
+          }
+        } else {
+          mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
+        }
+
         const resampleOpts = {
           sourceSize: [actualW, actualH] as [number, number],
           sourceBounds: [
@@ -981,7 +1119,7 @@ export class UntiledMode implements ZarrMode {
             geoBounds.xMax,
             geoBounds.yMax,
           ] as [number, number, number, number],
-          targetSize: [actualW, actualH] as [number, number],
+          targetSize: [outputW, outputH] as [number, number],
           targetMercatorBounds: [
             mercBounds.x0,
             mercBounds.y0,
@@ -990,6 +1128,7 @@ export class UntiledMode implements ZarrMode {
           ] as [number, number, number, number],
           fillValue: fillValue ?? 0,
           latIsAscending: this.latIsAscending,
+          proj4: this.proj4def,
         }
 
         // Resample each band once (no duplicate resampling)
@@ -1016,8 +1155,8 @@ export class UntiledMode implements ZarrMode {
 
       // Construct interleaved data from normalized bands
       region.data = interleaveBands(normalizedBands, numChannels)
-      region.width = actualW
-      region.height = actualH
+      region.width = outputW
+      region.height = outputH
       region.channels = numChannels
       region.loading = false
 
@@ -1030,8 +1169,8 @@ export class UntiledMode implements ZarrMode {
       const result = uploadDataTexture(gl, {
         texture: region.texture!,
         data: region.data!,
-        width: actualW,
-        height: actualH,
+        width: outputW,
+        height: outputH,
         channels: numChannels,
         configured: false,
       })
@@ -1126,6 +1265,9 @@ export class UntiledMode implements ZarrMode {
       this.regionSize = detectedRegionSize ?? [this.height, this.width]
       this.regionCache.clear()
 
+      // Recompute global grid for new level dimensions
+      this.computeGlobalMercatorGrid()
+
       // Build base slice args for non-spatial dimensions
       await this.buildBaseSliceArgs()
 
@@ -1169,8 +1311,8 @@ export class UntiledMode implements ZarrMode {
     const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
     let worldFraction: number
     if (this.crs === 'EPSG:3857') {
-      // Web Mercator: full world is ~40,075,016 meters (2 * 20037508.342789244)
-      const fullWorldMeters = 2 * 20037508.342789244
+      // Web Mercator: full world is ~40,075,016 meters
+      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidth / fullWorldMeters
     } else {
       // EPSG:4326: full world is 360 degrees
@@ -1405,6 +1547,128 @@ export class UntiledMode implements ZarrMode {
 
   getXYLimits(): XYLimits | null {
     return this.xyLimits
+  }
+
+  /**
+   * Compute mercator bounds from proj4 by sampling edge points.
+   */
+  private computeMercatorBoundsFromProjection(): MercatorBounds {
+    if (!this.proj4def || !this.xyLimits || !this.cachedMercatorTransformer) {
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    const result = sampleEdgesToMercatorBounds(
+      this.xyLimits,
+      this.cachedMercatorTransformer,
+      20
+    )
+    if (!result) {
+      console.warn(
+        'computeMercatorBoundsFromProjection: No valid samples found'
+      )
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    return result
+  }
+
+  /**
+   * Compute mercator bounds for a specific region from source CRS bounds.
+   */
+  private computeRegionMercatorBounds(bounds: {
+    xMin: number
+    xMax: number
+    yMin: number
+    yMax: number
+  }): MercatorBounds {
+    if (!this.proj4def || !this.cachedMercatorTransformer) {
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    const result = sampleEdgesToMercatorBounds(
+      bounds,
+      this.cachedMercatorTransformer,
+      5
+    )
+    if (!result) {
+      console.warn('computeRegionMercatorBounds: No valid samples found')
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    return result
+  }
+
+  /**
+   * Compute global mercator grid based on full data extent.
+   * This grid ensures all chunks resample to aligned pixel positions,
+   * eliminating seams at chunk boundaries.
+   */
+  private computeGlobalMercatorGrid(): void {
+    if (!this.proj4def || !this.mercatorBounds || !this.width || !this.height) {
+      this.globalMercatorGrid = null
+      return
+    }
+
+    const { x0, y0, x1, y1 } = this.mercatorBounds
+
+    // Compute cell size based on source resolution
+    // The grid should have roughly the same number of cells as source pixels
+    const mercWidth = x1 - x0
+    const mercHeight = y1 - y0
+
+    this.globalMercatorGrid = {
+      x0,
+      y0,
+      cellW: mercWidth / this.width,
+      cellH: mercHeight / this.height,
+      gridW: this.width,
+      gridH: this.height,
+    }
+  }
+
+  /**
+   * Get grid-aligned mercator bounds and output size for a region.
+   * Returns bounds that snap to the global grid, ensuring seamless stitching.
+   */
+  private getGridAlignedRegionBounds(
+    regionX: number,
+    regionY: number
+  ): { mercBounds: MercatorBounds; outputW: number; outputH: number } | null {
+    if (!this.globalMercatorGrid || !this.regionSize || !this.proj4def) {
+      return null
+    }
+
+    const grid = this.globalMercatorGrid
+
+    // Get the region's actual mercator footprint by transforming its corners
+    const geoBounds = this.getRegionBounds(regionX, regionY)
+    const rawMercBounds = this.computeRegionMercatorBounds(geoBounds)
+
+    // Snap to global grid boundaries
+    // Find which grid cells this region covers
+    const cellStartX = Math.floor((rawMercBounds.x0 - grid.x0) / grid.cellW)
+    const cellEndX = Math.ceil((rawMercBounds.x1 - grid.x0) / grid.cellW)
+    const cellStartY = Math.floor((rawMercBounds.y0 - grid.y0) / grid.cellH)
+    const cellEndY = Math.ceil((rawMercBounds.y1 - grid.y0) / grid.cellH)
+
+    // Clamp to grid bounds
+    const clampedStartX = Math.max(0, cellStartX)
+    const clampedEndX = Math.min(grid.gridW, cellEndX)
+    const clampedStartY = Math.max(0, cellStartY)
+    const clampedEndY = Math.min(grid.gridH, cellEndY)
+
+    const outputW = clampedEndX - clampedStartX
+    const outputH = clampedEndY - clampedStartY
+
+    if (outputW <= 0 || outputH <= 0) {
+      return null
+    }
+
+    // Compute snapped mercator bounds
+    const mercBounds: MercatorBounds = {
+      x0: grid.x0 + clampedStartX * grid.cellW,
+      y0: grid.y0 + clampedStartY * grid.cellH,
+      x1: grid.x0 + clampedEndX * grid.cellW,
+      y1: grid.y0 + clampedEndY * grid.cellH,
+    }
+
+    return { mercBounds, outputW, outputH }
   }
 
   getMaxLevelIndex(): number {
@@ -1671,6 +1935,14 @@ export class UntiledMode implements ZarrMode {
       const [lon, lat] = geometry.coordinates
       const coords = { lat: [lat], lon: [lon] }
 
+      const sourceBounds = this.xyLimits
+        ? ([
+            this.xyLimits.xMin,
+            this.xyLimits.yMin,
+            this.xyLimits.xMax,
+            this.xyLimits.yMax,
+          ] as [number, number, number, number])
+        : null
       const pixel = mercatorBoundsToPixel(
         lon,
         lat,
@@ -1678,7 +1950,10 @@ export class UntiledMode implements ZarrMode {
         this.width,
         this.height,
         this.crs ?? 'EPSG:4326',
-        this.latIsAscending ?? undefined
+        this.latIsAscending ?? undefined,
+        this.proj4def,
+        sourceBounds,
+        this.cachedWGS84Transformer ?? undefined
       )
 
       if (!pixel) {
@@ -1786,13 +2061,24 @@ export class UntiledMode implements ZarrMode {
     }
 
     // Region queries: calculate pixel bounds and fetch only that subset
+    const sourceBounds: [number, number, number, number] | null = this.xyLimits
+      ? [
+          this.xyLimits.xMin,
+          this.xyLimits.yMin,
+          this.xyLimits.xMax,
+          this.xyLimits.yMax,
+        ]
+      : null
     const pixelBounds = computePixelBoundsFromGeometry(
       geometry,
       this.mercatorBounds,
       this.width,
       this.height,
       this.crs ?? 'EPSG:4326',
-      this.latIsAscending ?? undefined
+      this.latIsAscending ?? undefined,
+      this.proj4def,
+      sourceBounds,
+      this.cachedWGS84Transformer ?? undefined
     )
 
     if (!pixelBounds) {
@@ -1844,6 +2130,35 @@ export class UntiledMode implements ZarrMode {
       }
     }
 
+    // For proj4 reprojection, compute subset bounds in source CRS
+    let subsetSourceBounds: [number, number, number, number] | null = null
+    if (this.proj4def && sourceBounds) {
+      // Convert subset pixel corners to source CRS coordinates
+      const [xMin, yMin] = pixelToSourceCRS(
+        minX,
+        minY,
+        sourceBounds,
+        this.width,
+        this.height,
+        this.latIsAscending ?? null
+      )
+      const [xMax, yMax] = pixelToSourceCRS(
+        maxX - 1, // maxX is exclusive, so use maxX-1 for the last pixel
+        maxY - 1,
+        sourceBounds,
+        this.width,
+        this.height,
+        this.latIsAscending ?? null
+      )
+      // Create subset bounds in source CRS
+      subsetSourceBounds = [
+        Math.min(xMin, xMax),
+        Math.min(yMin, yMax),
+        Math.max(xMin, xMax),
+        Math.max(yMin, yMax),
+      ]
+    }
+
     return queryRegionSingleImage(
       this.variable,
       geometry,
@@ -1863,7 +2178,9 @@ export class UntiledMode implements ZarrMode {
         scaleFactor: desc.scaleFactor,
         addOffset: desc.addOffset,
         fillValue: desc.fill_value,
-      }
+      },
+      this.proj4def,
+      subsetSourceBounds
     )
   }
 }

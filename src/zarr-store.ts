@@ -1,6 +1,7 @@
 import * as zarr from 'zarrita'
 import type { Readable } from '@zarrita/storage'
 import type {
+  Bounds,
   SpatialDimensions,
   DimIndicesProps,
   CRS,
@@ -118,9 +119,10 @@ interface ZarrStoreOptions {
   version?: 2 | 3 | null
   variable: string
   spatialDimensions?: SpatialDimensions
-  bounds?: [number, number, number, number]
+  bounds?: Bounds
   coordinateKeys?: string[]
   latIsAscending?: boolean | null
+  proj4?: string
 }
 
 interface StoreDescription {
@@ -142,6 +144,7 @@ interface StoreDescription {
   addOffset: number
   coordinates: Record<string, (string | number)[]>
   latIsAscending: boolean | null
+  proj4: string | null
 }
 
 export class ZarrStore {
@@ -155,7 +158,7 @@ export class ZarrStore {
   version: 2 | 3 | null
   variable: string
   spatialDimensions: SpatialDimensions
-  private explicitBounds: [number, number, number, number] | null
+  private explicitBounds: Bounds | null
   coordinateKeys: string[]
 
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
@@ -177,6 +180,7 @@ export class ZarrStore {
   addOffset: number = 0
   coordinates: Record<string, (string | number)[]> = {}
   latIsAscending: boolean | null = null
+  proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
 
   /**
@@ -208,6 +212,7 @@ export class ZarrStore {
     bounds,
     coordinateKeys = [],
     latIsAscending = null,
+    proj4,
   }: ZarrStoreOptions) {
     if (!source) {
       throw new Error('source is a required parameter')
@@ -222,6 +227,7 @@ export class ZarrStore {
     this.explicitBounds = bounds ?? null
     this.coordinateKeys = coordinateKeys
     this.latIsAscending = latIsAscending
+    this.proj4 = proj4 ?? null
 
     this.initialized = this._initialize()
   }
@@ -306,6 +312,7 @@ export class ZarrStore {
       addOffset: this.addOffset,
       coordinates: this.coordinates,
       latIsAscending: this.latIsAscending,
+      proj4: this.proj4,
     }
   }
 
@@ -648,6 +655,7 @@ export class ZarrStore {
 
   private async _loadXYLimits() {
     // If explicit bounds provided, use them directly
+    // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857 or proj4)
     if (this.explicitBounds) {
       const [west, south, east, north] = this.explicitBounds
       this.xyLimits = {

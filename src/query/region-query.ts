@@ -16,7 +16,7 @@ import {
   tileToKey,
 } from '../map-utils'
 import type { ZarrStore } from '../zarr-store'
-import type { CRS, Selector } from '../types'
+import type { Bounds, CRS, Selector } from '../types'
 import type {
   QueryGeometry,
   QueryResult,
@@ -29,7 +29,10 @@ import {
   pixelIntersectsGeometrySingle,
   pixelIntersectsGeometryTiled,
   tilePixelToLatLon,
+  pixelToLatLon,
+  CachedTransformer,
 } from './query-utils'
+import { createWGS84ToSourceTransformer } from '../projection-utils'
 import { setObjectValues, getChunks, getPointValues } from './selector-utils'
 
 /**
@@ -326,7 +329,9 @@ export async function queryRegionSingleImage(
   channelLabels?: (string | number)[][],
   multiValueDimNames?: string[],
   latIsAscending?: boolean,
-  transforms?: QueryTransformOptions
+  transforms?: QueryTransformOptions,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null
 ): Promise<QueryResult> {
   // Calculate result dimension
   const isMultiValSelector = (value: Selector[string]) => {
@@ -406,35 +411,96 @@ export async function queryRegionSingleImage(
     return result
   }
 
-  const bbox = computeBoundingBox(geometry)
-
-  // Compute overlap of polygon bbox with image bounds in mercator space
-  const polyX0 = lonToMercatorNorm(bbox.west)
-  const polyX1 = lonToMercatorNorm(bbox.east)
-  const polyY0 = latToMercatorNorm(bbox.north)
-  const polyY1 = latToMercatorNorm(bbox.south)
-
-  const overlapX0 = Math.max(bounds.x0, Math.min(polyX0, polyX1))
-  const overlapX1 = Math.min(bounds.x1, Math.max(polyX0, polyX1))
-
+  // Compute iteration bounds
+  // For proj4, the data is already the subset matching the geometry bbox,
+  // so iterate over all pixels. For standard CRS, compute overlap.
   let xStart = 0
-  let xEnd = 0
+  let xEnd = width
   let yStart = 0
-  let yEnd = 0
+  let yEnd = height
 
-  if (
-    _crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-  ) {
-    // For equirectangular data, compute Y overlap in linear latitude space.
-    const latMax = bounds.latMax
-    const latMin = bounds.latMin
-    const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax)
-    const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax)
+  if (!proj4def) {
+    const bbox = computeBoundingBox(geometry)
 
-    const latRange = latMax - latMin
-    if (latRange === 0) {
+    // Compute overlap of polygon bbox with image bounds in mercator space
+    const polyX0 = lonToMercatorNorm(bbox.west)
+    const polyX1 = lonToMercatorNorm(bbox.east)
+    const polyY0 = latToMercatorNorm(bbox.north)
+    const polyY1 = latToMercatorNorm(bbox.south)
+
+    const overlapX0 = Math.max(bounds.x0, Math.min(polyX0, polyX1))
+    const overlapX1 = Math.min(bounds.x1, Math.max(polyX0, polyX1))
+
+    if (
+      _crs === 'EPSG:4326' &&
+      bounds.latMin !== undefined &&
+      bounds.latMax !== undefined
+    ) {
+      // For equirectangular data, compute Y overlap in linear latitude space.
+      const latMax = bounds.latMax
+      const latMin = bounds.latMin
+      const clampedNorth = Math.min(Math.max(bbox.north, latMin), latMax)
+      const clampedSouth = Math.min(Math.max(bbox.south, latMin), latMax)
+
+      const latRange = latMax - latMin
+      if (latRange === 0) {
+        const result = {
+          [variable]: results,
+          dimensions: resultDimensions,
+          coordinates: buildResultCoordinates(),
+        } as QueryResult
+        return result
+      }
+      const toFrac = (latVal: number) =>
+        latIsAscending
+          ? (latVal - latMin) / latRange
+          : (latMax - latVal) / latRange
+      const yStartFracRaw = toFrac(clampedNorth)
+      const yEndFracRaw = toFrac(clampedSouth)
+      const yFracMin = Math.min(yStartFracRaw, yEndFracRaw)
+      const yFracMax = Math.max(yStartFracRaw, yEndFracRaw)
+
+      if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) {
+        const result = {
+          [variable]: results,
+          dimensions: resultDimensions,
+          coordinates: buildResultCoordinates(),
+        } as QueryResult
+        return result
+      }
+
+      const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+      const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+
+      xStart = Math.max(0, Math.floor(minX))
+      xEnd = Math.min(width, Math.ceil(maxX + 1))
+      yStart = Math.max(0, Math.floor(yFracMin * height))
+      yEnd = Math.min(height, Math.ceil(yFracMax * height))
+    } else {
+      const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1))
+      const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1))
+
+      if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
+        const result = {
+          [variable]: results,
+          dimensions: resultDimensions,
+          coordinates: buildResultCoordinates(),
+        } as QueryResult
+        return result
+      }
+
+      const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+      const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
+      const minY = ((overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
+      const maxY = ((overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
+
+      xStart = Math.max(0, Math.floor(minX))
+      xEnd = Math.min(width, Math.ceil(maxX + 1))
+      yStart = Math.max(0, Math.floor(minY))
+      yEnd = Math.min(height, Math.ceil(maxY + 1))
+    }
+
+    if (xEnd <= xStart || yEnd <= yStart) {
       const result = {
         [variable]: results,
         dimensions: resultDimensions,
@@ -442,63 +508,12 @@ export async function queryRegionSingleImage(
       } as QueryResult
       return result
     }
-    const toFrac = (latVal: number) =>
-      latIsAscending
-        ? (latVal - latMin) / latRange
-        : (latMax - latVal) / latRange
-    const yStartFracRaw = toFrac(clampedNorth)
-    const yEndFracRaw = toFrac(clampedSouth)
-    const yFracMin = Math.min(yStartFracRaw, yEndFracRaw)
-    const yFracMax = Math.max(yStartFracRaw, yEndFracRaw)
-
-    if (overlapX1 <= overlapX0 || yFracMax <= yFracMin) {
-      const result = {
-        [variable]: results,
-        dimensions: resultDimensions,
-        coordinates: buildResultCoordinates(),
-      } as QueryResult
-      return result
-    }
-
-    const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-    const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-
-    xStart = Math.max(0, Math.floor(minX))
-    xEnd = Math.min(width, Math.ceil(maxX + 1))
-    yStart = Math.max(0, Math.floor(yFracMin * height))
-    yEnd = Math.min(height, Math.ceil(yFracMax * height))
-  } else {
-    const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1))
-    const overlapY1 = Math.min(bounds.y1, Math.max(polyY0, polyY1))
-
-    if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
-      const result = {
-        [variable]: results,
-        dimensions: resultDimensions,
-        coordinates: buildResultCoordinates(),
-      } as QueryResult
-      return result
-    }
-
-    const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-    const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-    const minY = ((overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
-    const maxY = ((overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
-
-    xStart = Math.max(0, Math.floor(minX))
-    xEnd = Math.min(width, Math.ceil(maxX + 1))
-    yStart = Math.max(0, Math.floor(minY))
-    yEnd = Math.min(height, Math.ceil(maxY + 1))
   }
 
-  if (xEnd <= xStart || yEnd <= yStart) {
-    const result = {
-      [variable]: results,
-      dimensions: resultDimensions,
-      coordinates: buildResultCoordinates(),
-    } as QueryResult
-    return result
-  }
+  // Create transformer once for all pixels
+  const cachedTransformer: CachedTransformer | undefined = proj4def
+    ? createWGS84ToSourceTransformer(proj4def)
+    : undefined
 
   // Iterate pixels within bounding box
   for (let y = yStart; y < yEnd; y++) {
@@ -512,28 +527,28 @@ export async function queryRegionSingleImage(
           y,
           _crs,
           geometry,
-          latIsAscending
+          latIsAscending,
+          proj4def,
+          sourceBounds,
+          cachedTransformer
         )
       ) {
         continue
       }
 
-      const mercX = bounds.x0 + ((x + 0.5) / width) * (bounds.x1 - bounds.x0)
-      const mercY = bounds.y0 + ((y + 0.5) / height) * (bounds.y1 - bounds.y0)
-
-      const lon = mercatorNormToLon(mercX)
-      const lat =
-        _crs === 'EPSG:4326' &&
-        bounds.latMin !== undefined &&
-        bounds.latMax !== undefined
-          ? latIsAscending
-            ? bounds.latMin +
-              ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-                (bounds.latMax - bounds.latMin)
-            : bounds.latMax -
-              ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-                (bounds.latMax - bounds.latMin)
-          : mercatorNormToLat(mercY)
+      // Use consolidated helper for pixel → lat/lon conversion
+      const { lat, lon } = pixelToLatLon(
+        x,
+        y,
+        bounds,
+        width,
+        height,
+        _crs,
+        latIsAscending,
+        proj4def,
+        sourceBounds,
+        cachedTransformer
+      )
 
       const baseIndex = (y * width + x) * channels
 

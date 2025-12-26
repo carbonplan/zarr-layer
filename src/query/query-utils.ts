@@ -16,8 +16,118 @@ import {
   lonToTile,
   latToTileMercator,
 } from '../map-utils'
-import type { CRS } from '../types'
+import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry } from './types'
+import {
+  createWGS84ToSourceTransformer,
+  sourceCRSToPixel,
+  pixelToSourceCRS,
+} from '../projection-utils'
+
+/** Cached transformer type for reuse across multiple pixelToLatLon calls */
+export type CachedTransformer = ReturnType<
+  typeof createWGS84ToSourceTransformer
+>
+
+/**
+ * Converts pixel coordinates to lat/lon.
+ * Handles all CRS types including proj4 reprojection.
+ * This is the canonical function for pixel → geographic conversion in queries.
+ *
+ * @param cachedTransformer - Optional pre-created transformer for performance.
+ *   When processing many pixels, create once and reuse to avoid repeated proj4 init.
+ */
+export function pixelToLatLon(
+  x: number,
+  y: number,
+  bounds: MercatorBounds,
+  width: number,
+  height: number,
+  crs: CRS,
+  latIsAscending?: boolean,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null,
+  cachedTransformer?: CachedTransformer,
+  centerPixel: boolean = true
+): { lat: number; lon: number } {
+  // For proj4, convert pixel → source CRS → WGS84
+  if (proj4def && sourceBounds) {
+    const transformer =
+      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+    const [xMin, yMin, xMax, yMax] = sourceBounds
+
+    let srcX: number, srcY: number
+    if (centerPixel) {
+      // pixelToSourceCRS uses x/(width-1) normalization: pixel 0 → xMin, pixel width-1 → xMax
+      // This is correct for pixel centers
+      ;[srcX, srcY] = pixelToSourceCRS(
+        x,
+        y,
+        sourceBounds,
+        width,
+        height,
+        latIsAscending ?? null
+      )
+    } else {
+      // For corners, extend beyond pixel centers by half a pixel on each edge.
+      // sourceBounds represents center-to-center (pixel 0 center → pixel width-1 center),
+      // but corners need edge-to-edge coverage.
+      if (width <= 1 || height <= 1) {
+        srcX = (xMin + xMax) / 2
+        srcY = (yMin + yMax) / 2
+      } else {
+        const xPixelWidth = (xMax - xMin) / (width - 1)
+        const yPixelWidth = (yMax - yMin) / (height - 1)
+        const xHalfPixel = xPixelWidth / 2
+        const yHalfPixel = yPixelWidth / 2
+        // Map x in [0, width] to [xMin - halfPixel, xMax + halfPixel]
+        const xLeftEdge = xMin - xHalfPixel
+        const xFullExtent = xMax - xMin + xPixelWidth
+        srcX = xLeftEdge + (x / width) * xFullExtent
+        // Y handling depends on latIsAscending
+        const yFullExtent = yMax - yMin + yPixelWidth
+        if (latIsAscending === false) {
+          // row 0 = yMax (north), so y=0 → yMax + halfPixel, y=height → yMin - halfPixel
+          const yTopEdge = yMax + yHalfPixel
+          srcY = yTopEdge - (y / height) * yFullExtent
+        } else {
+          // row 0 = yMin (south), so y=0 → yMin - halfPixel, y=height → yMax + halfPixel
+          const yBottomEdge = yMin - yHalfPixel
+          srcY = yBottomEdge + (y / height) * yFullExtent
+        }
+      }
+    }
+
+    const [lon, lat] = transformer.inverse(srcX, srcY)
+    return { lat, lon }
+  }
+
+  // Standard CRS handling
+  // Guard against zero-dimension cases
+  // centerPixel=true: return center of pixel (x+0.5), centerPixel=false: return corner (x)
+  const xFrac = width <= 1 ? 0.5 : centerPixel ? (x + 0.5) / width : x / width
+  const yFrac =
+    height <= 1 ? 0.5 : centerPixel ? (y + 0.5) / height : y / height
+  const mercX = bounds.x0 + xFrac * (bounds.x1 - bounds.x0)
+  const mercY = bounds.y0 + yFrac * (bounds.y1 - bounds.y0)
+
+  const lon = mercatorNormToLon(mercX)
+
+  // Guard against zero-range bounds
+  const yRange = bounds.y1 - bounds.y0
+  const yNorm = yRange === 0 ? 0.5 : (mercY - bounds.y0) / yRange
+
+  const lat =
+    crs === 'EPSG:4326' &&
+    bounds.latMin !== undefined &&
+    bounds.latMax !== undefined
+      ? latIsAscending
+        ? bounds.latMin + yNorm * (bounds.latMax - bounds.latMin)
+        : bounds.latMax - yNorm * (bounds.latMax - bounds.latMin)
+      : mercatorNormToLat(mercY)
+
+  return { lat, lon }
+}
 
 /**
  * Converts latitude to tile Y coordinate at a given zoom level (Equirectangular/EPSG:4326).
@@ -175,6 +285,7 @@ export function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
 /**
  * Computes pixel bounds from a geometry's bounding box.
  * Returns the pixel range [minX, maxX, minY, maxY] that covers the geometry.
+ * Supports custom projections via proj4.
  */
 export function computePixelBoundsFromGeometry(
   geometry: QueryGeometry,
@@ -182,9 +293,77 @@ export function computePixelBoundsFromGeometry(
   width: number,
   height: number,
   crs: CRS,
-  latIsAscending?: boolean
+  latIsAscending?: boolean,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null,
+  cachedTransformer?: CachedTransformer
 ): { minX: number; maxX: number; minY: number; maxY: number } | null {
   const bbox = computeBoundingBox(geometry)
+
+  // If proj4 is provided, use proj4 to transform bbox
+  if (proj4def && sourceBounds) {
+    const transformer =
+      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+
+    // Sample points along bbox edges to capture curved projections
+    // (corners alone can miss extrema for conic/polar projections)
+    const numSamples = 5
+    const samplePoints: [number, number][] = []
+
+    for (let i = 0; i <= numSamples; i++) {
+      const t = i / numSamples
+      const lon = bbox.west + t * (bbox.east - bbox.west)
+      const lat = bbox.south + t * (bbox.north - bbox.south)
+      samplePoints.push([lon, bbox.south]) // Bottom edge
+      samplePoints.push([lon, bbox.north]) // Top edge
+      samplePoints.push([bbox.west, lat]) // Left edge
+      samplePoints.push([bbox.east, lat]) // Right edge
+    }
+
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+
+    for (const [lon, lat] of samplePoints) {
+      const [srcX, srcY] = transformer.forward(lon, lat)
+      if (!isFinite(srcX) || !isFinite(srcY)) continue
+
+      const [xPixel, yPixel] = sourceCRSToPixel(
+        srcX,
+        srcY,
+        sourceBounds,
+        width,
+        height,
+        latIsAscending ?? null
+      )
+      minX = Math.min(minX, xPixel)
+      maxX = Math.max(maxX, xPixel)
+      minY = Math.min(minY, yPixel)
+      maxY = Math.max(maxY, yPixel)
+    }
+
+    // Check if any valid samples were found
+    if (
+      !isFinite(minX) ||
+      !isFinite(maxX) ||
+      !isFinite(minY) ||
+      !isFinite(maxY)
+    ) {
+      return null
+    }
+
+    // Clamp to valid range
+    // Use floor + 1 to ensure integer maxX/maxY values include that pixel
+    const xStart = Math.max(0, Math.floor(minX))
+    const xEnd = Math.min(width, Math.floor(maxX) + 1)
+    const yStart = Math.max(0, Math.floor(minY))
+    const yEnd = Math.min(height, Math.floor(maxY) + 1)
+
+    if (xEnd <= xStart || yEnd <= yStart) return null
+
+    return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
+  }
 
   // Convert bbox corners to mercator normalized coords
   const polyX0 = lonToMercatorNorm(bbox.west)
@@ -453,6 +632,7 @@ function pixelRectLonLat(
 
 /**
  * Rectangle (pixel) corners in lon/lat for single-image mode.
+ * Uses pixelToLatLon for consistent handling of all CRS types including proj4 reprojection.
  */
 function pixelRectLonLatSingle(
   bounds: MercatorBounds,
@@ -461,7 +641,10 @@ function pixelRectLonLatSingle(
   x: number,
   y: number,
   crs: CRS,
-  latIsAscending?: boolean
+  latIsAscending?: boolean,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null,
+  cachedTransformer?: CachedTransformer
 ): [number, number][] {
   const offsets = [
     [0, 0],
@@ -471,21 +654,19 @@ function pixelRectLonLatSingle(
   ]
   const corners: [number, number][] = []
   for (const [dx, dy] of offsets) {
-    const mercX = bounds.x0 + ((x + dx) / width) * (bounds.x1 - bounds.x0)
-    const mercY = bounds.y0 + ((y + dy) / height) * (bounds.y1 - bounds.y0)
-    const lon = mercatorNormToLon(mercX)
-    const lat =
-      crs === 'EPSG:4326' &&
-      bounds.latMin !== undefined &&
-      bounds.latMax !== undefined
-        ? latIsAscending
-          ? bounds.latMin +
-            ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-              (bounds.latMax - bounds.latMin)
-          : bounds.latMax -
-            ((mercY - bounds.y0) / (bounds.y1 - bounds.y0)) *
-              (bounds.latMax - bounds.latMin)
-        : mercatorNormToLat(mercY)
+    const { lon, lat } = pixelToLatLon(
+      x + dx,
+      y + dy,
+      bounds,
+      width,
+      height,
+      crs,
+      latIsAscending,
+      proj4def,
+      sourceBounds,
+      cachedTransformer,
+      false // Use pixel corners, not centers
+    )
     corners.push([lon, lat])
   }
   return corners
@@ -512,7 +693,10 @@ export function pixelIntersectsGeometrySingle(
   y: number,
   crs: CRS,
   geometry: QueryGeometry,
-  latIsAscending?: boolean
+  latIsAscending?: boolean,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null,
+  cachedTransformer?: CachedTransformer
 ): boolean {
   const rect = pixelRectLonLatSingle(
     bounds,
@@ -521,7 +705,10 @@ export function pixelIntersectsGeometrySingle(
     x,
     y,
     crs,
-    latIsAscending
+    latIsAscending,
+    proj4def,
+    sourceBounds,
+    cachedTransformer
   )
   return rectIntersectsGeometry(rect, geometry)
 }
@@ -563,6 +750,7 @@ export function getTilesForPolygon(
 /**
  * Converts mercator bounds to pixel coordinates within a data array.
  * Used for single-image mode queries.
+ * Supports custom projections via proj4.
  */
 export function mercatorBoundsToPixel(
   lng: number,
@@ -571,8 +759,43 @@ export function mercatorBoundsToPixel(
   width: number,
   height: number,
   crs: CRS,
-  latIsAscending?: boolean
+  latIsAscending?: boolean,
+  proj4def?: string | null,
+  sourceBounds?: Bounds | null,
+  cachedTransformer?: CachedTransformer
 ): { x: number; y: number } | null {
+  // If proj4 is provided, use proj4 to transform lat/lon → source CRS → pixel
+  if (proj4def && sourceBounds) {
+    const transformer =
+      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+    const [srcX, srcY] = transformer.forward(lng, lat)
+
+    // Check if within source bounds
+    const [xMin, yMin, xMax, yMax] = sourceBounds
+    if (srcX < xMin || srcX > xMax || srcY < yMin || srcY > yMax) {
+      return null
+    }
+
+    // Convert source CRS coords to pixel indices
+    const [xPixel, yPixel] = sourceCRSToPixel(
+      srcX,
+      srcY,
+      sourceBounds,
+      width,
+      height,
+      latIsAscending ?? null
+    )
+
+    const x = Math.floor(xPixel)
+    const y = Math.floor(yPixel)
+
+    if (x < 0 || x >= width || y < 0 || y >= height) {
+      return null
+    }
+
+    return { x, y }
+  }
+
   let normX: number
   let normY: number
 

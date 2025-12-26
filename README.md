@@ -15,7 +15,7 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 ## data requirements
 
-Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). EPSG:4326 or EPSG:3857 only (for now!).
+Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Native support for EPSG:4326 and EPSG:3857, with arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection.
 
 For best performance, tiled data is preferred (see [ndpyramid](https://github.com/carbonplan/ndpyramid)). The library also supports datasets that are untiled and tries to load chunks efficiently based on viewport intersections. Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental!
 
@@ -75,7 +75,8 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
-| bounds | array | auto | `[west, south, east, north]` in degrees, used for single image placement |
+| proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
+| bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857) |
 | latIsAscending | boolean | auto | Latitude orientation |
 | renderingMode | `'2d'` \| `'3d'` | `'3d'` | Custom layer rendering mode |
 | customFrag | string | - | Custom fragment shader |
@@ -162,6 +163,25 @@ new ZarrLayer({
 })
 ```
 
+## custom projections
+
+For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays):
+
+```ts
+new ZarrLayer({
+  // ...
+  spatialDimensions: {
+    lat: 'projection_y_coordinate',
+    lon: 'projection_x_coordinate',
+  },
+  proj4:
+    '+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +x_0=0 +y_0=0 +R=6371229 +units=m +no_defs',
+  bounds: [-2697520, -1587306, 2697480, 1586694], // recommended: [xMin, yMin, xMax, yMax] in source CRS units
+})
+```
+
+The data will be reprojected to Web Mercator for display. Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+
 ## queries
 
 Supports `Point`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
@@ -188,7 +208,7 @@ const result = await layer.queryData({
 // }
 ```
 
-**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
+**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). For datasets rendered via `proj4` reprojection, queries sample the underlying source grid; because reprojection/resampling occurs for display, a visual pixel click may not align perfectly with the nearest source pixel.
 
 ## thanks
 

@@ -1,5 +1,8 @@
 import * as zarr from 'zarrita'
 
+/** Bounds tuple: [xMin, yMin, xMax, yMax] */
+export type Bounds = [number, number, number, number]
+
 export type ColormapArray = number[][] | string[]
 
 export type SelectorValue = number | number[] | string | string[]
@@ -54,11 +57,11 @@ export interface ZarrLayerOptions {
   zarrVersion?: 2 | 3
   spatialDimensions?: SpatialDimensions
   /**
-   * Explicit spatial bounds [west, south, east, north] in degrees.
-   * Used when coordinate arrays aren't available in the zarr store.
+   * Explicit spatial bounds [xMin, yMin, xMax, yMax].
+   * Units depend on CRS: degrees for EPSG:4326, source CRS units (e.g. meters) when proj4 is provided.
    * If not provided, bounds are read from coordinate arrays or default to global.
    */
-  bounds?: [number, number, number, number]
+  bounds?: Bounds
   latIsAscending?: boolean | null
   fillValue?: number
   customFrag?: string
@@ -71,6 +74,12 @@ export interface ZarrLayerOptions {
    * Set to 0 to disable throttling. Default: 100ms.
    */
   throttleMs?: number
+  /**
+   * Proj4 definition string for reprojection (untiled mode only).
+   * When provided, bounds are interpreted as source CRS units and data is reprojected to Web Mercator.
+   * Example: "+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +x_0=0 +y_0=0 +R=6371229 +units=m +no_defs"
+   */
+  proj4?: string
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'

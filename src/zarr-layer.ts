@@ -17,6 +17,7 @@ import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
 import type {
+  Bounds,
   ColormapArray,
   SpatialDimensions,
   DimIndicesProps,
@@ -46,7 +47,7 @@ export class ZarrLayer {
   private variable: string
   private zarrVersion: 2 | 3 | null = null
   private spatialDimensions: SpatialDimensions
-  private bounds: [number, number, number, number] | undefined
+  private bounds: Bounds | undefined
   private latIsAscending: boolean | null = null
   private selector: Selector
   private invalidate: () => void
@@ -111,6 +112,7 @@ export class ZarrLayer {
   private metadataLoading: boolean = false
   private chunksLoading: boolean = false
   private throttleMs: number
+  private proj4: string | undefined
 
   get fillValue(): number | null {
     return this._fillValue
@@ -142,6 +144,7 @@ export class ZarrLayer {
     renderingMode = '3d',
     onLoadingStateChange,
     throttleMs = 100,
+    proj4,
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -159,6 +162,13 @@ export class ZarrLayer {
     }
     if (!clim || !Array.isArray(clim) || clim.length !== 2) {
       throw new Error('[ZarrLayer] clim is required and must be [min, max]')
+    }
+    if (proj4 && !bounds) {
+      console.warn(
+        `[ZarrLayer] proj4 provided without explicit bounds. ` +
+          `Bounds will be derived from coordinate arrays if available (see subsequent log for values). ` +
+          `For best performance, provide bounds in source CRS units.`
+      )
     }
 
     this.id = id
@@ -194,6 +204,7 @@ export class ZarrLayer {
     if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
     this.throttleMs = throttleMs
+    this.proj4 = proj4
   }
 
   private emitLoadingState(): void {
@@ -407,6 +418,7 @@ export class ZarrLayer {
         bounds: this.bounds,
         latIsAscending: this.latIsAscending,
         coordinateKeys: Object.keys(this.selector),
+        proj4: this.proj4,
       })
 
       await this.zarrStore.initialized

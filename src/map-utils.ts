@@ -7,7 +7,7 @@
  * adapted from zarr-cesium/src/map-utils.ts
  */
 
-import { MERCATOR_LAT_LIMIT } from './constants'
+import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
 import type { ProjectionData, ShaderData } from './shaders'
 import type { MapLike } from './types'
 
@@ -551,12 +551,11 @@ export function boundsToMercatorNorm(
   crs: 'EPSG:4326' | 'EPSG:3857' | null
 ): MercatorBounds {
   if (crs === 'EPSG:3857') {
-    const worldExtent = 20037508.342789244
     return {
-      x0: (xyLimits.xMin + worldExtent) / (2 * worldExtent),
-      y0: (worldExtent - xyLimits.yMax) / (2 * worldExtent),
-      x1: (xyLimits.xMax + worldExtent) / (2 * worldExtent),
-      y1: (worldExtent - xyLimits.yMin) / (2 * worldExtent),
+      x0: (xyLimits.xMin + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
+      y0: (WEB_MERCATOR_EXTENT - xyLimits.yMax) / (2 * WEB_MERCATOR_EXTENT),
+      x1: (xyLimits.xMax + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
+      y1: (WEB_MERCATOR_EXTENT - xyLimits.yMin) / (2 * WEB_MERCATOR_EXTENT),
     }
   }
 
