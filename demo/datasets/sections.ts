@@ -10,7 +10,12 @@ export const SELECTOR_SECTIONS: SelectorSection[] = [
   },
   {
     label: 'Single Image',
-    datasetIds: ['hurricane_florence', 'pr single image', 'delta_FG_CO2'],
+    datasetIds: [
+      'hrrr_weather',
+      'hurricane_florence',
+      'pr single image',
+      'delta_FG_CO2',
+    ],
   },
   {
     label: 'Untiled Multiscale',

@@ -1,4 +1,5 @@
 import carbonplan4d from './carbonplan-4d'
+import hrrr from './hrrr'
 import hurricane from './hurricane'
 import { createSimpleDataset } from './simple'
 import { createTimeDataset } from './time'
@@ -7,6 +8,7 @@ import type { Dataset } from './types'
 
 export const DATASETS: Dataset<any>[] = [
   carbonplan4d,
+  hrrr,
   createTimeDataset({
     id: 'temperature_v3',
     source:
@@ -73,7 +75,7 @@ export const DATASETS: Dataset<any>[] = [
 ]
 
 export const DATASET_MAP = Object.fromEntries(
-  DATASETS.map((d) => [d.id, d]),
+  DATASETS.map((d) => [d.id, d])
 ) as Record<string, Dataset<any>>
 
 export const DEFAULT_DATASET_ID = DATASETS[0].id

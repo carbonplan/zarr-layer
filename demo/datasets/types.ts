@@ -19,6 +19,7 @@ export type DatasetConfig = {
     lon?: string
   }
   bounds?: [number, number, number, number]
+  proj4?: string
 }
 
 export type ControlsProps<State> = {
