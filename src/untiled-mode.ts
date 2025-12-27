@@ -1203,19 +1203,6 @@ export class UntiledMode implements ZarrMode {
     if (this.isMultiscale && this.levels.length > 0) {
       const mapZoom = map.getZoom?.() ?? 0
       const bestLevelIndex = this.selectLevelForZoom(mapZoom)
-      // Debug: log zoom, currentLevelIndex, bestLevelIndex, level info
-      console.log('[UntiledMode] update:', {
-        mapZoom,
-        currentLevelIndex: this.currentLevelIndex,
-        bestLevelIndex,
-        levels: this.levels.map((l, i) => ({
-          i,
-          asset: l.asset,
-          shape: l.shape,
-        })),
-        xyLimits: this.xyLimits,
-        crs: this.crs,
-      })
 
       // Initial load or level switch needed
       if (this.currentLevelIndex === -1) {
@@ -1315,10 +1302,7 @@ export class UntiledMode implements ZarrMode {
   }
 
   private selectLevelForZoom(mapZoom: number): number {
-    if (!this.xyLimits || this.levels.length === 0) {
-      console.warn('[UntiledMode] selectLevelForZoom: missing xyLimits or levels')
-      return 0
-    }
+    if (!this.xyLimits || this.levels.length === 0) return 0
 
     // Calculate map resolution: at zoom Z, full world is 256 * 2^Z pixels
     const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom)
@@ -1366,21 +1350,6 @@ export class UntiledMode implements ZarrMode {
       // Scale up to what resolution would be if data covered full world
       const effectivePixels = level.shape[lonIndex] / worldFraction
       levelResolutions.push({ index: i, effectivePixels })
-    }
-
-    // Debug: log level resolutions and selection logic
-    // Throttle debug log to once per second to avoid browser lockup
-    if (!window.__untiledModeLogTime || Date.now() - window.__untiledModeLogTime > 1000) {
-      window.__untiledModeLogTime = Date.now();
-      console.log('[UntiledMode] selectLevelForZoom:', {
-        mapZoom,
-        mapPixelsPerWorld,
-        dataWidthMeters,
-        worldFraction,
-        levelResolutions,
-        xyLimits: this.xyLimits,
-        crs: this.crs,
-      });
     }
 
     // If no levels have shape data yet, return last index (lowest res for untiled)
