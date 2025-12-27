@@ -1307,21 +1307,42 @@ export class UntiledMode implements ZarrMode {
     // Calculate map resolution: at zoom Z, full world is 256 * 2^Z pixels
     const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom)
 
-    // Calculate what fraction of the world the data covers, accounting for CRS
-    const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
-    let worldFraction: number
-    if (this.crs === 'EPSG:3857') {
-      // Web Mercator: full world is ~40,075,016 meters
-      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidth / fullWorldMeters
-    } else {
-      // EPSG:4326: full world is 360 degrees
-      worldFraction = dataWidth / 360
+    // Always compute worldFraction in Web Mercator meters
+    let mercXMin = this.xyLimits.xMin
+    let mercXMax = this.xyLimits.xMax
+    const dataWidth = Math.abs(this.xyLimits.xMax - this.xyLimits.xMin)
+    // If CRS is not EPSG:3857, transform bounds to Web Mercator
+    if (this.crs !== 'EPSG:3857') {
+      try {
+        // Use proj4 if available
+        if (typeof window.proj4 === 'function' && this.crs) {
+          const toMerc = window.proj4(this.crs, 'EPSG:3857')
+          const min = toMerc.forward([this.xyLimits.xMin, this.xyLimits.yMin])
+          const max = toMerc.forward([this.xyLimits.xMax, this.xyLimits.yMax])
+          mercXMin = Math.min(min[0], max[0])
+          mercXMax = Math.max(min[0], max[0])
+        } else if (this.crs === 'EPSG:4326' && dataWidth > 10000) {
+          // Heuristic: bounds are already in meters, do not convert
+          mercXMin = this.xyLimits.xMin
+          mercXMax = this.xyLimits.xMax
+        } else {
+          // Fallback: treat as degrees, approximate conversion
+          const DEG2RAD = Math.PI / 180
+          const R = 6378137
+          const xToMerc = (x: number) => R * x * DEG2RAD
+          mercXMin = xToMerc(this.xyLimits.xMin)
+          mercXMax = xToMerc(this.xyLimits.xMax)
+        }
+      } catch (e) {
+        console.warn('[UntiledMode] Failed to transform bounds to EPSG:3857:', e)
+      }
     }
+    const dataWidthMeters = Math.abs(mercXMax - mercXMin)
+    const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
+    const worldFraction = dataWidthMeters / fullWorldMeters
 
     // Build list of levels with their effective resolution (pixels per full world)
-    const levelResolutions: Array<{ index: number; effectivePixels: number }> =
-      []
+    const levelResolutions: Array<{ index: number; effectivePixels: number }> = []
     for (let i = 0; i < this.levels.length; i++) {
       const level = this.levels[i]
       if (!level.shape) continue
@@ -1337,17 +1358,16 @@ export class UntiledMode implements ZarrMode {
     // Sort by resolution ascending (lowest res first)
     levelResolutions.sort((a, b) => a.effectivePixels - b.effectivePixels)
 
-    // Find the lowest resolution level that still provides sufficient detail
+    // Find the coarsest (lowest-res) level that still provides sufficient detail
     // (at least 50% of map's pixel density to avoid obvious pixelation)
     const minRequired = mapPixelsPerWorld * 0.5
-    for (const { index, effectivePixels } of levelResolutions) {
-      if (effectivePixels >= minRequired) {
-        return index
+    for (let i = 0; i < levelResolutions.length; i++) {
+      if (levelResolutions[i].effectivePixels >= minRequired) {
+        return levelResolutions[i].index;
       }
     }
-
-    // If no level is sufficient, use the highest resolution available
-    return levelResolutions[levelResolutions.length - 1].index
+    // If none meet the requirement, return the coarsest (last) level
+    return levelResolutions[levelResolutions.length - 1].index;
   }
 
   private async switchToLevel(

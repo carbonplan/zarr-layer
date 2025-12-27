@@ -6,7 +6,7 @@ export type SelectorSection = {
 export const SELECTOR_SECTIONS: SelectorSection[] = [
   {
     label: 'Tiled Pyramids',
-    datasetIds: ['carbonplan_4d', 'temperature_v3', 'tasmax_pyramid_4326'],
+    datasetIds: ['carbonplan_4d', 'temperature_v3', 'tasmax_pyramid_4326', 'sentinel_2_l2a'],
   },
   {
     label: 'Single Image',
