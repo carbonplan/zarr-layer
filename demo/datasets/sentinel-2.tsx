@@ -23,7 +23,7 @@ const sentinel2_blue: Dataset<Sentinel2State> = {
     'https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2C_MSIL2A_20251218T083401_N0511_R021_T37TBG_20251218T112007.zarr/measurements/reflectance',
   variable: 'b04', // Blue
   colormap: 'blues',
-  clim: [0, 1],
+  clim: [0, 0.4],
   latIsAscending: false,
   zarrVersion: 3,
   // Map UTM coordinate dimension names to lat/lon
@@ -33,12 +33,12 @@ const sentinel2_blue: Dataset<Sentinel2State> = {
   },
   proj4: UTM_37N_PROJ4,
   bounds: SENTINEL2_BOUNDS,
-  info: 'Sentinel-2 L2A RGB (B04/B03/B02) - UTM 37N',
+  info: 'Sentinel-2 L2A B04 - UTM 37N',
   sourceInfo:
-    'Sentinel-2 Level 2A reflectance data from Copernicus EOPF. UTM Zone 37N (T37TBG) reprojected on-the-fly using proj4. RGB = B04 (Red), B03 (Green), B02 (Blue).',
+    'Sentinel-2 Level 2A reflectance data from Copernicus EOPF. UTM Zone 37N (T37TBG) reprojected on-the-fly using proj4.',
   defaultState: {},
   Controls,
-  buildLayerProps: () => ({ selector: { band: ['b04', 'b03', 'b02'] } }),
+  buildLayerProps: () => ({ selector: {} }),
 }
 
 export default sentinel2_blue
