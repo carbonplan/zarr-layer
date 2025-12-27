@@ -66,7 +66,7 @@ export class ZarrLayer {
   private gl: WebGL2RenderingContext | undefined
   private map: MapLike | null = null
   private renderer: ZarrRenderer | null = null
-  private mode: ZarrMode | null = null
+  public mode: ZarrMode | null = null
   private tileNeedsRender: boolean = true
 
   private projectionChangeHandler: (() => void) | null = null
@@ -423,6 +423,9 @@ export class ZarrLayer {
 
       await this.zarrStore.initialized
 
+      if (!this.zarrStore) {
+        throw new Error('ZarrLayer: zarrStore is null before describe()')
+      }
       const desc = this.zarrStore.describe()
 
       this.levelInfos = desc.levels

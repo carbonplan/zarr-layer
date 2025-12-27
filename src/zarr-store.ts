@@ -229,6 +229,11 @@ export class ZarrStore {
     this.latIsAscending = latIsAscending
     this.proj4 = proj4 ?? null
 
+    // If proj4 is provided and no explicit CRS is set, treat as projected (EPSG:3857 for world fraction logic)
+    if (this.proj4 && !this.crs) {
+      this.crs = 'EPSG:3857'
+    }
+
     this.initialized = this._initialize()
   }
 

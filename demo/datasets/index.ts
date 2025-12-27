@@ -1,6 +1,7 @@
 import carbonplan4d from './carbonplan-4d'
 import hrrr from './hrrr'
 import hurricane from './hurricane'
+import sentinel2 from './sentinel-2'
 import { createSimpleDataset } from './simple'
 import { createTimeDataset } from './time'
 import untiled4326 from './untiled-4326'
@@ -8,6 +9,7 @@ import type { Dataset } from './types'
 
 export const DATASETS: Dataset<any>[] = [
   carbonplan4d,
+  sentinel2,
   hrrr,
   createTimeDataset({
     id: 'temperature_v3',

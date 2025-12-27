@@ -188,6 +188,8 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
 
   useEffect(() => {
     if (!map || !isMapLoaded) return
+  // Add zoom event listener to trigger rerender (and thus level selection) on zoom changes
+  let zoomHandler: (() => void) | null = null
 
     const mapConfig = getMapConfig(mapProvider)
     let clickHandler: ((event: any) => void) | null = null
@@ -268,6 +270,20 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       map.on('click', clickHandler)
       zarrLayerRef.current = layer
       setZarrLayer(layer)
+      // Expose the current ZarrLayer instance for debugging
+      if (typeof window !== 'undefined') {
+        (window as any).currentZarrLayer = layer
+      }
+
+      // Add zoom event handler to trigger rerender/level update
+      zoomHandler = () => {
+        // This will trigger the ZarrLayer's prerender/render, which will call mode.update and select the correct level
+        if (map.triggerRepaint) map.triggerRepaint()
+      }
+      if (typeof map.on === 'function') {
+        map.on('zoom', zoomHandler)
+        map.on('moveend', zoomHandler)
+      }
 
       if (datasetModule.center) {
         map.flyTo({
@@ -292,6 +308,12 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       if (clickHandler && map.off) {
         try {
           map.off('click', clickHandler)
+        } catch (e) {}
+      }
+      if (zoomHandler && map.off) {
+        try {
+          map.off('zoom', zoomHandler)
+          map.off('moveend', zoomHandler)
         } catch (e) {}
       }
     }
