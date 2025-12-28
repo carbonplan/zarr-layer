@@ -261,7 +261,7 @@ export class ZarrStore {
       }
     }
 
-    await this._loadXYLimits()
+    await this._loadSpatialMetadata()
     await this._loadCoordinates()
 
     return this
@@ -653,43 +653,47 @@ export class ZarrStore {
     }
   }
 
-  private async _loadXYLimits() {
-    // If explicit bounds provided, use them directly
-    // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857 or proj4)
+  private async _loadSpatialMetadata() {
+    // Apply explicit bounds first (takes precedence for all multiscale types)
+    // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857/proj4)
     if (this.explicitBounds) {
       const [west, south, east, north] = this.explicitBounds
-      this.xyLimits = {
-        xMin: west,
-        xMax: east,
-        yMin: south,
-        yMax: north,
-      }
-      return
+      this.xyLimits = { xMin: west, xMax: east, yMin: south, yMax: north }
     }
 
-    // Tiled pyramids use standard global extent (no coord array fetch needed)
+    // Tiled pyramids: use standard global extent if no explicit bounds
     if (this.multiscaleType === 'tiled') {
-      this.xyLimits = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
-      // Tiled pyramids have descending latitude (north to south, row 0 = north)
+      if (!this.xyLimits) {
+        this.xyLimits = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
+      }
       if (this.latIsAscending === null) {
-        this.latIsAscending = false
+        this.latIsAscending = false // Tiled pyramids: row 0 = north
       }
       return
     }
 
-    if (!this.dimIndices.lon || !this.dimIndices.lat || !this.root) return
+    // For untiled: determine what we still need to detect
+    const needsBounds = !this.xyLimits
+    const needsLatAscending = this.latIsAscending === null
+
+    // If explicit bounds provided and user doesn't need latIsAscending detection, skip coord fetch
+    // (respects user intent to avoid coord reads by providing bounds)
+    if (!needsBounds && !needsLatAscending) {
+      return
+    }
+
+    // Can't fetch coords without dimension info - return silently (best-effort)
+    if (!this.dimIndices.lon || !this.dimIndices.lat || !this.root) {
+      return
+    }
 
     try {
-      // Untiled: use highest res level for accuracy (see _findBoundsLevel)
       const boundsLevel = await this._findBoundsLevel()
       const levelRoot = boundsLevel ? this.root.resolve(boundsLevel) : this.root
 
       const openArray = (loc: zarr.Location<Readable>) => {
-        if (this.version === 2) {
-          return zarr.open.v2(loc, { kind: 'array' })
-        } else if (this.version === 3) {
-          return zarr.open.v3(loc, { kind: 'array' })
-        }
+        if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
+        if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
         return zarr.open(loc, { kind: 'array' })
       }
 
@@ -699,13 +703,10 @@ export class ZarrStore {
       const xarr = await openArray(levelRoot.resolve(lonName))
       const yarr = await openArray(levelRoot.resolve(latName))
 
-      // Only fetch first and last values (coordinate arrays are monotonic)
-      // This avoids loading all chunks for large arrays
       const xLen = xarr.shape[0]
       const yLen = yarr.shape[0]
 
       type ZarrResult = { data: ArrayLike<number> }
-      // Fetch first 2 elements together (same chunk) and last element separately
       const [xFirst, xLast, yFirstTwo, yLast] = (await Promise.all([
         zarr.get(xarr, [zarr.slice(0, 1)]),
         zarr.get(xarr, [zarr.slice(xLen - 1, xLen)]),
@@ -719,47 +720,48 @@ export class ZarrStore {
       const y1 = yFirstTwo.data[1]
       const yN = yLast.data[0]
 
-      // Determine ascending from first two values
-      if (this.latIsAscending === null) {
-        this.latIsAscending = y1 > y0
+      // Detect latIsAscending from first two y values
+      const detectedLatAscending = y1 > y0
+      if (needsLatAscending) {
+        this.latIsAscending = detectedLatAscending
       }
 
-      // Min/max from first and last (works for ascending or descending)
+      // Compute bounds from coordinate extents
       const xMin = Math.min(x0, x1)
       const xMax = Math.max(x0, x1)
       const yMin = Math.min(y0, yN)
       const yMax = Math.max(y0, yN)
 
-      // Only set xyLimits if not already set by explicit bounds
-      if (!this.xyLimits) {
+      if (needsBounds) {
         this.xyLimits = { xMin, xMax, yMin, yMax }
+      }
 
-        // Warn users so they can set explicit bounds to avoid fetching large coord arrays
-        // (only for untiled where we fetch full-res arrays; tiled arrays are small)
-        if (this.multiscaleType === 'untiled') {
-          // Only include latIsAscending if non-default (false)
-          const latAscendingHint =
-            this.latIsAscending === false ? `, latIsAscending: false` : ''
+      // Warn users to set explicit values to skip future coordinate fetches
+      if (this.multiscaleType === 'untiled') {
+        const hints: string[] = []
+        if (needsBounds) hints.push(`bounds: [${xMin}, ${yMin}, ${xMax}, ${yMax}]`)
+        if (needsLatAscending && !detectedLatAscending) hints.push('latIsAscending: false')
+
+        if (hints.length > 0) {
           console.warn(
-            `[zarr-layer] Detected bounds from coordinate arrays. ` +
-              `Set these options to skip the fetch: bounds: [${xMin}, ${yMin}, ${xMax}, ${yMax}]${latAscendingHint}`
+            `[zarr-layer] Detected from coordinate arrays. ` +
+              `Set explicitly to skip this fetch: ${hints.join(', ')}`
           )
         }
       }
     } catch (err) {
-      // If we already have bounds (from explicit config), just warn about latIsAscending detection
-      if (this.xyLimits) {
-        console.debug(
-          'Could not detect latIsAscending from coordinate arrays:',
-          err instanceof Error ? err.message : err
-        )
-      } else {
+      if (needsBounds) {
         throw new Error(
-          `Failed to load XY limits from coordinate arrays. ` +
+          `Failed to load bounds from coordinate arrays. ` +
             `Provide explicit bounds via the 'bounds' option. ` +
-            `Original error: ${err instanceof Error ? err.message : err}`
+            `Error: ${err instanceof Error ? err.message : err}`
         )
       }
+      // Bounds were explicit but latIsAscending detection failed - just log
+      console.debug(
+        '[zarr-layer] Could not detect latIsAscending from coordinates:',
+        err instanceof Error ? err.message : err
+      )
     }
 
     // Infer CRS from bounds for untiled multiscales if not explicitly set
