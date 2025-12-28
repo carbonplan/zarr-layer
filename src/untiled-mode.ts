@@ -946,8 +946,7 @@ export class UntiledMode implements ZarrMode {
       region.loading = true
     }
 
-    // Limit concurrent fetches to avoid ERR_INSUFFICIENT_RESOURCES
-    const MAX_CONCURRENT = 6
+    const MAX_CONCURRENT = 32
     const executing: Promise<void>[] = []
 
     for (const region of regions) {
