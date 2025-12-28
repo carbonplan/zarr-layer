@@ -34,17 +34,6 @@ export const DATASETS: Dataset<any>[] = [
     maxTime: 729,
   }),
   createTimeDataset({
-    id: 'pr single image',
-    source:
-      'https://carbonplan-scratch.s3.us-west-2.amazonaws.com/zarr-pyramids/zarr-v3-single-layer-default.zarr',
-    variable: 'pr',
-    clim: [0, 20],
-    colormap: 'blues',
-    zarrVersion: 3,
-    info: 'Precipitation (single image, global)',
-    sourceInfo: 'v3 single image (global)',
-  }),
-  createTimeDataset({
     id: 'delta_FG_CO2',
     source:
       'https://carbonplan-oae-efficiency.s3.us-west-2.amazonaws.com/fgco2-2021-180x360.zarr',
@@ -75,7 +64,7 @@ export const DATASETS: Dataset<any>[] = [
 ]
 
 export const DATASET_MAP = Object.fromEntries(
-  DATASETS.map((d) => [d.id, d])
+  DATASETS.map((d) => [d.id, d]),
 ) as Record<string, Dataset<any>>
 
 export const DEFAULT_DATASET_ID = DATASETS[0].id
