@@ -1307,14 +1307,28 @@ export class UntiledMode implements ZarrMode {
     const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom)
 
     // Calculate what fraction of the world the data covers, accounting for CRS
-    const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
     let worldFraction: number
-    if (this.crs === 'EPSG:3857') {
+    if (this.proj4def && this.cachedMercatorTransformer) {
+      // Custom projection: transform bounds corners to mercator
+      const [minMercX] = this.cachedMercatorTransformer.forward(
+        this.xyLimits.xMin,
+        this.xyLimits.yMin
+      )
+      const [maxMercX] = this.cachedMercatorTransformer.forward(
+        this.xyLimits.xMax,
+        this.xyLimits.yMax
+      )
+      const dataWidthMeters = Math.abs(maxMercX - minMercX)
+      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
+      worldFraction = dataWidthMeters / fullWorldMeters
+    } else if (this.crs === 'EPSG:3857') {
       // Web Mercator: full world is ~40,075,016 meters
+      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidth / fullWorldMeters
     } else {
       // EPSG:4326: full world is 360 degrees
+      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
     }
 
