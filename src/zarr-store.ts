@@ -1,11 +1,12 @@
 import * as zarr from 'zarrita'
-import type { Readable } from '@zarrita/storage'
+import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
   Bounds,
   SpatialDimensions,
   DimIndicesProps,
   CRS,
   UntiledLevel,
+  TransformRequest,
 } from './types'
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
@@ -111,8 +112,150 @@ interface ZarrV3ArrayMetadata {
   attributes?: Record<string, unknown>
 }
 
+type AbsolutePath = `/${string}`
+type RangeQuery = { offset: number; length: number } | { suffixLength: number }
+
+/**
+ * Merge RequestInit objects, properly combining headers instead of replacing.
+ * Request overrides take precedence over store overrides.
+ */
+const mergeInit = (
+  storeOverrides: RequestInit,
+  requestOverrides?: RequestInit
+): RequestInit => {
+  if (!requestOverrides) return storeOverrides
+  return {
+    ...storeOverrides,
+    ...requestOverrides,
+    headers: {
+      ...(storeOverrides.headers as Record<string, string>),
+      ...(requestOverrides.headers as Record<string, string>),
+    },
+  }
+}
+
+/**
+ * Handle fetch response, returning bytes or undefined for 404.
+ */
+const handleResponse = async (
+  response: Response
+): Promise<Uint8Array | undefined> => {
+  if (response.status === 404) return undefined
+  if (response.status === 200 || response.status === 206) {
+    return new Uint8Array(await response.arrayBuffer())
+  }
+  throw new Error(
+    `Unexpected response status ${response.status} ${response.statusText}`
+  )
+}
+
+/**
+ * Fetch a byte range from a URL.
+ */
+const fetchRange = (
+  url: string | URL,
+  offset: number,
+  length: number,
+  opts: RequestInit = {}
+): Promise<Response> => {
+  return fetch(url, {
+    ...opts,
+    headers: {
+      ...(opts.headers as Record<string, string>),
+      Range: `bytes=${offset}-${offset + length - 1}`,
+    },
+  })
+}
+
+/**
+ * Fetch suffix bytes from a URL.
+ * Uses HEAD + range fallback for backends that don't support suffix ranges.
+ */
+const fetchSuffix = async (
+  url: string | URL,
+  suffixLength: number,
+  init: RequestInit
+): Promise<Response> => {
+  // Use HEAD + range fallback (matches zarrita's default behavior)
+  // Some backends (like S3) don't support bytes=-n suffix requests well
+  const headResponse = await fetch(url, { ...init, method: 'HEAD' })
+  if (!headResponse.ok) {
+    return headResponse // will be picked up by handleResponse
+  }
+  const contentLength = headResponse.headers.get('Content-Length')
+  const length = Number(contentLength)
+  return fetchRange(url, length - suffixLength, suffixLength, init)
+}
+
+/**
+ * Custom store that calls transformRequest for each request with the fully resolved URL.
+ * This enables per-path authentication like presigned S3 URLs.
+ */
+class TransformingFetchStore implements AsyncReadable<RequestInit> {
+  private baseUrl: URL
+  private transformRequest: TransformRequest
+
+  constructor(url: string, transformRequest: TransformRequest) {
+    this.baseUrl = new URL(url)
+    if (!this.baseUrl.pathname.endsWith('/')) {
+      this.baseUrl.pathname += '/'
+    }
+    this.transformRequest = transformRequest
+  }
+
+  private resolveUrl(key: AbsolutePath): string {
+    const resolved = new URL(key.slice(1), this.baseUrl)
+    resolved.search = this.baseUrl.search
+    return resolved.href
+  }
+
+  async get(
+    key: AbsolutePath,
+    opts?: RequestInit
+  ): Promise<Uint8Array | undefined> {
+    const resolvedUrl = this.resolveUrl(key)
+    const { url: transformedUrl, ...overrides } = await this.transformRequest(
+      resolvedUrl
+    )
+
+    const merged = mergeInit(overrides, opts)
+    const response = await fetch(transformedUrl, merged)
+    return handleResponse(response)
+  }
+
+  async getRange(
+    key: AbsolutePath,
+    range: RangeQuery,
+    opts?: RequestInit
+  ): Promise<Uint8Array | undefined> {
+    const resolvedUrl = this.resolveUrl(key)
+    const { url: transformedUrl, ...overrides } = await this.transformRequest(
+      resolvedUrl
+    )
+
+    const merged = mergeInit(overrides, opts)
+    let response: Response
+
+    if ('suffixLength' in range) {
+      response = await fetchSuffix(transformedUrl, range.suffixLength, merged)
+    } else {
+      response = await fetchRange(
+        transformedUrl,
+        range.offset,
+        range.length,
+        merged
+      )
+    }
+
+    return handleResponse(response)
+  }
+}
+
 type ConsolidatedStore = zarr.Listable<zarr.FetchStore>
-type ZarrStoreType = zarr.FetchStore | ConsolidatedStore
+type ZarrStoreType =
+  | zarr.FetchStore
+  | TransformingFetchStore
+  | ConsolidatedStore
 
 interface ZarrStoreOptions {
   source: string
@@ -123,6 +266,7 @@ interface ZarrStoreOptions {
   coordinateKeys?: string[]
   latIsAscending?: boolean | null
   proj4?: string
+  transformRequest?: TransformRequest
 }
 
 interface StoreDescription {
@@ -147,6 +291,22 @@ interface StoreDescription {
   proj4: string | null
 }
 
+/**
+ * Factory function to create a store with optional request transformation.
+ * When transformRequest is provided, returns a TransformingFetchStore that
+ * calls the transform function for each request with the fully resolved URL.
+ * This enables per-path authentication like presigned S3 URLs.
+ */
+const createFetchStore = (
+  url: string,
+  transformRequest?: TransformRequest
+): zarr.FetchStore | TransformingFetchStore => {
+  if (!transformRequest) {
+    return new zarr.FetchStore(url)
+  }
+  return new TransformingFetchStore(url, transformRequest)
+}
+
 export class ZarrStore {
   private static _cache = new Map<
     string,
@@ -160,6 +320,7 @@ export class ZarrStore {
   spatialDimensions: SpatialDimensions
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
+  private transformRequest?: TransformRequest
 
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
   arrayMetadata: ZarrV3ArrayMetadata | null = null
@@ -213,6 +374,7 @@ export class ZarrStore {
     coordinateKeys = [],
     latIsAscending = null,
     proj4,
+    transformRequest,
   }: ZarrStoreOptions) {
     if (!source) {
       throw new Error('source is a required parameter')
@@ -228,22 +390,37 @@ export class ZarrStore {
     this.coordinateKeys = coordinateKeys
     this.latIsAscending = latIsAscending
     this.proj4 = proj4 ?? null
+    this.transformRequest = transformRequest
 
     this.initialized = this._initialize()
   }
 
   private async _initialize(): Promise<this> {
     const storeCacheKey = `${this.source}:${this.version ?? 'auto'}`
-    let storeHandle = ZarrStore._storeCache.get(storeCacheKey)
+    let storeHandle: Promise<ZarrStoreType> | undefined
 
-    if (!storeHandle) {
-      const baseStore = new zarr.FetchStore(this.source)
+    if (this.transformRequest) {
+      // Bypass cache when transformRequest is provided (unique credentials per layer)
+      const baseStore = createFetchStore(this.source, this.transformRequest)
       if (this.version === 3) {
         storeHandle = Promise.resolve(baseStore)
       } else {
         storeHandle = zarr.tryWithConsolidated(baseStore).catch(() => baseStore)
       }
-      ZarrStore._storeCache.set(storeCacheKey, storeHandle)
+    } else {
+      // Use cached store for standard requests
+      storeHandle = ZarrStore._storeCache.get(storeCacheKey)
+      if (!storeHandle) {
+        const baseStore = new zarr.FetchStore(this.source)
+        if (this.version === 3) {
+          storeHandle = Promise.resolve(baseStore)
+        } else {
+          storeHandle = zarr
+            .tryWithConsolidated(baseStore)
+            .catch(() => baseStore)
+        }
+        ZarrStore._storeCache.set(storeCacheKey, storeHandle)
+      }
     }
 
     this.store = await storeHandle
@@ -467,21 +644,24 @@ export class ZarrStore {
 
   private async _loadV2() {
     const cacheKey = `v2:${this.source}`
-    let zmetadata = ZarrStore._cache.get(cacheKey) as
-      | ZarrV2ConsolidatedMetadata
-      | undefined
+    // Bypass cache when transformRequest is provided (unique credentials per layer)
+    let zmetadata = this.transformRequest
+      ? undefined
+      : (ZarrStore._cache.get(cacheKey) as
+          | ZarrV2ConsolidatedMetadata
+          | undefined)
     if (!zmetadata) {
       if (this.isConsolidatedStore(this.store)) {
         const rootZattrsBytes = await this.store.get('/.zattrs')
         const rootZattrs = rootZattrsBytes ? decodeJSON(rootZattrsBytes) : {}
         zmetadata = { metadata: { '.zattrs': rootZattrs } }
-        ZarrStore._cache.set(cacheKey, zmetadata)
+        if (!this.transformRequest) ZarrStore._cache.set(cacheKey, zmetadata)
       } else {
         try {
           zmetadata = (await this._getJSON(
             '/.zmetadata'
           )) as ZarrV2ConsolidatedMetadata
-          ZarrStore._cache.set(cacheKey, zmetadata)
+          if (!this.transformRequest) ZarrStore._cache.set(cacheKey, zmetadata)
         } catch {
           const zattrs = await this._getJSON('/.zattrs')
           zmetadata = { metadata: { '.zattrs': zattrs } }
@@ -544,19 +724,24 @@ export class ZarrStore {
 
   private async _loadV3() {
     const metadataCacheKey = `v3:${this.source}`
-    let metadata = ZarrStore._cache.get(metadataCacheKey) as
-      | ZarrV3GroupMetadata
-      | undefined
+    // Bypass cache when transformRequest is provided (unique credentials per layer)
+    let metadata = this.transformRequest
+      ? undefined
+      : (ZarrStore._cache.get(metadataCacheKey) as
+          | ZarrV3GroupMetadata
+          | undefined)
     if (!metadata) {
       metadata = (await this._getJSON('/zarr.json')) as ZarrV3GroupMetadata
-      ZarrStore._cache.set(metadataCacheKey, metadata)
+      if (!this.transformRequest) {
+        ZarrStore._cache.set(metadataCacheKey, metadata)
 
-      if (metadata.consolidated_metadata?.metadata) {
-        for (const [key, arrayMeta] of Object.entries(
-          metadata.consolidated_metadata.metadata
-        )) {
-          const arrayCacheKey = `v3:${this.source}/${key}`
-          ZarrStore._cache.set(arrayCacheKey, arrayMeta)
+        if (metadata.consolidated_metadata?.metadata) {
+          for (const [key, arrayMeta] of Object.entries(
+            metadata.consolidated_metadata.metadata
+          )) {
+            const arrayCacheKey = `v3:${this.source}/${key}`
+            ZarrStore._cache.set(arrayCacheKey, arrayMeta)
+          }
         }
       }
     }
@@ -576,14 +761,15 @@ export class ZarrStore {
         ? `${this.levels[0]}/${this.variable}`
         : this.variable
     const arrayCacheKey = `v3:${this.source}/${arrayKey}`
-    let arrayMetadata = ZarrStore._cache.get(arrayCacheKey) as
-      | ZarrV3ArrayMetadata
-      | undefined
+    let arrayMetadata = this.transformRequest
+      ? undefined
+      : (ZarrStore._cache.get(arrayCacheKey) as ZarrV3ArrayMetadata | undefined)
     if (!arrayMetadata) {
       arrayMetadata = (await this._getJSON(
         `/${arrayKey}/zarr.json`
       )) as ZarrV3ArrayMetadata
-      ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
+      if (!this.transformRequest)
+        ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
     }
     this.arrayMetadata = arrayMetadata
 

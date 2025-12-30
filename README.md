@@ -83,6 +83,7 @@ map.on('load', () => {
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
 | throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to `0` to disable. |
+| transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
 
 ## methods
 
@@ -209,6 +210,23 @@ const result = await layer.queryData({
 ```
 
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). For datasets rendered via `proj4` reprojection, queries sample the underlying source grid; because reprojection/resampling occurs for display, a visual pixel click may not align perfectly with the nearest source pixel.
+
+## authentication
+
+Use `transformRequest` to add headers or credentials to requests. The function receives the fully resolved URL for each request, enabling per-path authentication like presigned S3 URLs. Supports any [fetch options](https://developer.mozilla.org/en-US/docs/Web/API/fetch#options).
+
+```ts
+// Static auth (same headers for all requests)
+transformRequest: (url) => ({
+  url,
+  headers: { Authorization: `Bearer ${token}` },
+})
+
+// Presigned URLs (path-specific signatures)
+transformRequest: async (url) => ({
+  url: await getPresignedUrl(url),
+})
+```
 
 ## thanks
 

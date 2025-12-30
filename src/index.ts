@@ -6,6 +6,8 @@ export type {
   LoadingState,
   LoadingStateCallback,
   Selector,
+  TransformRequest,
+  RequestParameters,
 } from './types'
 
 // Query interface exports

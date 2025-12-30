@@ -3,6 +3,15 @@ import * as zarr from 'zarrita'
 /** Bounds tuple: [xMin, yMin, xMax, yMax] */
 export type Bounds = [number, number, number, number]
 
+export interface RequestParameters extends Omit<RequestInit, 'headers'> {
+  url: string
+  headers?: { [key: string]: string }
+}
+
+export type TransformRequest = (
+  url: string
+) => RequestParameters | Promise<RequestParameters>
+
 export type ColormapArray = number[][] | string[]
 
 export type SelectorValue = number | number[] | string | string[]
@@ -81,6 +90,12 @@ export interface ZarrLayerOptions {
    * Example: "+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +x_0=0 +y_0=0 +R=6371229 +units=m +no_defs"
    */
   proj4?: string
+  /**
+   * Function to transform request URLs and add custom headers/credentials.
+   * Useful for authentication, proxy routing, or request customization.
+   * When provided, the store cache is bypassed to prevent credential sharing between layers.
+   */
+  transformRequest?: TransformRequest
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'

@@ -26,6 +26,7 @@ import type {
   Selector,
   NormalizedSelector,
   ZarrLayerOptions,
+  TransformRequest,
 } from './types'
 import type { ZarrMode, RenderContext } from './zarr-mode'
 import { TiledMode } from './tiled-mode'
@@ -114,6 +115,7 @@ export class ZarrLayer {
   private initError: Error | null = null
   private throttleMs: number
   private proj4: string | undefined
+  private transformRequest: TransformRequest | undefined
 
   get fillValue(): number | null {
     return this._fillValue
@@ -146,6 +148,7 @@ export class ZarrLayer {
     onLoadingStateChange,
     throttleMs = 100,
     proj4,
+    transformRequest,
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -206,6 +209,7 @@ export class ZarrLayer {
     this.onLoadingStateChange = onLoadingStateChange
     this.throttleMs = throttleMs
     this.proj4 = proj4
+    this.transformRequest = transformRequest
   }
 
   private emitLoadingState(): void {
@@ -443,6 +447,7 @@ export class ZarrLayer {
         latIsAscending: this.latIsAscending,
         coordinateKeys: Object.keys(this.selector),
         proj4: this.proj4,
+        transformRequest: this.transformRequest,
       })
 
       await this.zarrStore.initialized
