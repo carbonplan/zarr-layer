@@ -640,41 +640,38 @@ export class UntiledMode implements ZarrMode {
   ): void {
     const geoBounds = this.getRegionBounds(regionX, regionY)
 
-    // Compute mercator bounds - use grid-aligned bounds for proj4 reprojection
-    let mercBounds: MercatorBounds
-    if (this.proj4def) {
-      const gridAligned = this.getGridAlignedRegionBounds(regionX, regionY)
-      mercBounds =
-        gridAligned?.mercBounds ?? this.computeRegionMercatorBounds(geoBounds)
-    } else {
-      mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
-    }
-
-    // Store mercator bounds for shader uniforms
+    // Use cached mercatorBounds if set (from fetchRegion's resampling path),
+    // otherwise compute from geoBounds (for non-resampling cases like EPSG:3857)
+    const mercBounds =
+      region.mercatorBounds ?? boundsToMercatorNorm(geoBounds, this.crs)
     region.mercatorBounds = mercBounds
 
     // Subdivisions for smooth globe tessellation - more for larger regions
     const latSpan = Math.abs(geoBounds.yMax - geoBounds.yMin)
     const subdivisions = Math.max(16, Math.min(128, Math.ceil(latSpan)))
-    const subdivided = createSubdividedQuad(subdivisions)
 
-    region.vertexArr = subdivided.vertexArr
-
-    // Determine texture coordinates based on CRS and data orientation
-    if (this.crs === 'EPSG:4326') {
-      // Resampled to Mercator on CPU - resampler handles latIsAscending internally
-      region.pixCoordArr = subdivided.texCoordArr
-    } else if (this.crs === 'EPSG:3857') {
-      // Already in Mercator space, no resampling - handle latIsAscending manually
-      // If latIsAscending (row 0 = south), flip V so V=0 samples north
-      region.pixCoordArr = this.latIsAscending
-        ? flipTexCoordV(subdivided.texCoordArr)
-        : subdivided.texCoordArr
+    if (this.proj4def && this.cachedMercatorTransformer) {
+      const warped = this.createWarpedGridGeometry(
+        geoBounds,
+        mercBounds,
+        subdivisions
+      )
+      region.vertexArr = warped.vertexArr
+      region.pixCoordArr = warped.texCoordArr
     } else {
-      // Fallback for other CRS - use linear coords with latIsAscending handling
-      region.pixCoordArr = this.latIsAscending
-        ? flipTexCoordV(subdivided.texCoordArr)
-        : subdivided.texCoordArr
+      const subdivided = createSubdividedQuad(subdivisions)
+      region.vertexArr = subdivided.vertexArr
+
+      // Determine texture coordinates based on CRS and data orientation
+      // EPSG:4326 is resampled to Mercator on CPU, so use linear coords
+      // Other CRS (3857, etc.) need V-flip if latitude is ascending
+      if (this.crs === 'EPSG:4326') {
+        region.pixCoordArr = subdivided.texCoordArr
+      } else {
+        region.pixCoordArr = this.latIsAscending
+          ? flipTexCoordV(subdivided.texCoordArr)
+          : subdivided.texCoordArr
+      }
     }
 
     // Create/update buffers
@@ -707,6 +704,63 @@ export class UntiledMode implements ZarrMode {
       return 'time'
     }
     return 'other'
+  }
+
+  /**
+   * Create warped mesh geometry for proj4 regions.
+   * Builds a shared grid in source CRS so adjacent regions share edge vertices.
+   */
+  private createWarpedGridGeometry(
+    geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number },
+    mercBounds: MercatorBounds,
+    subdivisions: number
+  ): { vertexArr: Float32Array; texCoordArr: Float32Array } {
+    const transformer = this.cachedMercatorTransformer!
+    const { xMin, xMax, yMin, yMax } = geoBounds
+
+    const denomX = mercBounds.x1 - mercBounds.x0 || 1
+    const denomY = mercBounds.y1 - mercBounds.y0 || 1
+    const invExtent = 1 / (2 * WEB_MERCATOR_EXTENT)
+
+    const vertices: number[] = []
+    const texCoords: number[] = []
+
+    const pushVertex = (u: number, v: number) => {
+      const srcX = xMin + u * (xMax - xMin)
+      const srcY = yMin + v * (yMax - yMin)
+      const [mercX, mercY] = transformer.forward(srcX, srcY)
+
+      const normX = (mercX + WEB_MERCATOR_EXTENT) * invExtent
+      const normY = (WEB_MERCATOR_EXTENT - mercY) * invExtent
+
+      const texU = (normX - mercBounds.x0) / denomX
+      const texV = (normY - mercBounds.y0) / denomY
+
+      const clipX = -1 + 2 * texU
+      const clipY = 1 - 2 * texV
+
+      vertices.push(clipX, clipY)
+      texCoords.push(texU, texV)
+    }
+
+    for (let row = 0; row < subdivisions; row++) {
+      const v0 = row / subdivisions
+      const v1 = (row + 1) / subdivisions
+      for (let col = 0; col <= subdivisions; col++) {
+        const u = col / subdivisions
+        pushVertex(u, v0)
+        pushVertex(u, v1)
+      }
+      if (row < subdivisions - 1) {
+        pushVertex(1, v1)
+        pushVertex(0, v1)
+      }
+    }
+
+    return {
+      vertexArr: new Float32Array(vertices),
+      texCoordArr: new Float32Array(texCoords),
+    }
   }
 
   /**
@@ -1116,9 +1170,11 @@ export class UntiledMode implements ZarrMode {
       if (needsResampling(this.crs, this.proj4def) && this.xyLimits) {
         const geoBounds = this.getRegionBounds(regionX, regionY)
 
-        // For proj4 reprojection, use grid-aligned bounds to eliminate seams
+        // Reuse cached mercatorBounds to avoid redundant computation on re-fetches
         let mercBounds: MercatorBounds
-        if (this.proj4def) {
+        if (region.mercatorBounds) {
+          mercBounds = region.mercatorBounds
+        } else if (this.proj4def) {
           const gridAligned = this.getGridAlignedRegionBounds(regionX, regionY)
           if (gridAligned) {
             mercBounds = gridAligned.mercBounds
@@ -1130,6 +1186,8 @@ export class UntiledMode implements ZarrMode {
         } else {
           mercBounds = boundsToMercatorNorm(geoBounds, this.crs)
         }
+
+        region.mercatorBounds = mercBounds
 
         const resampleOpts = {
           sourceSize: [actualW, actualH] as [number, number],
@@ -1914,7 +1972,7 @@ export class UntiledMode implements ZarrMode {
         return {
           type: 'bbox',
           values: [],
-          data: new Float32Array((result.data as Float32Array).buffer),
+          data: new Float32Array(result.data),
           width: fetchWidth,
           height: fetchHeight,
           channels: 1,
@@ -1936,11 +1994,8 @@ export class UntiledMode implements ZarrMode {
         const bandData = (await zarr.get(this.zarrArray, sliceArgs)) as {
           data: ArrayLike<number>
         }
-        const bandArray = new Float32Array(
-          (bandData.data as Float32Array).buffer
-        )
         for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
-          packedData[pixIdx * numChannels + c] = bandArray[pixIdx]
+          packedData[pixIdx * numChannels + c] = bandData.data[pixIdx]
         }
       }
 
