@@ -175,43 +175,46 @@ export async function queryRegionTiled(
   // For each tile, determine which chunks we need based on selector and fetch them
   const tileChunkData = new Map<string, Map<string, Float32Array>>()
 
-  for (const tileTuple of tiles) {
-    const [, x, y] = tileTuple
-    const chunksToFetch = getChunks(
-      selector,
-      dimensions,
-      coordinates,
-      shape,
-      chunks,
-      x,
-      y
-    )
+  // Parallelize tile fetching - process all tiles concurrently instead of serially
+  await Promise.all(
+    tiles.map(async (tileTuple) => {
+      const [, x, y] = tileTuple
+      const chunksToFetch = getChunks(
+        selector,
+        dimensions,
+        coordinates,
+        shape,
+        chunks,
+        x,
+        y
+      )
 
-    const tileKey = tileToKey(tileTuple)
-    const chunkDataMap = new Map<string, Float32Array>()
+      const tileKey = tileToKey(tileTuple)
+      const chunkDataMap = new Map<string, Float32Array>()
 
-    // Fetch all chunks for this tile
-    await Promise.all(
-      chunksToFetch.map(async (chunkIndices) => {
-        try {
-          const chunk = await zarrStore.getChunk(levelPath, chunkIndices)
-          // Make a proper copy to avoid buffer sharing issues
-          const chunkData = new Float32Array(chunk.data as ArrayLike<number>)
+      // Fetch all chunks for this tile
+      await Promise.all(
+        chunksToFetch.map(async (chunkIndices) => {
+          try {
+            const chunk = await zarrStore.getChunk(levelPath, chunkIndices)
+            // Make a proper copy to avoid buffer sharing issues
+            const chunkData = new Float32Array(chunk.data as ArrayLike<number>)
 
-          // Store chunk with indices as key
-          const chunkKey = chunkIndices.join(',')
-          chunkDataMap.set(chunkKey, chunkData)
-        } catch (err) {
-          console.warn(
-            `Failed to fetch chunk ${chunkIndices} for tile ${tileKey}:`,
-            err
-          )
-        }
-      })
-    )
+            // Store chunk with indices as key
+            const chunkKey = chunkIndices.join(',')
+            chunkDataMap.set(chunkKey, chunkData)
+          } catch (err) {
+            console.warn(
+              `Failed to fetch chunk ${chunkIndices} for tile ${tileKey}:`,
+              err
+            )
+          }
+        })
+      )
 
-    tileChunkData.set(tileKey, chunkDataMap)
-  }
+      tileChunkData.set(tileKey, chunkDataMap)
+    })
+  )
 
   // Iterate over tiles and pixels to extract values
   for (const tileTuple of tiles) {
