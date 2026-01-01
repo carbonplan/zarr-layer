@@ -1093,6 +1093,7 @@ export class ZarrStore {
     // Fallback: read coordinate arrays
     const coordExtent = await this._getExtentFromCoordArrays(levelPath)
     if (coordExtent) {
+      this.crs
       return this._extentToLonLat(coordExtent)
     }
 
@@ -1268,8 +1269,8 @@ export class ZarrStore {
   }): { lonMin: number; lonMax: number; latMin: number; latMax: number } {
     const { xMin, xMax, yMin, yMax } = extent
 
-    // Check if coordinates are in meters (EPSG:3857) or degrees
-    if (Math.abs(xMin) > 180 || Math.abs(yMin) > 90) {
+    // EPSG:3857 coordinates are in meters - convert to degrees
+    if (this.crs === 'EPSG:3857') {
       const swCorner = this._mercatorToLonLat(xMin, yMin)
       const neCorner = this._mercatorToLonLat(xMax, yMax)
       return {
@@ -1280,6 +1281,7 @@ export class ZarrStore {
       }
     }
 
+    // EPSG:4326 coordinates are already in degrees
     return { lonMin: xMin, lonMax: xMax, latMin: yMin, latMax: yMax }
   }
 
