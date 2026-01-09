@@ -1798,6 +1798,13 @@ export class UntiledMode implements ZarrMode {
         newWidth,
       ]
 
+      if (this.pendingLevelIndex !== newLevelIndex) {
+        // Target changed while loading; let update() kick off the new switch.
+        this.pendingLevelIndex = null
+        this.invalidate()
+        return
+      }
+
       // Update all level state atomically AFTER async work completes
       // This prevents race conditions where render sees new level index but old dimensions
       this.currentLevelIndex = newLevelIndex
