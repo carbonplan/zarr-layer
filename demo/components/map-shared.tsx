@@ -17,6 +17,25 @@ import type { LayerProps } from '../datasets/types'
 
 export type MapProvider = 'maplibre' | 'mapbox'
 
+// Minimal interface for map methods we use. Using a union of maplibregl.Map | mapboxgl.Map
+// doesn't work because their overloaded on()/off() signatures are incompatible in a union.
+export interface MapInstance {
+  on(event: string, handler: (e: any) => void): unknown
+  off(event: string, handler: (e: any) => void): unknown
+  remove(): void
+  getLayer(id: string): unknown
+  removeLayer(id: string): void
+  addLayer(layer: ZarrLayer, beforeId?: string): unknown
+  setProjection(projection: any): unknown
+  resize(): void
+  getBounds(): { toArray(): [number, number][]; getWest(): number; getEast(): number }
+  getZoom(): number
+  flyTo(options: { center: [number, number]; zoom: number }): void
+  getStyle(): { layers?: Array<{ id: string; type: string }> }
+  addSource(id: string, source: any): void
+  setTerrain(terrain: any): void
+}
+
 const backgroundColor = '#1b1e23'
 const mapLibreTheme = {
   ...namedFlavor('black'),
@@ -49,28 +68,6 @@ const mapLibreTheme = {
   regular: 'Relative Pro Book',
   bold: 'Relative Pro Book',
   italic: 'Relative Pro Book',
-}
-
-export interface MapInstance {
-  queryRenderedFeatures?: (...args: any[]) => unknown
-  on(event: string, callback: (event?: any) => void): void
-  on(event: string, layerId: string, callback: (event: any) => void): void
-  off?(event: string, callback: (event: any) => void): void
-  remove(): void
-  getLayer(id: string): unknown
-  removeLayer(id: string): void
-  addLayer(
-    layer:
-      | maplibregl.CustomLayerInterface
-      | mapboxgl.CustomLayerInterface
-      | maplibregl.LayerSpecification
-      | mapboxgl.LayerSpecification,
-    beforeId?: string,
-  ): void
-  setProjection(projection: unknown): void
-  resize?(): void
-  getBounds?(): [number, number, number, number] | null
-  flyTo(options: { center: [number, number]; zoom: number }): void
 }
 
 export interface MapConfig {
@@ -106,10 +103,10 @@ const mapLibreConfig: MapConfig = {
       },
       center: [0, 20],
       zoom: 2.4,
-    }) as unknown as MapInstance
+    }) as MapInstance
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
-    ;(map as unknown as maplibregl.Map).setProjection(
+    ;(map as maplibregl.Map).setProjection(
       globeProjection ? { type: 'globe' } : { type: 'mercator' },
     )
   },

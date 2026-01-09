@@ -405,7 +405,10 @@ export class TiledMode implements ZarrMode {
 
     const mapZoom = map.getZoom()
     const levelIndex = zoomToLevel(mapZoom, this.maxLevelIndex)
-    const bounds = map.getBounds()?.toArray()
+    // Cast is safe: MapLibre/Mapbox always return exactly 2 coordinate pairs [sw, ne]
+    const bounds = map.getBounds()?.toArray() as
+      | [[number, number], [number, number]]
+      | undefined
     if (!bounds) {
       return { tiles: [], pyramidLevel: levelIndex, mapZoom, bounds: null }
     }

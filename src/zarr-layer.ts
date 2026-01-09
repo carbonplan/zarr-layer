@@ -324,10 +324,17 @@ export class ZarrLayer {
     this.invalidate()
   }
 
-  async onAdd(
+  onAdd(
     map: MapLike,
-    gl: WebGL2RenderingContext | WebGLRenderingContext | null
-  ) {
+    gl: WebGL2RenderingContext | WebGLRenderingContext
+  ): void {
+    this._onAddAsync(map, gl)
+  }
+
+  private async _onAddAsync(
+    map: MapLike,
+    gl: WebGL2RenderingContext | WebGLRenderingContext
+  ): Promise<void> {
     this.map = map
     const resolvedGl = this.resolveGl(map, gl)
     this.gl = resolvedGl

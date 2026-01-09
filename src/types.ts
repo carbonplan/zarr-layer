@@ -134,12 +134,12 @@ export interface VisibleChunk {
 export interface BoundsLike {
   getWest(): number
   getEast(): number
-  toArray(): [[number, number], [number, number]]
+  toArray(): [number, number][]
 }
 
 export interface MapLike {
-  // type can be string or array expression (MapLibre style expressions)
-  getProjection?(): { type?: string | readonly unknown[]; name?: string } | null
+  // type can be string, array expression, or complex PropertyValueSpecification
+  getProjection?(): { type?: unknown; name?: string } | null
   getRenderWorldCopies?(): boolean
   on?(event: string, handler: (...args: unknown[]) => void): void
   off?(event: string, handler: (...args: unknown[]) => void): void

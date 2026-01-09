@@ -78,7 +78,7 @@ const normalizeLng = (lng: number) => {
 
 type BoundsLike =
   | {
-      toArray: () => [[number, number], [number, number]]
+      toArray: () => [number, number][]
       getWest: () => number
       getEast: () => number
       getSouth?: () => number
@@ -94,7 +94,8 @@ export const boundsToGeometry = (bounds: BoundsLike): QueryGeometry => {
   if (Array.isArray(bounds)) {
     ;[west, south, east, north] = bounds
   } else {
-    const [[swLng, swLat], [neLng, neLat]] = bounds.toArray()
+    const arr = bounds.toArray() as [[number, number], [number, number]]
+    const [[swLng, swLat], [neLng, neLat]] = arr
     south = clampLat(Math.min(swLat, neLat))
     north = clampLat(Math.max(swLat, neLat))
     west = normalizeLng(bounds.getWest())
