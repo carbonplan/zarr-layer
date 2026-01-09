@@ -1748,10 +1748,8 @@ export class UntiledMode implements ZarrMode {
     levelResolutions.sort((a, b) => a.effectivePixels - b.effectivePixels)
 
     // Find the lowest resolution level that still provides sufficient detail
-    // (at least 50% of map's pixel density to avoid obvious pixelation)
-    const minRequired = mapPixelsPerWorld * 0.5
     for (const { index, effectivePixels } of levelResolutions) {
-      if (effectivePixels >= minRequired) {
+      if (effectivePixels >= mapPixelsPerWorld) {
         return index
       }
     }
