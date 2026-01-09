@@ -59,7 +59,14 @@ export interface MapInstance {
   remove(): void
   getLayer(id: string): unknown
   removeLayer(id: string): void
-  addLayer(layer: unknown, beforeId?: string): void
+  addLayer(
+    layer:
+      | maplibregl.CustomLayerInterface
+      | mapboxgl.CustomLayerInterface
+      | maplibregl.LayerSpecification
+      | mapboxgl.LayerSpecification,
+    beforeId?: string,
+  ): void
   setProjection(projection: unknown): void
   resize?(): void
   getBounds?(): [number, number, number, number] | null
