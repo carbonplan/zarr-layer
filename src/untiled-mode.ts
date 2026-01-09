@@ -154,6 +154,7 @@ export class UntiledMode implements ZarrMode {
   private levels: UntiledLevel[] = []
   private currentLevelIndex: number = 0
   private pendingLevelIndex: number | null = null // Guards against concurrent switchToLevel calls
+  private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
   private proj4def: string | null = null
 
   // Cached transformers for proj4 reprojection (created once, reused everywhere)
@@ -272,7 +273,9 @@ export class UntiledMode implements ZarrMode {
       if (desc.untiledLevels && desc.untiledLevels.length > 0) {
         this.levels = desc.untiledLevels
         this.isMultiscale = true
-        await this.loadLevelMetadata()
+        // Ensure all levels have shape (required for level selection)
+        // This only fetches levels where consolidated metadata was incomplete
+        await this.ensureAllLevelShapes()
         // Don't load data yet - defer to update() where we have the actual zoom level
         // This avoids loading low-res then immediately switching to high-res
         this.currentLevelIndex = -1 // Mark as not yet selected
@@ -302,29 +305,92 @@ export class UntiledMode implements ZarrMode {
     }
   }
 
-  private async loadLevelMetadata(): Promise<void> {
-    // Fetch metadata for levels that need shape OR per-level scale/offset
-    // (consolidated metadata has shape but not always scale_factor/add_offset)
-    const levelsNeedingFetch = this.levels.filter(
-      (level) => !level.shape || level.scaleFactor === undefined
-    )
-
-    if (levelsNeedingFetch.length === 0) {
+  /**
+   * Lazily ensure metadata for a specific level is loaded.
+   * Fetch per-level zarr.json if:
+   * - We haven't already attempted a fetch for this level, AND
+   * - Any of dtype/scaleFactor/addOffset are missing (consolidated metadata incomplete)
+   */
+  private async ensureLevelMetadata(levelIndex: number): Promise<void> {
+    const level = this.levels[levelIndex]
+    if (!level) {
       return
     }
 
+    // Skip if we've already attempted a fetch for this level
+    if (this.levelMetadataFetched.has(levelIndex)) {
+      return
+    }
+
+    // Skip if we have dtype, scaleFactor, AND addOffset from consolidated metadata
+    // (indicates complete metadata - no need to fetch)
+    if (
+      level.dtype !== undefined &&
+      level.scaleFactor !== undefined &&
+      level.addOffset !== undefined
+    ) {
+      return
+    }
+
+    // Mark as fetched before async operation to prevent duplicate fetches
+    this.levelMetadataFetched.add(levelIndex)
+
+    try {
+      const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+      level.shape = meta.shape
+      level.chunks = meta.chunks
+      // Only set scaleFactor/addOffset if defined - leave undefined for dataset-level fallback
+      if (meta.scaleFactor !== undefined) {
+        level.scaleFactor = meta.scaleFactor
+      }
+      if (meta.addOffset !== undefined) {
+        level.addOffset = meta.addOffset
+      }
+      level.fillValue = meta.fillValue
+      level.dtype = meta.dtype
+    } catch (err) {
+      console.warn(`Failed to load metadata for level ${level.asset}:`, err)
+      // Already marked as fetched - won't retry
+    }
+  }
+
+  /**
+   * Ensure all levels have shape data (required for level selection).
+   * Only fetches metadata for levels where consolidated metadata was incomplete.
+   * This runs during initialization to enable proper zoom-based level selection.
+   */
+  private async ensureAllLevelShapes(): Promise<void> {
+    const levelsNeedingShape = this.levels
+      .map((level, index) => ({ level, index }))
+      .filter(({ level }) => !level.shape)
+
+    if (levelsNeedingShape.length === 0) {
+      return // All shapes available from consolidated metadata
+    }
+
+    // Fetch metadata for levels missing shape (in parallel)
     await Promise.all(
-      levelsNeedingFetch.map(async (level) => {
+      levelsNeedingShape.map(async ({ level, index }) => {
+        // Skip if already fetched by another path
+        if (this.levelMetadataFetched.has(index)) {
+          return
+        }
+        this.levelMetadataFetched.add(index)
+
         try {
           const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
           level.shape = meta.shape
           level.chunks = meta.chunks
-          level.scaleFactor = meta.scaleFactor
-          level.addOffset = meta.addOffset
+          if (meta.scaleFactor !== undefined) {
+            level.scaleFactor = meta.scaleFactor
+          }
+          if (meta.addOffset !== undefined) {
+            level.addOffset = meta.addOffset
+          }
           level.fillValue = meta.fillValue
           level.dtype = meta.dtype
         } catch (err) {
-          console.warn(`Failed to load metadata for level ${level.asset}:`, err)
+          console.warn(`Failed to load shape for level ${level.asset}:`, err)
         }
       })
     )
@@ -1578,6 +1644,9 @@ export class UntiledMode implements ZarrMode {
       return
     }
 
+    // Ensure metadata is loaded for this level (lazy load if needed)
+    await this.ensureLevelMetadata(levelIndex)
+
     const level = this.levels[levelIndex]
     this.currentLevelIndex = levelIndex
 
@@ -1708,6 +1777,9 @@ export class UntiledMode implements ZarrMode {
       this.loadingManager.chunksLoading = false
       this.emitLoadingState()
     }
+
+    // Ensure metadata is loaded for this level (lazy load if needed)
+    await this.ensureLevelMetadata(newLevelIndex)
 
     const level = this.levels[newLevelIndex]
 

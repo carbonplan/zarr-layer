@@ -521,8 +521,8 @@ export class ZarrStore {
   async getUntiledLevelMetadata(levelAsset: string): Promise<{
     shape: number[]
     chunks: number[]
-    scaleFactor: number
-    addOffset: number
+    scaleFactor: number | undefined
+    addOffset: number | undefined
     fillValue: number | null
     dtype: string | null
   }> {
@@ -530,8 +530,10 @@ export class ZarrStore {
     const arrayKey = `${levelAsset}/${this.variable}`
 
     // Try to get metadata from zarr.json for v3, or .zattrs for v2
-    let scaleFactor = 1
-    let addOffset = 0
+    // Return undefined for scaleFactor/addOffset when not specified,
+    // allowing caller to fall back to dataset-level values
+    let scaleFactor: number | undefined = undefined
+    let addOffset: number | undefined = undefined
     let fillValue: number | null = null
     let dtype: string | null = null
 
@@ -545,20 +547,29 @@ export class ZarrStore {
         dtype = meta.data_type ?? null
         fillValue = this.normalizeFillValue(meta.fill_value)
 
-        // Float types typically store physical values - skip scaling
-        // Integer types store raw values - apply scale/offset
+        // Float data typically stores already-physical values (e.g., pyramid levels
+        // created by averaging). Integer data stores raw counts needing conversion.
+        // For heterogeneous pyramids like Sentinel-2, lower-res float levels inherit
+        // scale_factor attributes but shouldn't have them re-applied.
         const isFloatData =
           dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
 
         if (isFloatData) {
+          // Float data: assume already physical, use 1/0
           scaleFactor = 1
           addOffset = 0
         } else {
+          // Integer data: apply scale_factor/add_offset if present
           const attrs = meta.attributes
-          scaleFactor = (attrs?.scale_factor as number) ?? 1
-          addOffset = (attrs?.add_offset as number) ?? 0
+          if (attrs?.scale_factor !== undefined) {
+            scaleFactor = attrs.scale_factor as number
+          }
+          if (attrs?.add_offset !== undefined) {
+            addOffset = attrs.add_offset as number
+          }
         }
       } else {
+        // Zarr v2 path
         const zattrs = (await this._getJSON(`/${arrayKey}/.zattrs`).catch(
           () => ({})
         )) as { scale_factor?: number; add_offset?: number }
@@ -566,10 +577,25 @@ export class ZarrStore {
           fill_value?: unknown
           dtype?: string
         }
-        scaleFactor = zattrs.scale_factor ?? 1
-        addOffset = zattrs.add_offset ?? 0
         fillValue = this.normalizeFillValue(zarray.fill_value)
         dtype = zarray.dtype ?? null
+
+        // Same float logic as v3: float data is already physical, integer needs scaling
+        const isFloatData =
+          dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
+
+        if (isFloatData) {
+          scaleFactor = 1
+          addOffset = 0
+        } else {
+          // Only set if attributes actually exist - leave undefined for fallback
+          if (zattrs.scale_factor !== undefined) {
+            scaleFactor = zattrs.scale_factor
+          }
+          if (zattrs.add_offset !== undefined) {
+            addOffset = zattrs.add_offset
+          }
+        }
       }
     } catch (err) {
       console.warn(
@@ -1109,7 +1135,7 @@ export class ZarrStore {
             translation: [0.0, 0.0] as [number, number],
           }
 
-          // Extract shape/chunks from consolidated metadata if available
+          // Extract shape/chunks/dtype/fillValue/scaleFactor/addOffset from consolidated metadata
           if (consolidatedMeta) {
             const arrayKey = `${level}/${this.variable}`
             const arrayMeta = consolidatedMeta[arrayKey] as
@@ -1124,6 +1150,42 @@ export class ZarrStore {
                 (c) => c.name === 'sharding_indexed'
               )?.configuration?.chunk_shape as number[] | undefined
               untiledLevel.chunks = shardChunks || gridChunks || arrayMeta.shape
+
+              // Extract dtype and fillValue
+              if (arrayMeta.data_type) {
+                untiledLevel.dtype = arrayMeta.data_type
+              }
+              if (arrayMeta.fill_value !== undefined) {
+                untiledLevel.fillValue = this.normalizeFillValue(
+                  arrayMeta.fill_value
+                )
+              }
+
+              // Float data typically stores already-physical values (e.g., pyramid levels
+              // created by averaging). Integer data stores raw counts needing conversion.
+              // For heterogeneous pyramids like Sentinel-2, lower-res float levels inherit
+              // scale_factor attributes but shouldn't have them re-applied.
+              const isFloatData =
+                arrayMeta.data_type?.includes('float') ||
+                arrayMeta.data_type === 'float32' ||
+                arrayMeta.data_type === 'float64'
+
+              if (isFloatData) {
+                // Float data: assume already physical, use 1/0
+                untiledLevel.scaleFactor = 1
+                untiledLevel.addOffset = 0
+              } else if (arrayMeta.attributes) {
+                // Integer data: apply scale_factor/add_offset if present
+                if (arrayMeta.attributes.scale_factor !== undefined) {
+                  untiledLevel.scaleFactor = arrayMeta.attributes
+                    .scale_factor as number
+                }
+                if (arrayMeta.attributes.add_offset !== undefined) {
+                  untiledLevel.addOffset = arrayMeta.attributes
+                    .add_offset as number
+                }
+              }
+              // If non-float without attributes, leave undefined for dataset-level fallback
             }
           }
 
