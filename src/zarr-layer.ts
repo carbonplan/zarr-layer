@@ -56,8 +56,8 @@ export class ZarrLayer {
   private colormap: ColormapState
   private clim: [number, number]
   private opacity: number
-  private minzoom: number
-  private maxzoom: number
+  private minZoom: number
+  private maxZoom: number
   private selectorHash: string = ''
 
   private _fillValue: number | null = null
@@ -73,7 +73,7 @@ export class ZarrLayer {
   private projectionChangeHandler: (() => void) | null = null
   private resolveGl(
     map: MapLike,
-    gl: WebGL2RenderingContext | null
+    gl: WebGL2RenderingContext | WebGLRenderingContext | null
   ): WebGL2RenderingContext {
     const isWebGL2 =
       gl &&
@@ -190,8 +190,8 @@ export class ZarrLayer {
     this.colormap = new ColormapState(colormap)
     this.clim = clim
     this.opacity = opacity
-    this.minzoom = minzoom
-    this.maxzoom = maxzoom
+    this.minZoom = minzoom
+    this.maxZoom = maxzoom
 
     this.customFrag = customFrag
     this.customUniforms = uniforms || {}
@@ -324,7 +324,10 @@ export class ZarrLayer {
     this.invalidate()
   }
 
-  async onAdd(map: MapLike, gl: WebGL2RenderingContext | null) {
+  async onAdd(
+    map: MapLike,
+    gl: WebGL2RenderingContext | WebGLRenderingContext | null
+  ) {
     this.map = map
     const resolvedGl = this.resolveGl(map, gl)
     this.gl = resolvedGl
@@ -524,7 +527,7 @@ export class ZarrLayer {
   private isZoomInRange(): boolean {
     if (!this.map?.getZoom) return true
     const zoom = this.map.getZoom()
-    return zoom >= this.minzoom && zoom <= this.maxzoom
+    return zoom >= this.minZoom && zoom <= this.maxZoom
   }
 
   prerender(
@@ -646,7 +649,9 @@ export class ZarrLayer {
    * Dispose all GL resources and internal state.
    * Does NOT remove the layer from the map - call map.removeLayer(id) for that.
    */
-  private _disposeResources(gl: WebGL2RenderingContext): void {
+  private _disposeResources(
+    gl: WebGL2RenderingContext | WebGLRenderingContext
+  ): void {
     this.isRemoved = true
 
     this.renderer?.dispose()
@@ -672,8 +677,9 @@ export class ZarrLayer {
     }
   }
 
-  onRemove(_map: MapLike, gl: WebGL2RenderingContext) {
-    this._disposeResources(gl)
+  onRemove(_map: MapLike, gl: WebGL2RenderingContext | WebGLRenderingContext) {
+    const resolvedGl = this.gl ?? this.resolveGl(_map, gl)
+    this._disposeResources(resolvedGl)
   }
 
   // ========== Query Interface ==========

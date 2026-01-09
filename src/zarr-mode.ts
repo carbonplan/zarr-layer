@@ -73,7 +73,7 @@ export interface ZarrMode {
     tileId: TileId,
     context: RenderContext
   ): boolean
-  dispose(gl: WebGL2RenderingContext): void
+  dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void
   setSelector(selector: NormalizedSelector): Promise<void>
   onProjectionChange(isGlobe: boolean): void
   setLoadingCallback(callback: LoadingStateCallback | undefined): void

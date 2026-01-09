@@ -64,7 +64,7 @@ export class ColormapState {
     this.dirty = false
   }
 
-  dispose(gl: WebGL2RenderingContext) {
+  dispose(gl: WebGL2RenderingContext | WebGLRenderingContext) {
     if (this.texture) {
       gl.deleteTexture(this.texture)
       this.texture = null

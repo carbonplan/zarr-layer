@@ -319,7 +319,7 @@ export class TiledMode implements ZarrMode {
     return null
   }
 
-  dispose(_gl: WebGL2RenderingContext): void {
+  dispose(_gl: WebGL2RenderingContext | WebGLRenderingContext): void {
     clearThrottle(this.throttleState)
     cancelAllRequests(this.requestCanceller)
     this.tileCache?.clear()

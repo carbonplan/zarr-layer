@@ -138,7 +138,8 @@ export interface BoundsLike {
 }
 
 export interface MapLike {
-  getProjection?(): { type?: string; name?: string } | null
+  // type can be string or array expression (MapLibre style expressions)
+  getProjection?(): { type?: string | readonly unknown[]; name?: string } | null
   getRenderWorldCopies?(): boolean
   on?(event: string, handler: (...args: unknown[]) => void): void
   off?(event: string, handler: (...args: unknown[]) => void): void

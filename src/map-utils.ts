@@ -677,7 +677,10 @@ export function flipTexCoordV(texCoords: Float32Array): Float32Array {
  * Works with both Mapbox (projection.name) and MapLibre (projection.type).
  */
 export function isGlobeProjection(
-  projection: { type?: string; name?: string } | null | undefined
+  projection:
+    | { type?: string | readonly unknown[]; name?: string }
+    | null
+    | undefined
 ): boolean {
   return projection?.type === 'globe' || projection?.name === 'globe'
 }

@@ -372,7 +372,9 @@ export class UntiledMode implements ZarrMode {
   /**
    * Clear region cache and dispose WebGL resources.
    */
-  private clearRegionCache(gl: WebGL2RenderingContext): void {
+  private clearRegionCache(
+    gl: WebGL2RenderingContext | WebGLRenderingContext
+  ): void {
     for (const region of this.regionCache.values()) {
       this.disposeRegion(region, gl)
     }
@@ -383,7 +385,10 @@ export class UntiledMode implements ZarrMode {
   /**
    * Dispose WebGL resources for a single region.
    */
-  private disposeRegion(region: RegionState, gl: WebGL2RenderingContext): void {
+  private disposeRegion(
+    region: RegionState,
+    gl: WebGL2RenderingContext | WebGLRenderingContext
+  ): void {
     if (region.texture) gl.deleteTexture(region.texture)
     if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
     if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer)
@@ -1869,7 +1874,7 @@ export class UntiledMode implements ZarrMode {
     }))
   }
 
-  dispose(gl: WebGL2RenderingContext): void {
+  dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void {
     this.isRemoved = true
     clearThrottle(this.throttleState)
     cancelAllRequests(this.requestCanceller)
