@@ -289,6 +289,7 @@ interface StoreDescription {
   coordinates: Record<string, (string | number)[]>
   latIsAscending: boolean | null
   proj4: string | null
+  tileOffsets: Map<number, { x: number; y: number }>
 }
 
 /**
@@ -343,6 +344,7 @@ export class ZarrStore {
   latIsAscending: boolean | null = null
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
+  tileOffsets: Map<number, { x: number; y: number }> = new Map() // Per-zoom tile coordinate offsets for regional pyramids
 
   /**
    * Returns the coarsest (lowest resolution) level path.
@@ -490,6 +492,7 @@ export class ZarrStore {
       coordinates: this.coordinates,
       latIsAscending: this.latIsAscending,
       proj4: this.proj4,
+      tileOffsets: this.tileOffsets,
     }
   }
 
@@ -625,15 +628,7 @@ export class ZarrStore {
 
     if (!handle) {
       const location = this.root.resolve(key)
-      const openArray = (loc: zarr.Location<Readable>) => {
-        if (this.version === 2) {
-          return zarr.open.v2(loc, { kind: 'array' })
-        } else if (this.version === 3) {
-          return zarr.open.v3(loc, { kind: 'array' })
-        }
-        return zarr.open(loc, { kind: 'array' })
-      }
-      handle = openArray(location).catch((err: Error) => {
+      handle = this._openArray(location).catch((err: Error) => {
         this._arrayHandles.delete(key)
         throw err
       })
@@ -884,6 +879,433 @@ export class ZarrStore {
     return null
   }
 
+  // Track in-flight offset calculations to avoid duplicate requests
+  private _pendingOffsetCalculations = new Map<
+    number,
+    Promise<{ x: number; y: number } | null>
+  >()
+
+  /**
+   * Calculate tile offsets using only consolidated metadata (fast, synchronous).
+   * Called during initialization. Levels without consolidated metadata are
+   * computed lazily via getTileOffset() when first requested.
+   */
+  private _calculateTileOffsetsFromConsolidatedMetadata() {
+    if (this.crs !== 'EPSG:3857') return
+
+    for (const levelPath of this.levels) {
+      const zoom = parseInt(levelPath, 10)
+      if (isNaN(zoom)) continue
+
+      const spatialRefPath = `${levelPath}/spatial_ref`
+      const variablePath = `${levelPath}/${this.variable}`
+
+      const fromConsolidated = this._getGeoTransformFromConsolidatedMetadata(
+        spatialRefPath,
+        variablePath
+      )
+
+      if (fromConsolidated) {
+        const extent = this._parseGeoTransformExtent(
+          fromConsolidated.geoTransform,
+          fromConsolidated.shape
+        )
+        if (extent) {
+          const lonLat = this._extentToLonLat(extent)
+          this.tileOffsets.set(zoom, {
+            x: this._lonToTile(lonLat.lonMin, zoom),
+            y: this._latToTile(lonLat.latMax, zoom),
+          })
+          if (!this.xyLimits) {
+            this.xyLimits = {
+              xMin: lonLat.lonMin,
+              xMax: lonLat.lonMax,
+              yMin: lonLat.latMin,
+              yMax: lonLat.latMax,
+            }
+          }
+        }
+      }
+      // Levels without consolidated metadata will be computed lazily
+    }
+  }
+
+  /**
+   * Get tile offset for a zoom level. Uses cached value if available,
+   * otherwise computes lazily (only for levels without consolidated metadata).
+   */
+  async getTileOffset(zoom: number): Promise<{ x: number; y: number }> {
+    // Return cached offset if available
+    const cached = this.tileOffsets.get(zoom)
+    if (cached) return cached
+
+    // EPSG:4326 doesn't need offsets
+    if (this.crs !== 'EPSG:3857') {
+      return { x: 0, y: 0 }
+    }
+
+    // Check if calculation is already in progress
+    let pending = this._pendingOffsetCalculations.get(zoom)
+    if (pending) {
+      const result = await pending
+      return result ?? { x: 0, y: 0 }
+    }
+
+    // Start new calculation
+    pending = this._calculateTileOffsetForZoom(zoom)
+    this._pendingOffsetCalculations.set(zoom, pending)
+
+    try {
+      const result = await pending
+      return result ?? { x: 0, y: 0 }
+    } finally {
+      this._pendingOffsetCalculations.delete(zoom)
+    }
+  }
+
+  /**
+   * Calculate tile offset for a single zoom level (lazy, async).
+   */
+  private async _calculateTileOffsetForZoom(
+    zoom: number
+  ): Promise<{ x: number; y: number } | null> {
+    const levelPath = String(zoom)
+    if (!this.levels.includes(levelPath)) {
+      return null
+    }
+
+    const extent = await this._getLevelExtent(levelPath)
+    if (extent) {
+      const offset = {
+        x: this._lonToTile(extent.lonMin, zoom),
+        y: this._latToTile(extent.latMax, zoom),
+      }
+      this.tileOffsets.set(zoom, offset)
+
+      if (!this.xyLimits) {
+        this.xyLimits = {
+          xMin: extent.lonMin,
+          xMax: extent.lonMax,
+          yMin: extent.latMin,
+          yMax: extent.latMax,
+        }
+      }
+      return offset
+    }
+
+    // Fallback to bounds-based calculation
+    if (this.xyLimits) {
+      const { xMin, yMax } = this.xyLimits
+      const offset = {
+        x: this._lonToTile(xMin, zoom),
+        y: this._latToTile(yMax, zoom),
+      }
+      this.tileOffsets.set(zoom, offset)
+      return offset
+    }
+
+    return null
+  }
+
+  /**
+   * Parse GeoTransform into spatial extent.
+   */
+  private _parseGeoTransformExtent(
+    geoTransform: string | number[],
+    shape: number[]
+  ): { xMin: number; xMax: number; yMin: number; yMax: number } | null {
+    let gt: number[]
+    if (typeof geoTransform === 'string') {
+      gt = geoTransform.split(/\s+/).map(Number)
+    } else if (Array.isArray(geoTransform)) {
+      gt = geoTransform.map(Number)
+    } else {
+      return null
+    }
+
+    if (gt.length < 6 || gt.some(isNaN)) return null
+
+    const [xOrigin, xPixelSize, , yOrigin, , yPixelSize] = gt
+    const xDimIdx = this.dimIndices.lon?.index ?? shape.length - 1
+    const yDimIdx = this.dimIndices.lat?.index ?? shape.length - 2
+    const width = shape[xDimIdx]
+    const height = shape[yDimIdx]
+
+    const halfPixelX = xPixelSize / 2
+    const halfPixelY = yPixelSize / 2
+
+    return {
+      xMin: xOrigin + halfPixelX,
+      xMax: xOrigin + width * xPixelSize - halfPixelX,
+      yMax: yOrigin + halfPixelY,
+      yMin: yOrigin + height * yPixelSize - halfPixelY,
+    }
+  }
+
+  /**
+   * Get the spatial extent for a pyramid level in lon/lat degrees.
+   * First tries spatial_ref GeoTransform (fast), then falls back to coordinate arrays.
+   */
+  private async _getLevelExtent(levelPath: string): Promise<{
+    lonMin: number
+    lonMax: number
+    latMin: number
+    latMax: number
+  } | null> {
+    // Try spatial_ref first (fast - metadata only)
+    const spatialRefExtent = await this._getExtentFromSpatialRef(levelPath)
+    if (spatialRefExtent) {
+      return this._extentToLonLat(spatialRefExtent)
+    }
+
+    // Fallback: read coordinate arrays
+    const coordExtent = await this._getExtentFromCoordArrays(levelPath)
+    if (coordExtent) {
+      this.crs
+      return this._extentToLonLat(coordExtent)
+    }
+
+    return null
+  }
+
+  /**
+   * Get extent from spatial_ref GeoTransform attribute (fast - metadata only).
+   * First checks consolidated metadata, then falls back to opening the array.
+   */
+  private async _getExtentFromSpatialRef(levelPath: string): Promise<{
+    xMin: number
+    xMax: number
+    yMin: number
+    yMax: number
+  } | null> {
+    if (!this.root) return null
+
+    const spatialRefPath = `${levelPath}/spatial_ref`
+    const variablePath = `${levelPath}/${this.variable}`
+
+    try {
+      // Try to get GeoTransform and shape from consolidated metadata first
+      const fromConsolidated = this._getGeoTransformFromConsolidatedMetadata(
+        spatialRefPath,
+        variablePath
+      )
+
+      let geoTransform: string | number[] | undefined
+      let shape: number[]
+
+      if (fromConsolidated) {
+        geoTransform = fromConsolidated.geoTransform
+        shape = fromConsolidated.shape
+      } else {
+        // Fall back to opening arrays
+        const spatialRefLoc = this.root.resolve(spatialRefPath)
+        const spatialRefArray = await this._openArray(spatialRefLoc)
+
+        const attrs = (
+          spatialRefArray as unknown as { attrs?: Record<string, unknown> }
+        ).attrs
+        if (!attrs) return null
+
+        geoTransform = attrs.GeoTransform as string | number[] | undefined
+        if (!geoTransform) return null
+
+        const variableArray = await this._openArray(
+          this.root.resolve(variablePath)
+        )
+        shape = variableArray.shape
+      }
+
+      if (!geoTransform) return null
+
+      return this._parseGeoTransformExtent(geoTransform, shape)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Try to get GeoTransform and variable shape from consolidated metadata.
+   * Returns null if not available in consolidated metadata.
+   */
+  private _getGeoTransformFromConsolidatedMetadata(
+    spatialRefPath: string,
+    variablePath: string
+  ): { geoTransform: string | number[]; shape: number[] } | null {
+    if (!this.metadata) return null
+
+    if (this.version === 2) {
+      const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
+      if (!v2Meta.metadata) return null
+
+      // Check for spatial_ref attributes
+      const spatialRefAttrs = v2Meta.metadata[`${spatialRefPath}/.zattrs`] as
+        | Record<string, unknown>
+        | undefined
+      const geoTransform = spatialRefAttrs?.GeoTransform as
+        | string
+        | number[]
+        | undefined
+      if (!geoTransform) return null
+
+      // Check for variable array metadata
+      const variableArray = v2Meta.metadata[`${variablePath}/.zarray`] as
+        | ZarrV2ArrayMetadata
+        | undefined
+      if (!variableArray?.shape) return null
+
+      return { geoTransform, shape: variableArray.shape }
+    }
+
+    if (this.version === 3) {
+      const v3Meta = this.metadata as ZarrV3GroupMetadata
+      const consolidated = v3Meta.consolidated_metadata?.metadata
+      if (!consolidated) return null
+
+      // Check for spatial_ref metadata
+      const spatialRefMeta = consolidated[spatialRefPath] as
+        | ZarrV3ArrayMetadata
+        | undefined
+      const geoTransform = spatialRefMeta?.attributes?.GeoTransform as
+        | string
+        | number[]
+        | undefined
+      if (!geoTransform) return null
+
+      // Check for variable array metadata
+      const variableMeta = consolidated[variablePath] as
+        | ZarrV3ArrayMetadata
+        | undefined
+      if (!variableMeta?.shape) return null
+
+      return { geoTransform, shape: variableMeta.shape }
+    }
+
+    return null
+  }
+
+  /**
+   * Get extent from coordinate arrays (slower - requires data reads).
+   */
+  private async _getExtentFromCoordArrays(levelPath: string): Promise<{
+    xMin: number
+    xMax: number
+    yMin: number
+    yMax: number
+  } | null> {
+    if (!this.root) return null
+
+    const xCoordName =
+      this.spatialDimensions.lon ?? this.dimIndices.lon?.name ?? 'x'
+    const yCoordName =
+      this.spatialDimensions.lat ?? this.dimIndices.lat?.name ?? 'y'
+
+    try {
+      const levelRoot = this.root.resolve(levelPath)
+      const xArray = await this._openArray(levelRoot.resolve(xCoordName))
+      const yArray = await this._openArray(levelRoot.resolve(yCoordName))
+
+      type ZarrResult = { data: ArrayLike<number> }
+      const xLen = xArray.shape[0]
+      const yLen = yArray.shape[0]
+
+      const [xFirst, xLast, yFirst, yLast] = (await Promise.all([
+        zarr.get(xArray, [zarr.slice(0, 1)]),
+        zarr.get(xArray, [zarr.slice(xLen - 1, xLen)]),
+        zarr.get(yArray, [zarr.slice(0, 1)]),
+        zarr.get(yArray, [zarr.slice(yLen - 1, yLen)]),
+      ])) as ZarrResult[]
+
+      return {
+        xMin: Math.min(xFirst.data[0], xLast.data[0]),
+        xMax: Math.max(xFirst.data[0], xLast.data[0]),
+        yMin: Math.min(yFirst.data[0], yLast.data[0]),
+        yMax: Math.max(yFirst.data[0], yLast.data[0]),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Convert extent from source CRS to lon/lat degrees.
+   */
+  private _extentToLonLat(extent: {
+    xMin: number
+    xMax: number
+    yMin: number
+    yMax: number
+  }): { lonMin: number; lonMax: number; latMin: number; latMax: number } {
+    const { xMin, xMax, yMin, yMax } = extent
+
+    // EPSG:3857 coordinates are in meters - convert to degrees
+    if (this.crs === 'EPSG:3857') {
+      const swCorner = this._mercatorToLonLat(xMin, yMin)
+      const neCorner = this._mercatorToLonLat(xMax, yMax)
+      return {
+        lonMin: swCorner.lon,
+        lonMax: neCorner.lon,
+        latMin: swCorner.lat,
+        latMax: neCorner.lat,
+      }
+    }
+
+    // EPSG:4326 coordinates are already in degrees
+    return { lonMin: xMin, lonMax: xMax, latMin: yMin, latMax: yMax }
+  }
+
+  /**
+   * Convert Web Mercator meters to lon/lat degrees.
+   */
+  private _mercatorToLonLat(
+    x: number,
+    y: number
+  ): { lon: number; lat: number } {
+    const EARTH_RADIUS = 6378137
+    const lon = (x / EARTH_RADIUS) * (180 / Math.PI)
+    const lat =
+      (Math.PI / 2 - 2 * Math.atan(Math.exp(-y / EARTH_RADIUS))) *
+      (180 / Math.PI)
+    return { lon, lat }
+  }
+
+  /**
+   * Convert longitude to tile X coordinate for a given zoom level.
+   */
+  private _lonToTile(lon: number, zoom: number): number {
+    return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom))
+  }
+
+  /**
+   * Convert latitude to tile Y coordinate for a given zoom level.
+   */
+  private _latToTile(lat: number, zoom: number): number {
+    const MERCATOR_LAT_LIMIT = 85.0511287798066
+    const clamped = Math.max(
+      -MERCATOR_LAT_LIMIT,
+      Math.min(MERCATOR_LAT_LIMIT, lat)
+    )
+    const z2 = Math.pow(2, zoom)
+    return Math.floor(
+      ((1 -
+        Math.log(
+          Math.tan((clamped * Math.PI) / 180) +
+            1 / Math.cos((clamped * Math.PI) / 180)
+        ) /
+          Math.PI) /
+        2) *
+        z2
+    )
+  }
+
+  /**
+   * Helper to open a zarr array with version-appropriate method.
+   */
+  private _openArray(loc: zarr.Location<Readable>) {
+    if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
+    if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
+    return zarr.open(loc, { kind: 'array' })
+  }
+
   /**
    * Find the highest resolution level for untiled bounds detection.
    * Coarse levels have larger pixels, so padding offsets are more significant.
@@ -893,24 +1315,15 @@ export class ZarrStore {
     if (this.levels.length === 0 || !this.root) return undefined
     if (this.levels.length === 1) return this.levels[0]
 
-    const openArray = (loc: zarr.Location<Readable>) => {
-      if (this.version === 2) {
-        return zarr.open.v2(loc, { kind: 'array' })
-      } else if (this.version === 3) {
-        return zarr.open.v3(loc, { kind: 'array' })
-      }
-      return zarr.open(loc, { kind: 'array' })
-    }
-
     // Compare first and last levels to determine which has higher resolution
     const firstLevel = this.levels[0]
     const lastLevel = this.levels[this.levels.length - 1]
 
     try {
-      const firstArray = await openArray(
+      const firstArray = await this._openArray(
         this.root.resolve(`${firstLevel}/${this.variable}`)
       )
-      const lastArray = await openArray(
+      const lastArray = await this._openArray(
         this.root.resolve(`${lastLevel}/${this.variable}`)
       )
 
@@ -941,6 +1354,15 @@ export class ZarrStore {
       if (this.latIsAscending === null) {
         this.latIsAscending = false // Tiled pyramids: row 0 = north
       }
+
+      // For EPSG:3857 regional tile pyramids, calculate tile offsets from actual coords
+      // This maps global tile coordinates to zarr array indices
+      // EPSG:4326 uses extent-relative coordinates, so no offset is needed
+      if (this.crs === 'EPSG:3857') {
+        // Use fast path (consolidated metadata only) during initialization
+        // Expensive fallback is deferred to getTileOffset() when actually needed
+        this._calculateTileOffsetsFromConsolidatedMetadata()
+      }
       return
     }
 
@@ -963,17 +1385,11 @@ export class ZarrStore {
       const boundsLevel = await this._findBoundsLevel()
       const levelRoot = boundsLevel ? this.root.resolve(boundsLevel) : this.root
 
-      const openArray = (loc: zarr.Location<Readable>) => {
-        if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
-        if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
-        return zarr.open(loc, { kind: 'array' })
-      }
-
       const lonName = this.spatialDimensions.lon ?? this.dimIndices.lon.name
       const latName = this.spatialDimensions.lat ?? this.dimIndices.lat.name
 
-      const xarr = await openArray(levelRoot.resolve(lonName))
-      const yarr = await openArray(levelRoot.resolve(latName))
+      const xarr = await this._openArray(levelRoot.resolve(lonName))
+      const yarr = await this._openArray(levelRoot.resolve(latName))
 
       const xLen = xarr.shape[0]
       const yLen = yarr.shape[0]
