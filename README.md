@@ -181,7 +181,7 @@ new ZarrLayer({
 })
 ```
 
-The data will be reprojected to Web Mercator for display. Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+The data will be reprojected to Web Mercator for display using GPU-accelerated mesh reprojection powered by [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster). Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
 
 ## queries
 
@@ -230,7 +230,7 @@ transformRequest: async (url) => ({
 
 ## thanks
 
-This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. LLMs of several makes aided in the coding and debugging of this library.
+This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. Custom projection support uses [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster) for adaptive mesh generation. LLMs of several makes aided in the coding and debugging of this library.
 
 ## license
 
