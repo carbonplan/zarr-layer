@@ -69,10 +69,14 @@ export function makeShaderVariantKey(options: {
   const { projectionMode, shaderData, customShaderConfig } = options
   const useCustomShader =
     customShaderConfig && customShaderConfig.bands.length > 0
+  // Include shaderData.variantName for both paths to ensure custom shaders
+  // recompile when MapLibre changes the vertex shader prelude during globe to merc transitions
+  const shaderVariant = shaderData?.variantName ?? 'base'
+
   const baseVariant =
     useCustomShader && customShaderConfig
-      ? ['custom', customShaderConfig.bands.join('_')].join('_')
-      : shaderData?.variantName ?? 'base'
+      ? ['custom', customShaderConfig.bands.join('_'), shaderVariant].join('_')
+      : shaderVariant
   return [baseVariant, projectionMode].join('_')
 }
 
