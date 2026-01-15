@@ -256,9 +256,12 @@ type ZarrStoreType =
   | zarr.FetchStore
   | TransformingFetchStore
   | ConsolidatedStore
+  | Readable<unknown>
+  | AsyncReadable<unknown>
 
 interface ZarrStoreOptions {
-  source: string
+  /** URL to Zarr store. Required unless customStore is provided. */
+  source?: string
   version?: 2 | 3 | null
   variable: string
   spatialDimensions?: SpatialDimensions
@@ -267,6 +270,8 @@ interface ZarrStoreOptions {
   latIsAscending?: boolean | null
   proj4?: string
   transformRequest?: TransformRequest
+  /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
+  customStore?: Readable<unknown> | AsyncReadable<unknown>
 }
 
 interface StoreDescription {
@@ -321,6 +326,7 @@ export class ZarrStore {
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
   private transformRequest?: TransformRequest
+  private customStore?: Readable<unknown> | AsyncReadable<unknown>
 
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
   arrayMetadata: ZarrV3ArrayMetadata | null = null
@@ -375,14 +381,15 @@ export class ZarrStore {
     latIsAscending = null,
     proj4,
     transformRequest,
+    customStore,
   }: ZarrStoreOptions) {
-    if (!source) {
-      throw new Error('source is a required parameter')
+    if (!source && !customStore) {
+      throw new Error('source is required when customStore is not provided')
     }
     if (!variable) {
       throw new Error('variable is a required parameter')
     }
-    this.source = source
+    this.source = source ?? 'custom-store'
     this.version = version
     this.variable = variable
     this.spatialDimensions = spatialDimensions
@@ -391,6 +398,7 @@ export class ZarrStore {
     this.latIsAscending = latIsAscending
     this.proj4 = proj4 ?? null
     this.transformRequest = transformRequest
+    this.customStore = customStore
 
     this.initialized = this._initialize()
   }
@@ -399,7 +407,16 @@ export class ZarrStore {
     const storeCacheKey = `${this.source}:${this.version ?? 'auto'}`
     let storeHandle: Promise<ZarrStoreType> | undefined
 
-    if (this.transformRequest) {
+    if (this.customStore) {
+      // Validate that custom store implements required Readable interface
+      if (typeof this.customStore.get !== 'function') {
+        throw new Error(
+          'customStore must implement Readable interface with get() method'
+        )
+      }
+      // Use custom store directly (e.g., IcechunkStore)
+      storeHandle = Promise.resolve(this.customStore as ZarrStoreType)
+    } else if (this.transformRequest) {
       // Bypass cache when transformRequest is provided (unique credentials per layer)
       const baseStore = createFetchStore(this.source, this.transformRequest)
       if (this.version === 3) {
@@ -670,8 +687,9 @@ export class ZarrStore {
 
   private async _loadV2() {
     const cacheKey = `v2:${this.source}`
-    // Bypass cache when transformRequest is provided (unique credentials per layer)
-    let zmetadata = this.transformRequest
+    // Bypass cache when transformRequest or customStore is provided
+    const bypassCache = this.transformRequest || this.customStore
+    let zmetadata = bypassCache
       ? undefined
       : (ZarrStore._cache.get(cacheKey) as
           | ZarrV2ConsolidatedMetadata
@@ -681,13 +699,13 @@ export class ZarrStore {
         const rootZattrsBytes = await this.store.get('/.zattrs')
         const rootZattrs = rootZattrsBytes ? decodeJSON(rootZattrsBytes) : {}
         zmetadata = { metadata: { '.zattrs': rootZattrs } }
-        if (!this.transformRequest) ZarrStore._cache.set(cacheKey, zmetadata)
+        if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
       } else {
         try {
           zmetadata = (await this._getJSON(
             '/.zmetadata'
           )) as ZarrV2ConsolidatedMetadata
-          if (!this.transformRequest) ZarrStore._cache.set(cacheKey, zmetadata)
+          if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
         } catch {
           const zattrs = await this._getJSON('/.zattrs')
           zmetadata = { metadata: { '.zattrs': zattrs } }
@@ -750,15 +768,16 @@ export class ZarrStore {
 
   private async _loadV3() {
     const metadataCacheKey = `v3:${this.source}`
-    // Bypass cache when transformRequest is provided (unique credentials per layer)
-    let metadata = this.transformRequest
+    // Bypass cache when transformRequest or customStore is provided
+    const bypassCache = this.transformRequest || this.customStore
+    let metadata = bypassCache
       ? undefined
       : (ZarrStore._cache.get(metadataCacheKey) as
           | ZarrV3GroupMetadata
           | undefined)
     if (!metadata) {
       metadata = (await this._getJSON('/zarr.json')) as ZarrV3GroupMetadata
-      if (!this.transformRequest) {
+      if (!bypassCache) {
         ZarrStore._cache.set(metadataCacheKey, metadata)
 
         if (metadata.consolidated_metadata?.metadata) {
@@ -787,15 +806,14 @@ export class ZarrStore {
         ? `${this.levels[0]}/${this.variable}`
         : this.variable
     const arrayCacheKey = `v3:${this.source}/${arrayKey}`
-    let arrayMetadata = this.transformRequest
+    let arrayMetadata = bypassCache
       ? undefined
       : (ZarrStore._cache.get(arrayCacheKey) as ZarrV3ArrayMetadata | undefined)
     if (!arrayMetadata) {
       arrayMetadata = (await this._getJSON(
         `/${arrayKey}/zarr.json`
       )) as ZarrV3ArrayMetadata
-      if (!this.transformRequest)
-        ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
+      if (!bypassCache) ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
     }
     this.arrayMetadata = arrayMetadata
 

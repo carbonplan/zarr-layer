@@ -60,7 +60,7 @@ map.on('load', () => {
 | Option | Type | Description |
 |--------|------|-------------|
 | id | string | Unique layer identifier |
-| source | string | Zarr store URL |
+| source | string | Zarr store URL (required unless `store` is provided) |
 | variable | string | Variable name to render |
 | colormap | array | Array of hex strings or `[r,g,b]` values |
 | clim | [min, max] | Color scale limits |
@@ -68,6 +68,7 @@ map.on('load', () => {
 **Optional:**
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| store | Readable | - | Custom zarrita-compatible store (e.g., IcechunkStore). When provided, `source` becomes optional. |
 | selector | object | `{}` | Dimension selector (unspecified dims default to index 0) |
 | opacity | number | `1` | Layer opacity (0-1) |
 | zarrVersion | `2` \| `3` | auto | Zarr format version (tries v3 first, falls back to v2) |
@@ -227,6 +228,26 @@ transformRequest: async (url) => ({
   url: await getPresignedUrl(url),
 })
 ```
+
+## custom stores
+
+For advanced use cases like [Icechunk](https://icechunk.io/), you can pass a custom zarrita-compatible store directly. When using a custom store, `source` becomes optional:
+
+```ts
+import { IcechunkStore } from 'wip-tk'
+
+const store = await IcechunkStore.open(...)
+
+new ZarrLayer({
+  id: 'icechunk-layer',
+  store,
+  variable: 'temperature',
+  colormap: [...],
+  clim: [0, 100],
+})
+```
+
+The store must implement the zarrita `Readable` interface with at minimum a `get(key: string)` method.
 
 ## thanks
 
