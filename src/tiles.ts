@@ -197,24 +197,29 @@ export class Tiles {
 
   /**
    * Compute which chunk indices to fetch for a given tile.
+   * For regional pyramids, accounts for tile coordinate offsets.
    */
-  private computeChunkIndices(
+  private async computeChunkIndices(
     levelArray: zarr.Array<zarr.DataType>,
     tileTuple: TileTuple
-  ): number[] {
-    const [_, x, y] = tileTuple
+  ): Promise<number[]> {
+    const [z, x, y] = tileTuple
     const dimensions = this.store.dimensions || []
     const chunks = levelArray.chunks
     const chunkIndices: number[] = new Array(dimensions.length).fill(0)
 
+    // Get tile offset for this zoom level (for regional pyramids)
+    const offset = await this.store.getTileOffset(z)
     for (let i = 0; i < dimensions.length; i++) {
       const dimName = dimensions[i]
       const dimKey = this.getDimKeyForName(dimName)
 
       if (dimKey === 'lon') {
-        chunkIndices[i] = x
+        // Subtract offset to convert global tile coord to zarr array index
+        chunkIndices[i] = x - offset.x
       } else if (dimKey === 'lat') {
-        chunkIndices[i] = y
+        // Subtract offset to convert global tile coord to zarr array index
+        chunkIndices[i] = y - offset.y
       } else {
         const dimSelection = resolveSelectorValue(
           this.selector,
@@ -656,7 +661,7 @@ export class Tiles {
       const levelPath = this.store.levels[tileTuple[0]]
       if (!levelPath) continue
       const levelArray = await this.store.getLevelArray(levelPath)
-      const desiredChunkIndices = this.computeChunkIndices(
+      const desiredChunkIndices = await this.computeChunkIndices(
         levelArray,
         tileTuple
       )
@@ -737,7 +742,7 @@ export class Tiles {
     tile.loading = true
 
     try {
-      const chunkIndices = this.computeChunkIndices(levelArray, tileTuple)
+      const chunkIndices = await this.computeChunkIndices(levelArray, tileTuple)
       const canReuseChunk =
         tile.chunkData &&
         tile.chunkShape &&
