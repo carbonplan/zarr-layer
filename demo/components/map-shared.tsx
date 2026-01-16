@@ -236,6 +236,9 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
       onLoadingStateChange: setLoadingState,
     }
 
+    if (datasetModule.store) {
+      options.store = datasetModule.store
+    }
     if (currentLayerConfig.customFrag) {
       options.customFrag = currentLayerConfig.customFrag
     }

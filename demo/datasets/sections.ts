@@ -21,4 +21,8 @@ export const SELECTOR_SECTIONS: SelectorSection[] = [
       'Burn Probability over CONUS',
     ],
   },
+  {
+    label: 'Icechunk (experimental)',
+    datasetIds: ['icechunk_usgs_dem'],
+  },
 ]

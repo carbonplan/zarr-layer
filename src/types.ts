@@ -56,8 +56,33 @@ export type LoadingStateCallback = (state: LoadingState) => void
 
 export interface ZarrLayerOptions {
   id: string
-  source: string
+  /**
+   * URL to the Zarr store. Required unless `store` is provided.
+   */
+  source?: string
   variable: string
+  /**
+   * Custom zarrita-compatible store to use instead of creating a FetchStore from source.
+   * Useful for IcechunkStore or other custom storage backends.
+   *
+   * The store must implement the zarrita Readable interface with at minimum:
+   * - `get(key: string): Promise<Uint8Array | undefined>` - fetch data at path
+   *
+   * Optionally implement AsyncReadable for range requests:
+   * - `getRange(key: string, range: RangeQuery): Promise<Uint8Array | undefined>`
+   *
+   * When provided:
+   * - `source` becomes optional (falls back to layer id for identification)
+   * - Metadata caching is bypassed (each layer fetches fresh metadata)
+   *
+   * @example
+   * ```ts
+   * import { IcechunkStore } from '@icechunk/icechunk-python'
+   * const store = await IcechunkStore.open(...)
+   * new ZarrLayer({ id: 'my-layer', store, variable: 'temperature', ... })
+   * ```
+   */
+  store?: zarr.Readable<unknown>
   selector?: Selector
   colormap: ColormapArray
   clim: [number, number]

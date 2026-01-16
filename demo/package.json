@@ -14,7 +14,9 @@
     "@carbonplan/icons": "^2.0.0",
     "@carbonplan/layouts": "5.1.0",
     "@carbonplan/theme": "^8.1.0",
+    "@carbonplan/zarr-layer": "file:../",
     "@protomaps/basemaps": "^5.0.1",
+    "icechunk-js": "file:../../icechunk/icechunk-js",
     "mapbox-gl": "^3.6.0",
     "maplibre-gl": "^5.8.0",
     "next": "^14.2.24",
@@ -22,7 +24,6 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "theme-ui": "0.15.5",
-    "@carbonplan/zarr-layer": "file:../",
     "zarrita": "^0.5.4",
     "zustand": "^5.0.9"
   },
