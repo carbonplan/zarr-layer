@@ -4,8 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 Custom layer for rendering Zarr datasets in MapLibre or Mapbox GL, inspired (and borrowing significant code and concepts from)
-[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium),
-and [@carbonplan/maps](https://github.com/carbonplan/maps). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports globe and mercator projections for both MapLibre and Mapbox.
+[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium), [@carbonplan/maps](https://github.com/carbonplan/maps), and [deck-gl-raster](https://github.com/developmentseed/deck.gl-raster). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports rendering to globe and mercator projections for both MapLibre and Mapbox. Input data are reprojected on the fly.
 
 This is an active experiment so expect to run into some bugs! Please report them.
 
@@ -15,9 +14,25 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 ## data requirements
 
-Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Native support for EPSG:4326 and EPSG:3857, with arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection (experimental).
+Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection for 'untiled' data. Tiled data need to be in EPSG:4326 or EPSG:3857.
 
-For best performance, tiled data is preferred (see [ndpyramid](https://github.com/carbonplan/ndpyramid)). The library also supports datasets that are untiled and tries to load chunks efficiently based on viewport intersections. Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental!
+### Multiscales
+
+High resolution datasets require multiscales. There are two main ways to store these. We recommend the untiled path for ease of data creation. Performance appears similar between the two options in most cases.
+
+#### Tiled
+
+Classic approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
+
+- Limited to EPSG:4326 or EPSG:3857
+
+#### Untiled
+
+Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental! We also try to interpret other multiscale formats. Chunks are loaded based on viewport intersection and zoom level.
+
+- Supports client side CRS reprojection via `proj4` and `@developmentseed/raster-reproject`
+
+See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## install
 
