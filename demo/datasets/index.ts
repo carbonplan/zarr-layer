@@ -1,6 +1,7 @@
 import carbonplan4d from './carbonplan-4d'
 import hrrr from './hrrr'
 import usgsdem from './usgs-dem'
+import icechunkUsgsDem from './icechunk-usgs-dem'
 
 import hurricane from './hurricane'
 import sentinel2 from './sentinel-2'
@@ -12,6 +13,7 @@ import type { Dataset } from './types'
 export const DATASETS: Dataset<any>[] = [
   carbonplan4d,
   hrrr,
+  icechunkUsgsDem,
   createTimeDataset({
     id: 'temperature_v3',
     source:

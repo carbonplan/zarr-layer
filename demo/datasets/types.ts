@@ -1,5 +1,6 @@
 import React from 'react'
 import type { Selector } from '@carbonplan/zarr-layer'
+import type * as zarr from 'zarrita'
 
 export type DatasetConfig = {
   id: string
@@ -20,6 +21,8 @@ export type DatasetConfig = {
   }
   bounds?: [number, number, number, number]
   proj4?: string
+  /** Optional custom zarrita-compatible store (e.g., IcechunkStore) */
+  store?: zarr.Readable<unknown>
 }
 
 export type ControlsProps<State> = {
