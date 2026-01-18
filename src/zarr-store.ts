@@ -263,6 +263,7 @@ interface ZarrStoreOptions {
   variable: string
   spatialDimensions?: SpatialDimensions
   bounds?: Bounds
+  crs?: string
   coordinateKeys?: string[]
   latIsAscending?: boolean | null
   proj4?: string
@@ -344,6 +345,7 @@ export class ZarrStore {
   private _latIsAscendingUserSet: boolean = false
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
+  private _crsOverride: boolean = false // Track if CRS was explicitly set by user
 
   /**
    * Returns the coarsest (lowest resolution) level path.
@@ -372,6 +374,7 @@ export class ZarrStore {
     variable,
     spatialDimensions = {},
     bounds,
+    crs,
     coordinateKeys = [],
     latIsAscending = null,
     proj4,
@@ -394,6 +397,18 @@ export class ZarrStore {
       this._latIsAscendingUserSet = true
     }
     this.proj4 = proj4 ?? null
+    if (crs) {
+      const normalized = crs.toUpperCase()
+      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
+        this.crs = normalized
+        this._crsOverride = true
+      } else if (!this.proj4) {
+        console.warn(
+          `[zarr-layer] CRS "${crs}" requires 'proj4' to render correctly. ` +
+            `Falling back to inferred CRS.`
+        )
+      }
+    }
     this.transformRequest = transformRequest
 
     this.initialized = this._initialize()
@@ -709,7 +724,9 @@ export class ZarrStore {
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
-      this.crs = pyramid.crs
+      if (!this._crsOverride) {
+        this.crs = pyramid.crs
+      }
     }
 
     const basePath =
@@ -783,7 +800,9 @@ export class ZarrStore {
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
-      this.crs = pyramid.crs
+      if (!this._crsOverride) {
+        this.crs = pyramid.crs
+      }
     }
 
     const arrayKey =
@@ -1098,12 +1117,14 @@ export class ZarrStore {
       }
     }
 
-    // Infer CRS from bounds for untiled multiscales if not explicitly set
+    // Infer CRS from bounds if not explicitly set
     // Only classify as meters if clearly outside degree range (> 360)
     // This handles both [-180, 180] and [0, 360] degree conventions
+    // Applies to untiled multiscales and single-level datasets (multiscaleType === 'none')
     if (
-      this.multiscaleType === 'untiled' &&
+      (this.multiscaleType === 'untiled' || this.multiscaleType === 'none') &&
       !this._crsFromMetadata &&
+      !this._crsOverride &&
       this.xyLimits
     ) {
       const maxAbsX = Math.max(
@@ -1330,7 +1351,7 @@ export class ZarrStore {
     // Check for explicit CRS in metadata, otherwise use configured CRS
     // (bounds-based inference will happen after coordinate arrays are loaded)
     const crs: CRS = metadata.crs ?? this.crs
-    if (metadata.crs) {
+    if (metadata.crs && !this._crsOverride) {
       this._crsFromMetadata = true
     }
 

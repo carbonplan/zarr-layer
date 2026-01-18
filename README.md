@@ -90,6 +90,7 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
+| crs | string | auto | CRS identifier for built-in projections (`EPSG:4326` or `EPSG:3857`). For other CRS, use `proj4`. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
 | bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857). These are interpreted as edge bounds (not center-to-center) |
 | latIsAscending | boolean | auto | Latitude orientation |
@@ -181,7 +182,7 @@ new ZarrLayer({
 
 ## custom projections
 
-For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays):
+For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays). If you set `crs` to a non-`EPSG:4326`/`EPSG:3857` value without `proj4`, the renderer will warn and fall back to inferred CRS.
 
 ```ts
 new ZarrLayer({

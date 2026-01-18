@@ -49,6 +49,7 @@ export class ZarrLayer {
   private zarrVersion: 2 | 3 | null = null
   private spatialDimensions: SpatialDimensions
   private bounds: Bounds | undefined
+  private crs: string | undefined
   private latIsAscending: boolean | null = null
   private selector: Selector
   private invalidate: () => void
@@ -140,6 +141,7 @@ export class ZarrLayer {
     zarrVersion,
     spatialDimensions = {},
     bounds,
+    crs,
     latIsAscending = null,
     fillValue,
     customFrag,
@@ -181,6 +183,7 @@ export class ZarrLayer {
     this.zarrVersion = zarrVersion ?? null
     this.spatialDimensions = spatialDimensions
     this.bounds = bounds
+    this.crs = crs
     this.latIsAscending = latIsAscending ?? null
     this.selector = selector
     this.normalizedSelector = normalizeSelector(selector)
@@ -454,6 +457,7 @@ export class ZarrLayer {
         variable: this.variable,
         spatialDimensions: this.spatialDimensions,
         bounds: this.bounds,
+        crs: this.crs,
         latIsAscending: this.latIsAscending,
         coordinateKeys: Object.keys(this.selector),
         proj4: this.proj4,
