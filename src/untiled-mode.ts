@@ -13,6 +13,7 @@ import {
   WEB_MERCATOR_EXTENT,
   MIN_SUBDIVISIONS,
   MAX_SUBDIVISIONS,
+  MERCATOR_SUBDIVISIONS,
 } from './constants'
 import type {
   ZarrMode,
@@ -36,6 +37,7 @@ import {
   flipTexCoordV,
   latToMercatorNorm,
   lonToMercatorNorm,
+  mercatorNormToLat,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
@@ -227,6 +229,8 @@ export class UntiledMode implements ZarrMode {
   private cachedGl: WebGL2RenderingContext | null = null
   // Track if base slice args have been built (ready for region fetching)
   private baseSliceArgsReady: boolean = false
+  // Track current projection for subdivision optimization
+  private isGlobeProjection: boolean = false
 
   constructor(
     store: ZarrStore,
@@ -860,12 +864,26 @@ export class UntiledMode implements ZarrMode {
       region.mercatorBounds ?? boundsToMercatorNorm(geoBounds, this.crs)
     region.mercatorBounds = mercBounds
 
-    // Subdivisions for smooth globe tessellation - more for larger regions
-    const latSpan = Math.abs(geoBounds.yMax - geoBounds.yMin)
-    const subdivisions = Math.max(
-      MIN_SUBDIVISIONS,
-      Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
-    )
+    // Subdivisions: high for globe (smooth curvature), minimal for mercator (flat)
+    // Use latitude span in degrees - lat is the primary driver of globe curvature
+    let latSpanDegrees: number
+    if (this.crs === 'EPSG:3857') {
+      // 3857 bounds are in meters - convert to degrees
+      const yMinNorm = 0.5 - geoBounds.yMin / (2 * WEB_MERCATOR_EXTENT)
+      const yMaxNorm = 0.5 - geoBounds.yMax / (2 * WEB_MERCATOR_EXTENT)
+      latSpanDegrees = Math.abs(
+        mercatorNormToLat(yMaxNorm) - mercatorNormToLat(yMinNorm)
+      )
+    } else {
+      // 4326 bounds are already in degrees, proj4 uses adaptive mesh (doesn't use this)
+      latSpanDegrees = Math.abs(geoBounds.yMax - geoBounds.yMin)
+    }
+    const subdivisions = this.isGlobeProjection
+      ? Math.max(
+          MIN_SUBDIVISIONS,
+          Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpanDegrees))
+        )
+      : MERCATOR_SUBDIVISIONS
 
     if (this.proj4def && this.cached4326Transformer) {
       // Proj4 datasets: use adaptive mesh with 4326 coords
@@ -883,7 +901,7 @@ export class UntiledMode implements ZarrMode {
       region.indexArr = adaptive.indices
       region.wgs84Bounds = adaptive.wgs84Bounds
       region.useIndexedMesh = true
-      region.vertexCount = adaptive.indices.length
+      region.vertexCount = region.indexArr!.length
     } else if (this.crs === 'EPSG:4326') {
       // EPSG:4326 datasets: use fragment shader reprojection
       // Mesh is in Mercator space, fragment shader inverts Mercator → lat for texture lookup
@@ -912,7 +930,7 @@ export class UntiledMode implements ZarrMode {
       // Use linear texture coords - fragment shader handles orientation via latIsAscending
       region.pixCoordArr = subdivided.texCoordArr
     } else {
-      // EPSG:3857 and other Mercator-compatible CRS: use subdivided quad + mercator shader
+      // EPSG:3857 and other Mercator-compatible CRS: use subdivided quad
       const subdivided = createSubdividedQuad(subdivisions)
       region.vertexArr = subdivided.vertexArr
       region.useIndexedMesh = false
@@ -1911,8 +1929,19 @@ export class UntiledMode implements ZarrMode {
     })
   }
 
-  onProjectionChange(_isGlobe: boolean): void {
-    // No-op: regions handle their own geometry
+  onProjectionChange(isGlobe: boolean): void {
+    if (this.isGlobeProjection === isGlobe) return
+    this.isGlobeProjection = isGlobe
+
+    // Regenerate geometry for all cached regions with new subdivision count
+    const gl = this.cachedGl
+    if (!gl) return
+
+    for (const region of this.regionCache.values()) {
+      if (!region.data) continue
+      this.createRegionGeometry(region.regionX, region.regionY, gl, region)
+    }
+    this.invalidate()
   }
 
   getTiledState() {

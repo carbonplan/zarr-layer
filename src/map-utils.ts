@@ -549,16 +549,21 @@ export function boundsToMercatorNorm(
     ;[yMin, yMax] = [yMax, yMin]
   }
 
-  return {
+  const bounds: MercatorBounds = {
     x0: lonToMercatorNorm(xyLimits.xMin),
     y0: latToMercatorNorm(yMax),
     x1: lonToMercatorNorm(xyLimits.xMax),
     y1: latToMercatorNorm(yMin),
+  }
+
+  if (crs === 'EPSG:4326') {
     // Preserve original latitude bounds for equirectangular data so callers
     // can perform linear-latitude calculations when needed (e.g. queries).
-    latMin: yMin,
-    latMax: yMax,
+    bounds.latMin = yMin
+    bounds.latMax = yMax
   }
+
+  return bounds
 }
 
 // === Untiled mode utilities ===
