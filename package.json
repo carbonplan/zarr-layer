@@ -55,6 +55,7 @@
   },
   "dependencies": {
     "@developmentseed/raster-reproject": "^0.1.0",
+    "delaunator": "^5.0.1",
     "proj4": "^2.20.2",
     "zarrita": "^0.5.4"
   },
@@ -63,6 +64,7 @@
   },
   "devDependencies": {
     "@carbonplan/prettier": "^1.2.0",
+    "@types/delaunator": "^5.0.3",
     "@types/proj4": "^2.5.6",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",

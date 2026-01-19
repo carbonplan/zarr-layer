@@ -63,7 +63,7 @@ import {
   pixelToSourceCRS,
   sampleEdgesToMercatorBounds,
 } from './projection-utils'
-import { createAdaptiveMesh } from './mesh-reprojector'
+import { createAdaptiveMesh, createHybridMesh } from './mesh-reprojector'
 import { setObjectValues } from './query/selector-utils'
 import { geoToArrayIndex } from './map-utils'
 import {
@@ -886,20 +886,51 @@ export class UntiledMode implements ZarrMode {
       : MERCATOR_SUBDIVISIONS
 
     if (this.proj4def && this.cached4326Transformer) {
-      // Proj4 datasets: use adaptive mesh with 4326 coords
-      // Stage 1 (CPU): compute WGS84 vertex positions via proj4/adaptive mesh.
+      // Proj4 datasets: compute WGS84 vertex positions via proj4.
+      // Stage 1 (CPU): transform vertices from source CRS to WGS84.
       // Stage 2 (GPU): transform WGS84 → Mercator in the wgs84 shader.
-      const adaptive = createAdaptiveMesh({
-        geoBounds,
-        width: region.width || 256,
-        height: region.height || 256,
-        transformer: this.cached4326Transformer!,
-        latIsAscending: this.latIsAscending,
-      })
-      region.vertexArr = adaptive.positions
-      region.pixCoordArr = adaptive.texCoords
-      region.indexArr = adaptive.indices
-      region.wgs84Bounds = adaptive.wgs84Bounds
+
+      // Calculate subdivisions for globe mode based on latSpan
+      let globeSubdivisions: number | undefined
+      if (this.isGlobeProjection) {
+        const corners = [
+          this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMin),
+          this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMax),
+        ]
+        const latSpan = Math.abs(corners[1][1] - corners[0][1])
+        globeSubdivisions = Math.max(
+          MIN_SUBDIVISIONS,
+          Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
+        )
+      }
+
+      // For globe mode, use hybrid mesh (adaptive + uniform grid) for both
+      // accurate reprojection and proper globe curvature.
+      // For flat map mode, use adaptive mesh for efficiency.
+      let meshResult
+      if (globeSubdivisions) {
+        meshResult = createHybridMesh({
+          geoBounds,
+          width: region.width,
+          height: region.height,
+          subdivisions: globeSubdivisions,
+          transformer: this.cached4326Transformer!,
+          latIsAscending: this.latIsAscending,
+        })
+      } else {
+        meshResult = createAdaptiveMesh({
+          geoBounds,
+          width: region.width,
+          height: region.height,
+          transformer: this.cached4326Transformer!,
+          latIsAscending: this.latIsAscending,
+        })
+      }
+
+      region.vertexArr = meshResult.positions
+      region.pixCoordArr = meshResult.texCoords
+      region.indexArr = meshResult.indices
+      region.wgs84Bounds = meshResult.wgs84Bounds
       region.useIndexedMesh = true
       region.vertexCount = region.indexArr!.length
     } else if (this.crs === 'EPSG:4326') {

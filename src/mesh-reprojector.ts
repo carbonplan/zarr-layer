@@ -6,6 +6,7 @@
  * enabling two-stage GPU reprojection for polar projection support.
  */
 
+import Delaunator from 'delaunator'
 import { RasterReprojector } from '@developmentseed/raster-reproject'
 import { lonToMercatorNorm, type Wgs84Bounds } from './map-utils'
 import {
@@ -170,4 +171,157 @@ export function createAdaptiveMesh(
   const indices = new Uint32Array(reprojector.triangles)
 
   return { positions, texCoords, indices, wgs84Bounds }
+}
+
+export interface HybridMeshOptions {
+  geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
+  width: number
+  height: number
+  subdivisions: number
+  transformer: ProjectionTransformer
+  latIsAscending: boolean
+  maxError?: number
+}
+
+/**
+ * Create a hybrid mesh that combines adaptive refinement with uniform grid vertices.
+ * This gives both: accurate reprojection (adaptive) + even coverage for globe curvature (uniform).
+ *
+ * Algorithm:
+ * 1. Run adaptive mesh to get error-driven vertices in UV space
+ * 2. Generate uniform grid vertices in UV space
+ * 3. Merge and re-triangulate with Delaunator
+ * 4. Transform all vertices to WGS84
+ */
+export function createHybridMesh(
+  options: HybridMeshOptions
+): AdaptiveMeshResult {
+  const {
+    geoBounds,
+    width,
+    height,
+    subdivisions,
+    transformer,
+    latIsAscending,
+    maxError = DEFAULT_MESH_MAX_ERROR,
+  } = options
+  const { xMin, xMax, yMin, yMax } = geoBounds
+  const bounds: [number, number, number, number] = [xMin, yMin, xMax, yMax]
+
+  // Set up reprojection functions for RasterReprojector
+  const scaleX = width > 1 ? width / (width - 1) : 1
+  const scaleY = height > 1 ? height / (height - 1) : 1
+
+  const reprojector = new RasterReprojector(
+    {
+      forwardTransform: (px: number, py: number) =>
+        pixelToSourceCRS(
+          px * scaleX,
+          py * scaleY,
+          bounds,
+          width,
+          height,
+          latIsAscending
+        ),
+      inverseTransform: (x: number, y: number) => {
+        const [scaledPx, scaledPy] = sourceCRSToPixel(
+          x,
+          y,
+          bounds,
+          width,
+          height,
+          latIsAscending
+        )
+        return [scaledPx / scaleX, scaledPy / scaleY]
+      },
+      forwardReproject: (x: number, y: number) => transformer.forward(x, y),
+      inverseReproject: (lon: number, lat: number) =>
+        transformer.inverse(lon, lat),
+    },
+    width,
+    height
+  )
+
+  // Run adaptive refinement
+  reprojector.run(maxError)
+
+  // Collect adaptive mesh UVs
+  const adaptiveUVs = reprojector.uvs // [u0, v0, u1, v1, ...]
+
+  // Generate uniform grid UVs
+  const uniformUVs: number[] = []
+  for (let row = 0; row <= subdivisions; row++) {
+    for (let col = 0; col <= subdivisions; col++) {
+      uniformUVs.push(col / subdivisions, row / subdivisions)
+    }
+  }
+
+  // Merge adaptive + uniform UVs (duplicates are harmless for Delaunator)
+  const mergedUVs = new Float64Array(adaptiveUVs.length + uniformUVs.length)
+  mergedUVs.set(adaptiveUVs)
+  mergedUVs.set(uniformUVs, adaptiveUVs.length)
+
+  // Triangulate merged UVs with Delaunator
+  const delaunay = new Delaunator(mergedUVs)
+  const triangles = delaunay.triangles
+
+  // Transform all UVs to WGS84 and compute bounds
+  const numVerts = mergedUVs.length / 2
+  const wgs84Positions: number[] = []
+  let minLon = Infinity,
+    maxLon = -Infinity
+  let minLat = Infinity,
+    maxLat = -Infinity
+
+  for (let i = 0; i < numVerts; i++) {
+    const u = mergedUVs[i * 2]
+    const v = mergedUVs[i * 2 + 1]
+
+    // UV → source CRS
+    const srcX = xMin + u * (xMax - xMin)
+    const srcY = latIsAscending
+      ? yMin + v * (yMax - yMin)
+      : yMax - v * (yMax - yMin)
+
+    // Source CRS → WGS84
+    const [lon, lat] = transformer.forward(srcX, srcY)
+    wgs84Positions.push(lon, lat)
+
+    if (isFinite(lon) && isFinite(lat)) {
+      minLon = Math.min(minLon, lon)
+      maxLon = Math.max(maxLon, lon)
+      minLat = Math.min(minLat, lat)
+      maxLat = Math.max(maxLat, lat)
+    }
+  }
+
+  // Compute normalized WGS84 bounds
+  const wgs84Bounds: Wgs84Bounds = {
+    lon0: lonToMercatorNorm(minLon),
+    lat0: (minLat + 90) / 180,
+    lon1: lonToMercatorNorm(maxLon),
+    lat1: (maxLat + 90) / 180,
+  }
+
+  // Normalize positions to [-1, 1]
+  const positions = new Float32Array(numVerts * 2)
+  const lonRange = maxLon - minLon || 1
+  const latRange = maxLat - minLat || 1
+
+  for (let i = 0; i < numVerts; i++) {
+    const lon = wgs84Positions[i * 2]
+    const lat = wgs84Positions[i * 2 + 1]
+    positions[i * 2] = ((lon - minLon) / lonRange) * 2 - 1
+    positions[i * 2 + 1] = ((lat - minLat) / latRange) * 2 - 1
+  }
+
+  // Create texCoords from merged UVs
+  const texCoords = new Float32Array(mergedUVs)
+
+  return {
+    positions,
+    texCoords,
+    indices: new Uint32Array(triangles),
+    wgs84Bounds,
+  }
 }
