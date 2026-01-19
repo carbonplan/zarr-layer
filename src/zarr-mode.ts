@@ -41,7 +41,7 @@ export interface TiledRenderState {
   vertexArr: Float32Array
   pixCoordArr: Float32Array
   tileBounds?: Record<string, MercatorBounds>
-  latIsAscending: boolean | null
+  latIsAscending: boolean
 }
 
 export interface RegionRenderState {
@@ -54,13 +54,21 @@ export interface RegionRenderState {
   width: number
   height: number
   channels: number
-  /** Whether latitude increases with array index (needed for globe tile coordinate calculation) */
-  latIsAscending?: boolean
+  /** Data orientation: true = row 0 is south */
+  latIsAscending: boolean
   /** Band textures for multi-band custom shaders */
   bandData?: Map<string, Float32Array>
   bandTextures?: Map<string, WebGLTexture>
   bandTexturesUploaded?: Set<string>
   bandTexturesConfigured?: Set<string>
+  /** Index buffer for adaptive mesh (proj4 datasets) */
+  indexBuffer?: WebGLBuffer
+  /** Number of vertices/indices to draw */
+  vertexCount?: number
+  /** Whether to use indexed mesh rendering (gl.drawElements) */
+  useIndexedMesh?: boolean
+  /** WGS84 bounds for two-stage reprojection */
+  wgs84Bounds?: import('./map-utils').Wgs84Bounds
 }
 
 export interface ZarrMode {

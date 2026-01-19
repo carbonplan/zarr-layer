@@ -109,17 +109,6 @@ export function getNewController(canceller: RequestCanceller): {
 }
 
 /**
- * Register an AbortController for a specific version (when version is managed externally).
- */
-export function registerController(
-  canceller: RequestCanceller,
-  version: number,
-  controller: AbortController
-): void {
-  canceller.controllers.set(version, controller)
-}
-
-/**
  * Remove a controller from tracking (typically after request completes).
  */
 export function removeController(

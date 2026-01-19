@@ -4,8 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 Custom layer for rendering Zarr datasets in MapLibre or Mapbox GL, inspired (and borrowing significant code and concepts from)
-[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium),
-and [@carbonplan/maps](https://github.com/carbonplan/maps). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports globe and mercator projections for both MapLibre and Mapbox.
+[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium), [@carbonplan/maps](https://github.com/carbonplan/maps), and [deck-gl-raster](https://github.com/developmentseed/deck.gl-raster). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports rendering to globe and mercator projections for both MapLibre and Mapbox. Input data are reprojected on the fly.
 
 This is an active experiment so expect to run into some bugs! Please report them.
 
@@ -15,9 +14,25 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 ## data requirements
 
-Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Native support for EPSG:4326 and EPSG:3857, with arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection (experimental).
+Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection for 'untiled' data. Tiled data need to be in EPSG:4326 or EPSG:3857.
 
-For best performance, tiled data is preferred (see [ndpyramid](https://github.com/carbonplan/ndpyramid)). The library also supports datasets that are untiled and tries to load chunks efficiently based on viewport intersections. Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental!
+### Multiscales
+
+High resolution datasets require multiscales. There are two main ways to store these. We recommend the untiled path for ease of data creation. Performance appears similar between the two options in most cases.
+
+#### Tiled
+
+Classic approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
+
+- Limited to EPSG:4326 or EPSG:3857
+
+#### Untiled
+
+Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental! We also try to interpret other multiscale formats. Chunks are loaded based on viewport intersection and zoom level.
+
+- Supports client side CRS reprojection via `proj4` and `@developmentseed/raster-reproject`
+
+See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## install
 
@@ -75,6 +90,7 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
+| crs | string | auto | CRS identifier for built-in projections (`EPSG:4326` or `EPSG:3857`). For other CRS, use `proj4`. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
 | bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857). These are interpreted as edge bounds (not center-to-center) |
 | latIsAscending | boolean | auto | Latitude orientation |
@@ -166,7 +182,7 @@ new ZarrLayer({
 
 ## custom projections
 
-For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays):
+For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays). If you set `crs` to a non-`EPSG:4326`/`EPSG:3857` value without `proj4`, the renderer will warn and fall back to inferred CRS.
 
 ```ts
 new ZarrLayer({
@@ -181,7 +197,7 @@ new ZarrLayer({
 })
 ```
 
-The data will be reprojected to Web Mercator for display. Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+The data will be reprojected to Web Mercator for display using GPU-accelerated mesh reprojection powered by [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster). Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
 
 ## queries
 
@@ -230,7 +246,7 @@ transformRequest: async (url) => ({
 
 ## thanks
 
-This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. LLMs of several makes aided in the coding and debugging of this library.
+This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. Custom projection support uses [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster) for adaptive mesh generation. LLMs of several makes aided in the coding and debugging of this library.
 
 ## license
 

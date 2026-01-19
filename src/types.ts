@@ -72,6 +72,11 @@ export interface ZarrLayerOptions {
    * If not provided, bounds are read from coordinate arrays or default to global.
    */
   bounds?: Bounds
+  /**
+   * CRS identifier for built-in projections (EPSG:4326 or EPSG:3857).
+   * For any other CRS, provide a matching proj4 definition.
+   */
+  crs?: string
   latIsAscending?: boolean | null
   fillValue?: number
   customFrag?: string

@@ -14,8 +14,6 @@ import { renderRegion, type RenderableRegion } from './renderable-region'
 
 /**
  * Prepare tile geometry by uploading vertex and texture coordinate buffers.
- * All tile data is resampled to Mercator space on CPU before reaching here,
- * so we always use linear texture coordinates.
  */
 function prepareTileGeometry(
   gl: WebGL2RenderingContext,
@@ -39,6 +37,8 @@ function prepareTileGeometry(
 
 /**
  * Convert a TileData to a RenderableRegion for unified rendering.
+ * Note: For EPSG:4326 tiles, fragment shader reprojection is used.
+ * The mercatorBounds should include latMin/latMax for fragment shader to use.
  */
 function tileToRenderable(
   tile: TileData,
@@ -49,7 +49,8 @@ function tileToRenderable(
   texScale: [number, number],
   texOffset: [number, number],
   tileCache: Tiles,
-  renderTileKey: string
+  renderTileKey: string,
+  latIsAscending: boolean
 ): RenderableRegion {
   return {
     mercatorBounds: bounds,
@@ -67,6 +68,7 @@ function tileToRenderable(
     texOffset,
     ensureBandTexture: (bandName) =>
       tileCache.ensureBandTexture(renderTileKey, bandName),
+    latIsAscending,
   }
 }
 
@@ -86,7 +88,8 @@ export function renderTiles(
   tileTexOverrides?: Record<
     string,
     { texScale: [number, number]; texOffset: [number, number] }
-  >
+  >,
+  latIsAscending: boolean = true
 ) {
   // Set up band texture uniforms once per frame
   setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
@@ -169,12 +172,18 @@ export function renderTiles(
               y1: targetBounds.y0 + ((localY + 1) / divisor) * ySpan,
             }
 
-            // Preserve lat bounds if present (scale them for the child's portion)
+            // Preserve lat/lon bounds if present (scale them for the child's portion)
             if (bounds?.latMin !== undefined && bounds?.latMax !== undefined) {
               const latSpan = bounds.latMax - bounds.latMin
               childBounds.latMin = bounds.latMin + (localY / divisor) * latSpan
               childBounds.latMax =
                 bounds.latMin + ((localY + 1) / divisor) * latSpan
+            }
+            if (bounds?.lonMin !== undefined && bounds?.lonMax !== undefined) {
+              const lonSpan = bounds.lonMax - bounds.lonMin
+              childBounds.lonMin = bounds.lonMin + (localX / divisor) * lonSpan
+              childBounds.lonMax =
+                bounds.lonMin + ((localX + 1) / divisor) * lonSpan
             }
 
             // Prepare geometry for this child tile
@@ -192,6 +201,7 @@ export function renderTiles(
             ])
 
             // Child uses full texture (texScale=1, texOffset=0)
+            // Note: childBounds includes latMin/latMax for fragment shader reprojection
             const childRenderable = tileToRenderable(
               child.tile,
               childBounds,
@@ -201,7 +211,8 @@ export function renderTiles(
               [1, 1],
               [0, 0],
               tileCache,
-              childTileKey
+              childTileKey,
+              latIsAscending
             )
 
             renderRegion(
@@ -259,6 +270,7 @@ export function renderTiles(
     }
 
     // Convert tile to RenderableRegion and use unified render path
+    // Note: mercatorBounds includes latMin/latMax for fragment shader reprojection (EPSG:4326)
     const renderable = tileToRenderable(
       tileToRender,
       mercatorBounds,
@@ -268,7 +280,8 @@ export function renderTiles(
       texScale,
       texOffset,
       tileCache,
-      renderTileKey
+      renderTileKey,
+      latIsAscending
     )
 
     renderRegion(

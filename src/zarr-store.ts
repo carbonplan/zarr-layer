@@ -263,6 +263,7 @@ interface ZarrStoreOptions {
   variable: string
   spatialDimensions?: SpatialDimensions
   bounds?: Bounds
+  crs?: string
   coordinateKeys?: string[]
   latIsAscending?: boolean | null
   proj4?: string
@@ -287,7 +288,7 @@ interface StoreDescription {
   scaleFactor: number
   addOffset: number
   coordinates: Record<string, (string | number)[]>
-  latIsAscending: boolean | null
+  latIsAscending: boolean
   proj4: string | null
 }
 
@@ -340,9 +341,11 @@ export class ZarrStore {
   scaleFactor: number = 1
   addOffset: number = 0
   coordinates: Record<string, (string | number)[]> = {}
-  latIsAscending: boolean | null = null
+  latIsAscending: boolean = true // Default: row 0 = south; overridden by detection
+  private _latIsAscendingUserSet: boolean = false
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
+  private _crsOverride: boolean = false // Track if CRS was explicitly set by user
 
   /**
    * Returns the coarsest (lowest resolution) level path.
@@ -371,6 +374,7 @@ export class ZarrStore {
     variable,
     spatialDimensions = {},
     bounds,
+    crs,
     coordinateKeys = [],
     latIsAscending = null,
     proj4,
@@ -388,8 +392,23 @@ export class ZarrStore {
     this.spatialDimensions = spatialDimensions
     this.explicitBounds = bounds ?? null
     this.coordinateKeys = coordinateKeys
-    this.latIsAscending = latIsAscending
+    if (latIsAscending !== null) {
+      this.latIsAscending = latIsAscending
+      this._latIsAscendingUserSet = true
+    }
     this.proj4 = proj4 ?? null
+    if (crs) {
+      const normalized = crs.toUpperCase()
+      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
+        this.crs = normalized
+        this._crsOverride = true
+      } else if (!this.proj4) {
+        console.warn(
+          `[zarr-layer] CRS "${crs}" requires 'proj4' to render correctly. ` +
+            `Falling back to inferred CRS.`
+        )
+      }
+    }
     this.transformRequest = transformRequest
 
     this.initialized = this._initialize()
@@ -705,7 +724,9 @@ export class ZarrStore {
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
-      this.crs = pyramid.crs
+      if (!this._crsOverride) {
+        this.crs = pyramid.crs
+      }
     }
 
     const basePath =
@@ -779,7 +800,9 @@ export class ZarrStore {
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
-      this.crs = pyramid.crs
+      if (!this._crsOverride) {
+        this.crs = pyramid.crs
+      }
     }
 
     const arrayKey =
@@ -938,7 +961,7 @@ export class ZarrStore {
       if (!this.xyLimits) {
         this.xyLimits = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
       }
-      if (this.latIsAscending === null) {
+      if (!this._latIsAscendingUserSet) {
         this.latIsAscending = false // Tiled pyramids: row 0 = north
       }
       return
@@ -946,7 +969,7 @@ export class ZarrStore {
 
     // For untiled: determine what we still need to detect
     const needsBounds = !this.xyLimits
-    const needsLatAscending = this.latIsAscending === null
+    const needsLatAscending = !this._latIsAscendingUserSet
 
     // If explicit bounds provided and user doesn't need latIsAscending detection, skip coord fetch
     // (respects user intent to avoid coord reads by providing bounds)
@@ -954,7 +977,7 @@ export class ZarrStore {
       return
     }
 
-    // Can't fetch coords without dimension info - return silently (best-effort)
+    // Can't fetch coords without dimension info - default already set
     if (!this.dimIndices.lon || !this.dimIndices.lat || !this.root) {
       return
     }
@@ -972,8 +995,52 @@ export class ZarrStore {
       const lonName = this.spatialDimensions.lon ?? this.dimIndices.lon.name
       const latName = this.spatialDimensions.lat ?? this.dimIndices.lat.name
 
-      const xarr = await openArray(levelRoot.resolve(lonName))
-      const yarr = await openArray(levelRoot.resolve(latName))
+      // Find coordinate array paths from consolidated metadata
+      // This handles datasets where coords are at different levels (e.g., HRRR)
+      const findCoordPath = (dimName: string): string | null => {
+        if (!this.metadata) return null
+
+        // V2: keys are like "lat/.zarray" or "surface/lat/.zarray"
+        const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
+        if (v2Meta.metadata) {
+          const suffix = `/${dimName}/.zarray`
+          const rootKey = `${dimName}/.zarray`
+          for (const key of Object.keys(v2Meta.metadata)) {
+            if (key === rootKey || key.endsWith(suffix)) {
+              return key.slice(0, -'/.zarray'.length)
+            }
+          }
+        }
+
+        // V3: keys are like "lat" or "surface/lat" with node_type: 'array'
+        const v3Meta = this.metadata as ZarrV3GroupMetadata
+        if (v3Meta.consolidated_metadata?.metadata) {
+          const suffix = `/${dimName}`
+          for (const [key, value] of Object.entries(
+            v3Meta.consolidated_metadata.metadata
+          )) {
+            if (
+              (key === dimName || key.endsWith(suffix)) &&
+              value.node_type === 'array'
+            ) {
+              return key
+            }
+          }
+        }
+
+        return null
+      }
+
+      const xPath = findCoordPath(lonName)
+      const yPath = findCoordPath(latName)
+
+      // Use found paths or fall back to levelRoot-relative paths
+      const xarr = await openArray(
+        xPath ? this.root.resolve(xPath) : levelRoot.resolve(lonName)
+      )
+      const yarr = await openArray(
+        yPath ? this.root.resolve(yPath) : levelRoot.resolve(latName)
+      )
 
       const xLen = xarr.shape[0]
       const yLen = yarr.shape[0]
@@ -1042,19 +1109,22 @@ export class ZarrStore {
             `Error: ${err instanceof Error ? err.message : err}`
         )
       }
-      // Bounds were explicit but latIsAscending detection failed - just log
-      console.debug(
-        '[zarr-layer] Could not detect latIsAscending from coordinates:',
-        err instanceof Error ? err.message : err
-      )
+      if (needsLatAscending) {
+        console.warn(
+          `[zarr-layer] Could not detect latIsAscending from coordinates. ` +
+            `Defaulting to true (row 0 = south). Set explicitly if data appears flipped.`
+        )
+      }
     }
 
-    // Infer CRS from bounds for untiled multiscales if not explicitly set
+    // Infer CRS from bounds if not explicitly set
     // Only classify as meters if clearly outside degree range (> 360)
     // This handles both [-180, 180] and [0, 360] degree conventions
+    // Applies to untiled multiscales and single-level datasets (multiscaleType === 'none')
     if (
-      this.multiscaleType === 'untiled' &&
+      (this.multiscaleType === 'untiled' || this.multiscaleType === 'none') &&
       !this._crsFromMetadata &&
+      !this._crsOverride &&
       this.xyLimits
     ) {
       const maxAbsX = Math.max(
@@ -1281,7 +1351,7 @@ export class ZarrStore {
     // Check for explicit CRS in metadata, otherwise use configured CRS
     // (bounds-based inference will happen after coordinate arrays are loaded)
     const crs: CRS = metadata.crs ?? this.crs
-    if (metadata.crs) {
+    if (metadata.crs && !this._crsOverride) {
       this._crsFromMetadata = true
     }
 

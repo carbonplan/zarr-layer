@@ -26,8 +26,6 @@ const VARIABLES = {
   },
 } as const
 
-
-
 type VariableKey = keyof typeof VARIABLES
 
 const VARIABLE_KEYS = Object.keys(VARIABLES) as VariableKey[]
@@ -57,13 +55,15 @@ const Controls = ({ state, setState }: ControlsProps<DEMState>) => {
   )
 }
 
-
 const usgsdem: Dataset<DEMState> = {
   id: 'usgsdem',
   source: `https://carbonplan-share.s3.us-west-2.amazonaws.com/zarr-layer-examples/USGS-CONUS-DEM-10m.zarr`,
   variable: 'DEM',
   clim: [0, 4000],
-  bounds: [-125.5958334317414, 24.75000001939236, -66.62101857071806, 49.09379633476274],
+  bounds: [
+    -125.5958334317414, 24.75000001939236, -66.62101857071806,
+    49.09379633476274,
+  ],
   latIsAscending: false,
   sourceInfo:
     'USGS 10m DEM with derived hillshade, aspect and slope angle shading.',
@@ -77,9 +77,9 @@ const usgsdem: Dataset<DEMState> = {
   },
   Controls,
   buildLayerProps: (state) => {
-    return { 
+    return {
       selector: {},
-      variable: state.variable 
+      variable: state.variable,
     }
   },
 }

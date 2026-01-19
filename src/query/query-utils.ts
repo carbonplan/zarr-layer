@@ -5,7 +5,6 @@
  * mercator corrections, and point-in-polygon tests.
  */
 
-import type { TileTuple, XYLimits, MercatorBounds } from '../map-utils'
 import {
   getTilesAtZoom,
   getTilesAtZoomEquirect,
@@ -15,6 +14,9 @@ import {
   mercatorNormToLon,
   lonToTile,
   latToTileMercator,
+  type TileTuple,
+  type XYLimits,
+  type MercatorBounds,
 } from '../map-utils'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry } from './types'
@@ -54,30 +56,19 @@ export function pixelToLatLon(
   if (proj4def && sourceBounds) {
     const transformer =
       cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-    const [xMin, yMin, xMax, yMax] = sourceBounds
 
-    let srcX: number, srcY: number
-    if (centerPixel) {
-      // pixelToSourceCRS uses (pixel+0.5)/width for pixel centers with edge-to-edge bounds
-      ;[srcX, srcY] = pixelToSourceCRS(
-        x,
-        y,
-        sourceBounds,
-        width,
-        height,
-        latIsAscending ?? null
-      )
-    } else {
-      // For corners, use pixel/width directly (no +0.5 offset).
-      // sourceBounds are edge-to-edge, so this maps pixel edges to bound edges.
-      const xNorm = width <= 1 ? 0.5 : x / width
-      const yNorm = height <= 1 ? 0.5 : y / height
-      srcX = xMin + xNorm * (xMax - xMin)
-      srcY =
-        latIsAscending === false
-          ? yMax - yNorm * (yMax - yMin)
-          : yMin + yNorm * (yMax - yMin)
-    }
+    // pixelToSourceCRS uses edge-based model: pixel 0 → xMin, pixel width → xMax
+    // For pixel centers, pass pixel + 0.5; for edges, pass pixel directly
+    const px = centerPixel ? x + 0.5 : x
+    const py = centerPixel ? y + 0.5 : y
+    const [srcX, srcY] = pixelToSourceCRS(
+      px,
+      py,
+      sourceBounds,
+      width,
+      height,
+      latIsAscending
+    )
 
     const [lon, lat] = transformer.inverse(srcX, srcY)
     return { lat, lon }
@@ -188,8 +179,7 @@ export function geoToTileFraction(
     return { fracX, fracY }
   }
 
-  // EPSG:3857 - Mercator
-  const globalFracX = (lng + 180) / 360
+  const globalFracX = lonToMercatorNorm(lng)
   const sin = Math.sin((lat * Math.PI) / 180)
   const globalFracY = 0.5 - (0.25 * Math.log((1 + sin) / (1 - sin))) / Math.PI
 
@@ -316,7 +306,7 @@ export function computePixelBoundsFromGeometry(
         sourceBounds,
         width,
         height,
-        latIsAscending ?? null
+        latIsAscending
       )
       minX = Math.min(minX, xPixel)
       maxX = Math.max(maxX, xPixel)
@@ -764,7 +754,7 @@ export function mercatorBoundsToPixel(
       sourceBounds,
       width,
       height,
-      latIsAscending ?? null
+      latIsAscending
     )
 
     const x = Math.floor(xPixel)

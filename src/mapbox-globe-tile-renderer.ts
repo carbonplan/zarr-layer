@@ -7,21 +7,19 @@
  * Mapbox's renderToTile() asks the custom layer to render individual tiles
  * to offscreen textures, requiring:
  * - Tile-specific transformation matrix (not camera matrix)
- * - Data resampled to Mercator space (CPU-based, done before reaching this module)
+ * - For EPSG:4326 data: fragment shader reprojection (Mercator → latitude for texture lookup)
  */
 
 import {
   findBestParentTile,
   findBestChildTiles,
-  mercatorTileToGeoBounds,
-  getOverlapping4326Tiles,
   get4326TileGeoBounds,
   tileToKey,
   latToMercatorNorm,
   lonToMercatorNorm,
   mercatorNormToLon,
+  mercatorNormToLat,
   parseLevelZoom,
-  zoomToLevel,
   type TileTuple,
   type XYLimits,
 } from './map-utils'
@@ -32,7 +30,6 @@ import type {
   TileId,
   RegionRenderState,
 } from './zarr-mode'
-import { createLinearTexCoordsFromVertices } from './webgl-utils'
 import { setupBandTextureUniforms } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 import {
@@ -42,26 +39,99 @@ import {
   boundsIntersect,
 } from './mapbox-globe-utils'
 
-/** Cache for linear texture coordinate buffers. One buffer per region. */
-const linearBufferCache = new WeakMap<RegionRenderState, WebGLBuffer>()
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/** Extended MercatorBounds with lat/lon for EPSG:4326 tiles */
+interface TileMercatorBounds {
+  x0: number
+  y0: number
+  x1: number
+  y1: number
+  latMin?: number
+  latMax?: number
+  lonMin?: number
+  lonMax?: number
+}
+
+/** Result of computing tile bounds and texture coordinates */
+interface TileBoundsAndTexCoords {
+  overlap: { x0: number; y0: number; x1: number; y1: number }
+  latBounds: { min: number; max: number }
+  texScale: [number, number]
+  texOffset: [number, number]
+}
 
 /**
- * Get or create a linear texture coordinate buffer for a region.
+ * Get or compute mercator bounds for a 4326 tile.
+ * Uses pre-computed bounds if available, otherwise computes from tile coordinates.
  */
-function getLinearBuffer(
-  gl: WebGL2RenderingContext,
-  region: RegionRenderState
-): WebGLBuffer {
-  let buffer = linearBufferCache.get(region)
-  if (buffer) return buffer
+function getTileMercatorBounds(
+  z: number,
+  x: number,
+  y: number,
+  tileBoundsMap: Record<string, TileMercatorBounds> | undefined,
+  xyLimits: XYLimits
+): TileMercatorBounds {
+  const tileKey = tileToKey([z, x, y])
+  const precomputed = tileBoundsMap?.[tileKey]
+  if (precomputed) return precomputed
 
-  const linearCoords = createLinearTexCoordsFromVertices(region.vertexArr)
-  buffer = gl.createBuffer()!
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
-  gl.bufferData(gl.ARRAY_BUFFER, linearCoords, gl.STATIC_DRAW)
+  const geoBounds = get4326TileGeoBounds(z, x, y, xyLimits)
+  return {
+    x0: lonToMercatorNorm(geoBounds.west),
+    x1: lonToMercatorNorm(geoBounds.east),
+    y0: latToMercatorNorm(geoBounds.north),
+    y1: latToMercatorNorm(geoBounds.south),
+    latMin: geoBounds.south,
+    latMax: geoBounds.north,
+    lonMin: geoBounds.west,
+    lonMax: geoBounds.east,
+  }
+}
 
-  linearBufferCache.set(region, buffer)
-  return buffer
+/**
+ * Compute tile overlap and texture coordinates for EPSG:4326 rendering.
+ * Returns null if the tile doesn't overlap with the mapbox tile bounds.
+ */
+function computeTileBoundsAndTexCoords(
+  zarrBounds: TileMercatorBounds,
+  mapboxTileBounds: { x0: number; y0: number; x1: number; y1: number }
+): TileBoundsAndTexCoords | null {
+  // Compute overlap in Mercator space
+  const overlapX0 = Math.max(zarrBounds.x0, mapboxTileBounds.x0)
+  const overlapX1 = Math.min(zarrBounds.x1, mapboxTileBounds.x1)
+  const overlapY0 = Math.max(zarrBounds.y0, mapboxTileBounds.y0)
+  const overlapY1 = Math.min(zarrBounds.y1, mapboxTileBounds.y1)
+
+  if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
+    return null
+  }
+
+  // Get lat/lon bounds (required for fragment shader reprojection)
+  const lonMin = zarrBounds.lonMin ?? mercatorNormToLon(zarrBounds.x0)
+  const lonMax = zarrBounds.lonMax ?? mercatorNormToLon(zarrBounds.x1)
+  const latMin = zarrBounds.latMin ?? mercatorNormToLat(zarrBounds.y1)
+  const latMax = zarrBounds.latMax ?? mercatorNormToLat(zarrBounds.y0)
+
+  // Compute texture coordinates for X
+  const lonWidth = lonMax - lonMin
+  const overlapWest = mercatorNormToLon(overlapX0)
+  const overlapEast = mercatorNormToLon(overlapX1)
+  const texScaleX = lonWidth > 0 ? (overlapEast - overlapWest) / lonWidth : 1
+  const texOffsetX = lonWidth > 0 ? (overlapWest - lonMin) / lonWidth : 0
+
+  // Y texture coords: shader handles lat→texV mapping via u_latBounds
+  const texScaleY = 1
+  const texOffsetY = 0
+
+  return {
+    overlap: { x0: overlapX0, y0: overlapY0, x1: overlapX1, y1: overlapY1 },
+    latBounds: { min: latMin, max: latMax },
+    texScale: [texScaleX, texScaleY],
+    texOffset: [texOffsetX, texOffsetY],
+  }
 }
 
 // ============================================================================
@@ -117,6 +187,18 @@ function renderRegionsToTile(
   if (regions.length === 0) return true // Still loading
 
   const tileBounds = getMapboxTileBounds(tileId)
+
+  // Convert tile bounds to WGS84 for intersection with wgs84Bounds regions
+  // Tile bounds are in normalized Mercator [0,1], convert to normalized WGS84 [0,1]
+  const tileWgs84Bounds = {
+    lon0: tileBounds.x0, // lon is same in both spaces (just x)
+    lon1: tileBounds.x1,
+    // Mercator Y needs conversion: y0 is north (smaller lat), y1 is south (larger lat)
+    // In normalized WGS84: lat0 is south, lat1 is north
+    lat0: (mercatorNormToLat(tileBounds.y1) + 90) / 180, // south edge
+    lat1: (mercatorNormToLat(tileBounds.y0) + 90) / 180, // north edge
+  }
+
   const tileMatrix = createMapboxTileMatrix(
     tileBounds.x0,
     tileBounds.y0,
@@ -125,10 +207,15 @@ function renderRegionsToTile(
   )
 
   const { colormapTexture, uniforms, customShaderConfig } = context
+
+  // Check if any region uses WGS84 (proj4 datasets or EPSG:4326)
+  const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
+
   const shaderProgram = renderer.getProgram(
     context.shaderData,
     customShaderConfig,
-    true
+    true, // useMapboxGlobe
+    useWgs84
   )
   renderer.gl.useProgram(shaderProgram.program)
   renderer.applyCommonUniforms(
@@ -150,20 +237,33 @@ function renderRegionsToTile(
 
   let needsMoreData = false
   for (const region of regions) {
-    const bounds = region.mercatorBounds
-    if (!boundsIntersect(bounds, tileBounds)) continue
+    // For regions with wgs84Bounds, do intersection in WGS84 space
+    // This avoids the Mercator/WGS84 coordinate mismatch at low zoom
+    let intersects: boolean
+    if (region.wgs84Bounds) {
+      const w = region.wgs84Bounds
+      intersects =
+        w.lon0 < tileWgs84Bounds.lon1 &&
+        w.lon1 > tileWgs84Bounds.lon0 &&
+        w.lat0 < tileWgs84Bounds.lat1 &&
+        w.lat1 > tileWgs84Bounds.lat0
+    } else {
+      intersects = boundsIntersect(region.mercatorBounds, tileBounds)
+    }
+    if (!intersects) continue
 
-    // Get linear texture coordinates buffer (no crop needed - tileMatrix handles clipping)
-    const linearBuffer = getLinearBuffer(renderer.gl, region)
+    // For proj4 datasets: use indexed mesh with wgs84Bounds
+    // For EPSG:4326: use subdivided quad (not indexed) with wgs84Bounds
+    // Both use the mapbox-globe-wgs84 shader to convert WGS84 → Mercator
+    const useIndexedMesh = !!region.useIndexedMesh && !!region.indexBuffer
 
-    // Create renderable region using original bounds
-    // The tileMatrix clips geometry to tile bounds, and texture sampling
-    // is automatically correct through vertex interpolation
     const renderable: RenderableRegion = {
-      mercatorBounds: bounds,
+      mercatorBounds: region.mercatorBounds,
       vertexBuffer: region.vertexBuffer,
-      pixCoordBuffer: linearBuffer,
-      vertexCount: region.vertexArr.length / 2,
+      pixCoordBuffer: region.pixCoordBuffer,
+      vertexCount: useIndexedMesh
+        ? region.vertexCount ?? region.vertexArr.length / 2
+        : region.vertexArr.length / 2,
       texture: region.texture,
       bandData: region.bandData ?? new Map(),
       bandTextures: region.bandTextures ?? new Map(),
@@ -171,7 +271,12 @@ function renderRegionsToTile(
       bandTexturesConfigured: region.bandTexturesConfigured ?? new Set(),
       width: region.width,
       height: region.height,
-      // No texScale/texOffset - identity transform
+      // Include indexed mesh fields for proj4 datasets
+      indexBuffer: useIndexedMesh ? region.indexBuffer : undefined,
+      useIndexedMesh: useIndexedMesh,
+      // Include wgs84Bounds for both proj4 and EPSG:4326 datasets
+      wgs84Bounds: region.wgs84Bounds,
+      latIsAscending: region.latIsAscending,
     }
 
     const rendered = renderRegion(
@@ -216,6 +321,10 @@ function renderTiledToTile(
 /**
  * Render EPSG:4326 tiled data to a globe tile.
  * Handles the complex case of mapping 4326 tiles to Mapbox Mercator tiles.
+ *
+ * IMPORTANT: We use tiledState.visibleTiles (computed by TiledMode from map.getZoom())
+ * rather than computing tiles from tileId.z. Mapbox's tileId.z may be overscaled
+ * and doesn't match the dataset level that TiledMode fetched.
  */
 function render4326TiledToTile(
   renderer: ZarrRenderer,
@@ -225,37 +334,52 @@ function render4326TiledToTile(
   tiledState: NonNullable<ReturnType<NonNullable<ZarrMode['getTiledState']>>>
 ): boolean {
   const { customShaderConfig } = context
+  const { visibleTiles, tileBounds: zarrTileBounds } = tiledState
   const xyLimits = mode.getXYLimits()
   const maxLevelIndex = mode.getMaxLevelIndex()
   const levels = mode.getLevels()
 
-  if (!xyLimits) return true
+  if (!xyLimits || visibleTiles.length === 0) return true
 
-  const tileBounds = getMapboxTileBounds(tileId)
+  // Get the Mapbox tile bounds we need to render into
+  const mapboxTileBounds = getMapboxTileBounds(tileId)
   const tileMatrix = createMapboxTileMatrix(
-    tileBounds.x0,
-    tileBounds.y0,
-    tileBounds.x1,
-    tileBounds.y1
+    mapboxTileBounds.x0,
+    mapboxTileBounds.y0,
+    mapboxTileBounds.x1,
+    mapboxTileBounds.y1
   )
 
-  const mapboxGeoBounds = mercatorTileToGeoBounds(tileId.z, tileId.x, tileId.y)
-  const levelIndex = zoomToLevel(tileId.z, maxLevelIndex)
-  const actualZoom = parseLevelZoom(levels[levelIndex] ?? '', levelIndex)
-  const overlappingZarrTiles = getOverlapping4326Tiles(
-    mapboxGeoBounds,
-    xyLimits,
-    actualZoom
-  )
+  // Filter visibleTiles to those that overlap with the Mapbox tile
+  // Use the pre-computed tileBounds from TiledMode (in Mercator space)
+  const overlappingZarrTiles: TileTuple[] = []
+  for (const zarrTile of visibleTiles) {
+    const zarrKey = tileToKey(zarrTile)
+    const zarrBounds = zarrTileBounds?.[zarrKey]
+    if (!zarrBounds) continue
+
+    // Check overlap in Mercator space
+    if (
+      zarrBounds.x0 < mapboxTileBounds.x1 &&
+      zarrBounds.x1 > mapboxTileBounds.x0 &&
+      zarrBounds.y0 < mapboxTileBounds.y1 &&
+      zarrBounds.y1 > mapboxTileBounds.y0
+    ) {
+      overlappingZarrTiles.push(zarrTile)
+    }
+  }
 
   if (overlappingZarrTiles.length === 0) {
     return false
   }
 
+  // EPSG:4326 tiles use fragment shader reprojection (not wgs84 vertex shader)
+  // The fragment shader inverts Mercator Y to get latitude for texture lookup
   const shaderProgram = renderer.getProgram(
     context.shaderData,
     customShaderConfig,
-    true
+    true, // useMapboxGlobe
+    false // useWgs84 - fragment shader reprojection for EPSG:4326
   )
   renderer.gl.useProgram(shaderProgram.program)
 
@@ -270,7 +394,7 @@ function render4326TiledToTile(
       renderer,
       shaderProgram,
       zarrTile,
-      tileBounds,
+      mapboxTileBounds,
       tileMatrix,
       tiledState,
       context,
@@ -293,14 +417,20 @@ function renderSingle4326Tile(
   renderer: ZarrRenderer,
   shaderProgram: ShaderProgram,
   zarrTile: TileTuple,
-  tileBounds: { x0: number; y0: number; x1: number; y1: number },
+  mapboxTileBounds: { x0: number; y0: number; x1: number; y1: number },
   tileMatrix: Float32Array,
   tiledState: NonNullable<ReturnType<NonNullable<ZarrMode['getTiledState']>>>,
   context: RenderContext,
   xyLimits: XYLimits,
   datasetMaxZoom: number
 ): { rendered: boolean; missing: boolean } {
-  const { tileCache, vertexArr, pixCoordArr, tileSize } = tiledState
+  const {
+    tileCache,
+    vertexArr,
+    pixCoordArr,
+    tileSize,
+    tileBounds: zarrTileBoundsMap,
+  } = tiledState
   const { colormapTexture, uniforms, customShaderConfig } = context
 
   const zarrTileKey = tileToKey(zarrTile)
@@ -339,7 +469,7 @@ function renderSingle4326Tile(
             renderer,
             shaderProgram,
             child,
-            tileBounds,
+            mapboxTileBounds,
             tileMatrix,
             tiledState,
             context,
@@ -356,46 +486,35 @@ function renderSingle4326Tile(
   // Render the tile (either original or parent fallback)
   const [z, tx, ty] = renderTileTuple
   const renderTileKey = tileToKey(renderTileTuple)
-  const zarrGeoBounds = get4326TileGeoBounds(z, tx, ty, xyLimits)
 
-  const zarrMercX0 = lonToMercatorNorm(zarrGeoBounds.west)
-  const zarrMercX1 = lonToMercatorNorm(zarrGeoBounds.east)
-  const zarrMercY0 = latToMercatorNorm(zarrGeoBounds.north)
-  const zarrMercY1 = latToMercatorNorm(zarrGeoBounds.south)
+  // Get or compute bounds for this tile
+  const zarrBounds = getTileMercatorBounds(
+    z,
+    tx,
+    ty,
+    zarrTileBoundsMap,
+    xyLimits
+  )
 
-  const overlapX0 = Math.max(zarrMercX0, tileBounds.x0)
-  const overlapX1 = Math.min(zarrMercX1, tileBounds.x1)
-  const overlapY0 = Math.max(zarrMercY0, tileBounds.y0)
-  const overlapY1 = Math.min(zarrMercY1, tileBounds.y1)
-
-  if (overlapX1 <= overlapX0 || overlapY1 <= overlapY0) {
+  // Compute overlap and texture coordinates
+  const boundsAndTex = computeTileBoundsAndTexCoords(
+    zarrBounds,
+    mapboxTileBounds
+  )
+  if (!boundsAndTex) {
     return { rendered: false, missing }
   }
 
-  const zarrLonWidth = zarrGeoBounds.east - zarrGeoBounds.west
-  const overlapWest = mercatorNormToLon(overlapX0)
-  const overlapEast = mercatorNormToLon(overlapX1)
-  const texScaleX =
-    zarrLonWidth > 0 ? (overlapEast - overlapWest) / zarrLonWidth : 1
-  const texOffsetX =
-    zarrLonWidth > 0 ? (overlapWest - zarrGeoBounds.west) / zarrLonWidth : 0
-
-  // Compute Y texture scale/offset using Mercator coordinates directly
-  // (texture was resampled to Mercator space, so use Mercator bounds)
-  const zarrMercYRange = zarrMercY1 - zarrMercY0
-  const texScaleY =
-    zarrMercYRange > 0 ? (overlapY1 - overlapY0) / zarrMercYRange : 1
-  const texOffsetY =
-    zarrMercYRange > 0 ? (overlapY0 - zarrMercY0) / zarrMercYRange : 0
+  const { overlap, latBounds, texScale, texOffset } = boundsAndTex
 
   const tileBoundsForRender = {
     [renderTileKey]: {
-      x0: overlapX0,
-      y0: overlapY0,
-      x1: overlapX1,
-      y1: overlapY1,
-      latMin: zarrGeoBounds.south,
-      latMax: zarrGeoBounds.north,
+      x0: overlap.x0,
+      y0: overlap.y0,
+      x1: overlap.x1,
+      y1: overlap.y1,
+      latMin: latBounds.min,
+      latMax: latBounds.max,
     },
   }
 
@@ -428,10 +547,11 @@ function renderSingle4326Tile(
     undefined,
     {
       [renderTileKey]: {
-        texScale: [texScaleX, texScaleY],
-        texOffset: [texOffsetX, texOffsetY],
+        texScale,
+        texOffset,
       },
-    }
+    },
+    tiledState.latIsAscending
   )
 
   return { rendered: true, missing }
@@ -453,68 +573,52 @@ function renderChild4326Tile(
       >['tileCache']['get']
     >
   },
-  tileBounds: { x0: number; y0: number; x1: number; y1: number },
+  mapboxTileBounds: { x0: number; y0: number; x1: number; y1: number },
   tileMatrix: Float32Array,
   tiledState: NonNullable<ReturnType<NonNullable<ZarrMode['getTiledState']>>>,
   context: RenderContext,
   xyLimits: XYLimits
 ): boolean {
-  const { tileCache, vertexArr, pixCoordArr, tileSize } = tiledState
+  const {
+    tileCache,
+    vertexArr,
+    pixCoordArr,
+    tileSize,
+    tileBounds: zarrTileBoundsMap,
+  } = tiledState
   const { colormapTexture, uniforms, customShaderConfig } = context
 
   const childTileTuple: TileTuple = [child.childZ, child.childX, child.childY]
   const childTileKey = tileToKey(childTileTuple)
-  const childGeoBounds = get4326TileGeoBounds(
+
+  // Get or compute bounds for this child tile
+  const childBounds = getTileMercatorBounds(
     child.childZ,
     child.childX,
     child.childY,
+    zarrTileBoundsMap,
     xyLimits
   )
 
-  const childMercX0 = lonToMercatorNorm(childGeoBounds.west)
-  const childMercX1 = lonToMercatorNorm(childGeoBounds.east)
-  const childMercY0 = latToMercatorNorm(childGeoBounds.north)
-  const childMercY1 = latToMercatorNorm(childGeoBounds.south)
-
-  const childOverlapX0 = Math.max(childMercX0, tileBounds.x0)
-  const childOverlapX1 = Math.min(childMercX1, tileBounds.x1)
-  const childOverlapY0 = Math.max(childMercY0, tileBounds.y0)
-  const childOverlapY1 = Math.min(childMercY1, tileBounds.y1)
-
-  if (childOverlapX1 <= childOverlapX0 || childOverlapY1 <= childOverlapY0) {
+  // Compute overlap and texture coordinates
+  const boundsAndTex = computeTileBoundsAndTexCoords(
+    childBounds,
+    mapboxTileBounds
+  )
+  if (!boundsAndTex) {
     return false
   }
 
-  const childLonWidth = childGeoBounds.east - childGeoBounds.west
-  const childOverlapWest = mercatorNormToLon(childOverlapX0)
-  const childOverlapEast = mercatorNormToLon(childOverlapX1)
-  const childTexScaleX =
-    childLonWidth > 0
-      ? (childOverlapEast - childOverlapWest) / childLonWidth
-      : 1
-  const childTexOffsetX =
-    childLonWidth > 0
-      ? (childOverlapWest - childGeoBounds.west) / childLonWidth
-      : 0
-
-  // Compute Y texture scale/offset using Mercator coordinates directly
-  // (texture was resampled to Mercator space, so use Mercator bounds)
-  const childMercYRange = childMercY1 - childMercY0
-  const childTexScaleY =
-    childMercYRange > 0
-      ? (childOverlapY1 - childOverlapY0) / childMercYRange
-      : 1
-  const childTexOffsetY =
-    childMercYRange > 0 ? (childOverlapY0 - childMercY0) / childMercYRange : 0
+  const { overlap, latBounds, texScale, texOffset } = boundsAndTex
 
   const childTileBoundsForRender = {
     [childTileKey]: {
-      x0: childOverlapX0,
-      y0: childOverlapY0,
-      x1: childOverlapX1,
-      y1: childOverlapY1,
-      latMin: childGeoBounds.south,
-      latMax: childGeoBounds.north,
+      x0: overlap.x0,
+      y0: overlap.y0,
+      x1: overlap.x1,
+      y1: overlap.y1,
+      latMin: latBounds.min,
+      latMax: latBounds.max,
     },
   }
 
@@ -547,10 +651,11 @@ function renderChild4326Tile(
     undefined,
     {
       [childTileKey]: {
-        texScale: [childTexScaleX, childTexScaleY],
-        texOffset: [childTexOffsetX, childTexOffsetY],
+        texScale,
+        texOffset,
       },
-    }
+    },
+    tiledState.latIsAscending
   )
 
   return true

@@ -237,24 +237,3 @@ export function createSubdividedQuad(subdivisions: number): {
     texCoordArr: new Float32Array(texCoords),
   }
 }
-
-/**
- * Create linear texture coordinates from vertex positions.
- * Used as a starting point for CPU-based texture coordinate warping.
- * Formula: u = (x+1)/2, v = (1-y)/2
- *
- * @param vertexArr - Vertex positions in clip space [-1,1]
- * @returns Texture coordinates in [0,1] range
- */
-export function createLinearTexCoordsFromVertices(
-  vertexArr: Float32Array
-): Float32Array {
-  const linearCoords = new Float32Array(vertexArr.length)
-  for (let i = 0; i < vertexArr.length; i += 2) {
-    const x = vertexArr[i]
-    const y = vertexArr[i + 1]
-    linearCoords[i] = (x + 1) / 2 // u
-    linearCoords[i + 1] = (1 - y) / 2 // v
-  }
-  return linearCoords
-}

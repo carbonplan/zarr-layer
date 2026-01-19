@@ -66,9 +66,14 @@ export class ZarrRenderer {
   getProgram(
     shaderData?: ShaderData,
     customShaderConfig?: CustomShaderConfig,
-    useMapboxGlobe: boolean = false
+    useMapboxGlobe: boolean = false,
+    useWgs84: boolean = false
   ): ShaderProgram {
-    const projectionMode = resolveProjectionMode(shaderData, useMapboxGlobe)
+    const projectionMode = resolveProjectionMode(
+      shaderData,
+      useMapboxGlobe,
+      useWgs84
+    )
     const config = customShaderConfig || this.customShaderConfig
     const variantName = makeShaderVariantKey({
       projectionMode,
@@ -181,7 +186,8 @@ export class ZarrRenderer {
     tileTexOverrides?: Record<
       string,
       { texScale: [number, number]; texOffset: [number, number] }
-    >
+    >,
+    latIsAscending: boolean = true
   ): void {
     renderTiles(
       this.gl,
@@ -196,7 +202,8 @@ export class ZarrRenderer {
       customShaderConfig,
       isGlobeTileRender,
       datasetMaxZoom,
-      tileTexOverrides
+      tileTexOverrides,
+      latIsAscending
     )
   }
 

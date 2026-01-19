@@ -186,7 +186,7 @@ export class TiledMode implements ZarrMode {
       this.currentLevel = visibleInfo.pyramidLevel
     }
 
-    // Pass bounds to tile cache for CPU resampling (EPSG:4326 only)
+    // Pass bounds to tile cache for fragment shader reprojection (EPSG:4326 only)
     for (const [tileKey, mercBounds] of Object.entries(this.tileBounds)) {
       const fullBounds = toFullBounds(mercBounds)
       if (fullBounds) {
@@ -246,10 +246,13 @@ export class TiledMode implements ZarrMode {
     }
 
     const useMapboxGlobe = !!context.mapboxGlobe
+    // EPSG:4326 uses fragment shader reprojection (not wgs84 vertex shader)
+    // The fragment shader inverts Mercator Y to get latitude for texture lookup
     const shaderProgram = renderer.getProgram(
       context.shaderData,
       context.customShaderConfig,
-      useMapboxGlobe
+      useMapboxGlobe,
+      false // useWgs84 - fragment shader reprojection for EPSG:4326
     )
 
     renderer.gl.useProgram(shaderProgram.program)
@@ -280,7 +283,9 @@ export class TiledMode implements ZarrMode {
       Object.keys(this.tileBounds).length > 0 ? this.tileBounds : undefined,
       context.customShaderConfig,
       false,
-      datasetMaxZoom
+      datasetMaxZoom,
+      undefined, // tileTexOverrides
+      this.zarrStore.latIsAscending
     )
   }
 
@@ -381,7 +386,9 @@ export class TiledMode implements ZarrMode {
   }
 
   private updateGeometryForProjection(isGlobe: boolean) {
-    // Globe projections need subdivisions for the sphere curvature.
+    // Subdivisions are only needed for globe projections (sphere curvature)
+    // EPSG:4326 in Mercator view uses fragment shader reprojection (per-pixel)
+    // so no mesh subdivisions are needed
     const targetSubdivisions = isGlobe ? TILE_SUBDIVISIONS : 1
 
     if (this.currentSubdivisions === targetSubdivisions) return

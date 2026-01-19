@@ -1,8 +1,8 @@
 import carbonplan4d from './carbonplan-4d'
 import hrrr from './hrrr'
-import usgsdem from './usgs-dem'
-
 import hurricane from './hurricane'
+import polar from './polar'
+import usgsdem from './usgs-dem'
 import sentinel2 from './sentinel-2'
 import { createSimpleDataset } from './simple'
 import { createTimeDataset } from './time'
@@ -50,10 +50,12 @@ export const DATASETS: Dataset<any>[] = [
     bounds: [-180, -90, 180, 90],
     info: 'Delta FG CO2 (single image, global)',
     sourceInfo: 'v2 single image (global)',
+    latIsAscending: true,
   }),
   usgsdem,
   untiled4326,
   sentinel2,
+  polar,
   createSimpleDataset({
     id: 'Burn Probability over CONUS',
     source:

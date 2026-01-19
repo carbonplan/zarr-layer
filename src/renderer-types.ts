@@ -18,4 +18,10 @@ export interface MapboxGlobeParams {
   transition: number
 }
 
-export type ProjectionMode = 'mercator' | 'maplibre-globe' | 'mapbox-globe'
+export type ProjectionMode =
+  | 'mercator'
+  | 'wgs84'
+  | 'wgs84-globe'
+  | 'maplibre-globe'
+  | 'mapbox-globe'
+  | 'mapbox-globe-wgs84'

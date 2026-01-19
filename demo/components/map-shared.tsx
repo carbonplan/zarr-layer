@@ -28,7 +28,11 @@ export interface MapInstance {
   addLayer(layer: ZarrLayer, beforeId?: string): unknown
   setProjection(projection: any): unknown
   resize(): void
-  getBounds(): { toArray(): [number, number][]; getWest(): number; getEast(): number }
+  getBounds(): {
+    toArray(): [number, number][]
+    getWest(): number
+    getEast(): number
+  }
   getZoom(): number
   flyTo(options: { center: [number, number]; zoom: number }): void
   getStyle(): { layers?: Array<{ id: string; type: string }> }
@@ -73,7 +77,7 @@ const mapLibreTheme = {
 export interface MapConfig {
   createMap: (
     container: HTMLDivElement,
-    globeProjection: boolean,
+    globeProjection: boolean
   ) => MapInstance
   setProjection: (map: MapInstance, globeProjection: boolean) => void
   getLayerBeforeId: (map: MapInstance) => string | undefined
@@ -107,7 +111,7 @@ const mapLibreConfig: MapConfig = {
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
     ;(map as maplibregl.Map).setProjection(
-      globeProjection ? { type: 'globe' } : { type: 'mercator' },
+      globeProjection ? { type: 'globe' } : { type: 'mercator' }
     )
   },
   getLayerBeforeId: () => 'landuse_pedestrian',
@@ -170,7 +174,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
 
   const layerConfig: LayerProps = useMemo(
     () => datasetModule.buildLayerProps(datasetState as any),
-    [datasetModule, datasetState],
+    [datasetModule, datasetState]
   )
 
   const isCarbonplan4d = datasetModule.id === 'carbonplan_4d'
