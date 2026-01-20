@@ -12,7 +12,7 @@ import {
   normalizeSelector,
 } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
-import { maplibreFragmentShaderSource, type ShaderData } from './shaders'
+import { maplibreFragmentShaderSource } from './shaders'
 import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
@@ -117,15 +117,25 @@ export class ZarrLayer {
   private throttleMs: number
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
+  private lastIsGlobe: boolean | null = null
 
   get fillValue(): number | null {
     return this._fillValue
   }
 
-  private isGlobeProjection(shaderData?: ShaderData): boolean {
-    if (shaderData?.vertexShaderPrelude) return true
+  private isGlobeProjection(): boolean {
     const projection = this.map?.getProjection ? this.map.getProjection() : null
     return checkGlobeProjection(projection)
+  }
+
+  /** Check for projection changes and notify mode. Returns current isGlobe state. */
+  private syncProjectionState(): boolean {
+    const isGlobe = this.isGlobeProjection()
+    if (this.lastIsGlobe !== null && this.lastIsGlobe !== isGlobe) {
+      this.mode?.onProjectionChange(isGlobe)
+    }
+    this.lastIsGlobe = isGlobe
+    return isGlobe
   }
 
   constructor({
@@ -370,6 +380,7 @@ export class ZarrLayer {
       await this.initializeMode()
 
       const isGlobe = this.isGlobeProjection()
+      this.lastIsGlobe = isGlobe
       this.mode?.onProjectionChange(isGlobe)
 
       this.mode?.update(this.map, this.gl!)
@@ -548,6 +559,7 @@ export class ZarrLayer {
     if (this.isRemoved || !this.gl || !this.mode || !this.map) return
     if (!this.isZoomInRange()) return
 
+    this.syncProjectionState()
     this.mode.update(this.map, this.gl)
   }
 
@@ -582,6 +594,12 @@ export class ZarrLayer {
     )
 
     if (!projectionParams.matrix) {
+      return
+    }
+
+    // For MapLibre, shaderData is required (provides projectTile prelude)
+    // Mapbox doesn't need shaderData - it uses its own globe shader
+    if (!projectionParams.mapbox && !projectionParams.shaderData) {
       return
     }
 
@@ -626,6 +644,7 @@ export class ZarrLayer {
       return
     }
 
+    const isGlobe = this.syncProjectionState()
     this.mode.update(this.map, this.gl)
 
     const colormapTexture = this.colormap.ensureTexture(this.gl)
@@ -643,6 +662,7 @@ export class ZarrLayer {
       colormapTexture,
       worldOffsets: [0],
       customShaderConfig: this.customShaderConfig || undefined,
+      isGlobe,
     }
 
     this.tileNeedsRender =
