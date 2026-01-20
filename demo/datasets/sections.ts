@@ -13,7 +13,13 @@ export const SELECTOR_SECTIONS: SelectorSection[] = [
     datasetIds: [
       'hrrr_weather',
       'hurricane_florence',
+      'hurricane_florence_lcc',
+      'hurricane_florence_mercator',
       'polar_antarctic',
+      'antarctic_era5',
+      'antarctic_full',
+      'single_chunk_polar',
+      'narrow_dateline',
       'delta_FG_CO2',
     ],
   },
