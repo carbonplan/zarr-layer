@@ -36,6 +36,7 @@ import {
   resolveProjectionParams,
   isGlobeProjection as checkGlobeProjection,
 } from './map-utils'
+import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
 import type { QueryGeometry, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
 
@@ -597,11 +598,16 @@ export class ZarrLayer {
       return
     }
 
-    // For MapLibre, shaderData is required (provides projectTile prelude)
-    // Mapbox doesn't need shaderData - it uses its own globe shader
-    if (!projectionParams.mapbox && !projectionParams.shaderData) {
-      return
-    }
+    // Legacy MapLibre (no shaderData): fall back to mapbox-style shader path
+    // using identity globe-to-merc matrix + transition=1 (pure mercator).
+    const legacyMapboxFallback =
+      !projectionParams.mapbox && !projectionParams.shaderData
+        ? {
+            projection: { name: 'mercator' },
+            globeToMercatorMatrix: MAPBOX_IDENTITY_MATRIX,
+            transition: 1,
+          }
+        : undefined
 
     const isGlobe = this.isGlobeProjection()
     const worldOffsets = computeWorldOffsets(this.map, isGlobe)
@@ -622,7 +628,7 @@ export class ZarrLayer {
       customShaderConfig: this.customShaderConfig || undefined,
       shaderData: projectionParams.shaderData,
       projectionData: projectionParams.projectionData,
-      mapbox: projectionParams.mapbox,
+      mapbox: projectionParams.mapbox ?? legacyMapboxFallback,
     }
 
     this.mode.render(this.renderer, context)
