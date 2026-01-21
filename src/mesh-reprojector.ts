@@ -17,7 +17,25 @@ import {
 import { DEFAULT_MESH_MAX_ERROR } from './constants'
 
 // ============================================================================
-// Shared helpers
+// Module constants
+// ============================================================================
+
+/** Maximum vertices for adaptive mesh refinement (prevents hanging on polar data) */
+const MAX_ADAPTIVE_VERTICES = 10000
+
+/** Maximum iterations for adaptive mesh refinement */
+const MAX_ITERATIONS = 1000
+
+/**
+ * Longitude coverage threshold (degrees) for polar data detection.
+ * Polar projections (e.g., EPSG:3031) span most longitudes when transformed
+ * to WGS84. If coverage exceeds this threshold, skip antimeridian detection
+ * to avoid false positives from projection singularities.
+ */
+const POLAR_LON_COVERAGE_THRESHOLD = 270
+
+// ============================================================================
+// Interfaces
 // ============================================================================
 
 interface ReprojectorConfig {
@@ -26,6 +44,37 @@ interface ReprojectorConfig {
   height: number
   latIsAscending: boolean
   transformer: ProjectionTransformer
+}
+
+export interface AdaptiveMeshResult {
+  positions: Float32Array // Normalized 4326 coords [-1,1] for shader
+  texCoords: Float32Array // UVs for texture sampling
+  indices: Uint32Array // Triangle indices
+  wgs84Bounds: Wgs84Bounds
+}
+
+export interface HybridMeshOptions {
+  geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
+  width: number
+  height: number
+  subdivisions: number
+  transformer: ProjectionTransformer
+  latIsAscending: boolean
+  maxError?: number
+}
+
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
+/**
+ * Normalize longitude to [-180, 180) range using true modulo wrapping.
+ * Handles any input range (e.g., 540° → -180°, -540° → 180°).
+ */
+function normalizeLon180(lon: number): number {
+  if (!isFinite(lon)) return lon
+  // Shift to [0, 360) then back to [-180, 180)
+  return ((((lon + 180) % 360) + 360) % 360) - 180
 }
 
 /**
@@ -131,8 +180,7 @@ function normalizeToLocalCoords(
 
     // Normalize longitude to [-180, 180) range first
     // This handles the case where proj4 outputs 180° which equals -180°
-    if (lon >= 180) lon -= 360
-    if (lon < -180) lon += 360
+    lon = normalizeLon180(lon)
 
     // For antimeridian crossing, shift negative longitudes up by 360
     // so they're in a continuous range with positive longitudes
@@ -148,12 +196,20 @@ function normalizeToLocalCoords(
   return normalized
 }
 
+// ============================================================================
+// Antimeridian handling
+// ============================================================================
+
+// --- Detection ---
+
 /**
  * Check if an edge crosses the antimeridian (spans > 180° longitude).
  */
 function edgeCrossesAntimeridian(lon1: number, lon2: number): boolean {
   return Math.abs(lon1 - lon2) > 180
 }
+
+// --- Triangle splitting ---
 
 /**
  * Compute the intersection point of an edge with the antimeridian.
@@ -193,76 +249,81 @@ interface SplitResult {
 
 /**
  * Process triangles that span the antimeridian by splitting them.
- * Instead of filtering out these triangles, we split them at the antimeridian
- * to create triangles that render correctly.
- *
- * For triangles that don't cross the antimeridian, they're kept as-is.
- * For triangles that do cross, they're split into smaller triangles.
+ * Filters out triangles with non-finite coordinates.
+ * When canCrossAntimeridian is false, skips crossing checks for better performance.
  */
 function splitAntimeridianTriangles(
   wgs84Positions: Float64Array,
   texCoords: Float64Array,
-  triangles: ArrayLike<number>
+  triangles: ArrayLike<number>,
+  canCrossAntimeridian: boolean
 ): SplitResult {
-  const newPositions: number[] = Array.from(wgs84Positions)
-  const newTexCoords: number[] = Array.from(texCoords)
-  const newIndices: number[] = []
+  const numVerts = wgs84Positions.length / 2
 
-  // Helper to add a new vertex and return its index
-  function addVertex(lon: number, lat: number, u: number, v: number): number {
-    const idx = newPositions.length / 2
-    newPositions.push(lon, lat)
-    newTexCoords.push(u, v)
-    return idx
+  // Pre-compute which vertices are valid (have finite coords)
+  const validVertex = new Uint8Array(numVerts)
+  for (let i = 0; i < numVerts; i++) {
+    const lon = wgs84Positions[i * 2]
+    const lat = wgs84Positions[i * 2 + 1]
+    validVertex[i] = isFinite(lon) && isFinite(lat) ? 1 : 0
   }
 
-  // Helper to get vertex data
-  function getVertex(i: number): {
-    lon: number
-    lat: number
-    u: number
-    v: number
-  } {
+  // Fast path: no crossing possible, just filter invalid triangles
+  if (!canCrossAntimeridian) {
+    const newIndices: number[] = []
+    for (let i = 0; i < triangles.length; i += 3) {
+      const i0 = triangles[i]
+      const i1 = triangles[i + 1]
+      const i2 = triangles[i + 2]
+      if (validVertex[i0] && validVertex[i1] && validVertex[i2]) {
+        newIndices.push(i0, i1, i2)
+      }
+    }
     return {
-      lon: wgs84Positions[i * 2],
-      lat: wgs84Positions[i * 2 + 1],
-      u: texCoords[i * 2],
-      v: texCoords[i * 2 + 1],
+      positions: wgs84Positions,
+      texCoords,
+      indices: new Uint32Array(newIndices),
     }
   }
 
-  // Normalize longitude to [-180, 180)
-  function normLon(lon: number): number {
-    if (lon >= 180) return lon - 360
-    if (lon < -180) return lon + 360
-    return lon
-  }
+  // Estimate capacity: most triangles won't split
+  const newPositions: number[] = new Array(wgs84Positions.length)
+  for (let i = 0; i < wgs84Positions.length; i++)
+    newPositions[i] = wgs84Positions[i]
+  const newTexCoords: number[] = new Array(texCoords.length)
+  for (let i = 0; i < texCoords.length; i++) newTexCoords[i] = texCoords[i]
+  const newIndices: number[] = []
 
   for (let i = 0; i < triangles.length; i += 3) {
     const i0 = triangles[i]
     const i1 = triangles[i + 1]
     const i2 = triangles[i + 2]
 
-    const v0 = getVertex(i0)
-    const v1 = getVertex(i1)
-    const v2 = getVertex(i2)
-
-    // Skip triangles with non-finite coordinates
-    if (
-      !isFinite(v0.lon) ||
-      !isFinite(v0.lat) ||
-      !isFinite(v1.lon) ||
-      !isFinite(v1.lat) ||
-      !isFinite(v2.lon) ||
-      !isFinite(v2.lat)
-    ) {
+    // Skip triangles with invalid vertices
+    if (!validVertex[i0] || !validVertex[i1] || !validVertex[i2]) {
       continue
     }
 
+    // Inline vertex access (avoid object allocation)
+    const lon0raw = wgs84Positions[i0 * 2]
+    const lat0 = wgs84Positions[i0 * 2 + 1]
+    const u0 = texCoords[i0 * 2]
+    const v0 = texCoords[i0 * 2 + 1]
+
+    const lon1raw = wgs84Positions[i1 * 2]
+    const lat1 = wgs84Positions[i1 * 2 + 1]
+    const u1 = texCoords[i1 * 2]
+    const v1 = texCoords[i1 * 2 + 1]
+
+    const lon2raw = wgs84Positions[i2 * 2]
+    const lat2 = wgs84Positions[i2 * 2 + 1]
+    const u2 = texCoords[i2 * 2]
+    const v2 = texCoords[i2 * 2 + 1]
+
     // Normalize longitudes
-    const lon0 = normLon(v0.lon)
-    const lon1 = normLon(v1.lon)
-    const lon2 = normLon(v2.lon)
+    const lon0 = normalizeLon180(lon0raw)
+    const lon1 = normalizeLon180(lon1raw)
+    const lon2 = normalizeLon180(lon2raw)
 
     // Check which edges cross the antimeridian
     const cross01 = edgeCrossesAntimeridian(lon0, lon1)
@@ -271,95 +332,83 @@ function splitAntimeridianTriangles(
     const crossCount = (cross01 ? 1 : 0) + (cross12 ? 1 : 0) + (cross20 ? 1 : 0)
 
     if (crossCount === 0) {
-      // Triangle doesn't cross antimeridian - keep as-is
       newIndices.push(i0, i1, i2)
     } else if (crossCount === 2) {
-      // Two edges cross - one vertex is on the opposite side
-      // Find which vertex is alone on its side
-      let alone: number, other1: number, other2: number
-      let vAlone: typeof v0, vOther1: typeof v0, vOther2: typeof v0
-      let lonAlone: number, lonOther1: number, lonOther2: number
+      // Determine vertex order: [alone, other1, other2]
+      const vertexOrder = !cross01
+        ? [2, 0, 1]
+        : !cross12
+        ? [0, 1, 2]
+        : [1, 2, 0]
+      const [ai, o1i, o2i] = vertexOrder
 
-      if (!cross01) {
-        // Edge 0-1 doesn't cross, so vertex 2 is alone
-        alone = i2
-        other1 = i0
-        other2 = i1
-        vAlone = v2
-        vOther1 = v0
-        vOther2 = v1
-        lonAlone = lon2
-        lonOther1 = lon0
-        lonOther2 = lon1
-      } else if (!cross12) {
-        // Edge 1-2 doesn't cross, so vertex 0 is alone
-        alone = i0
-        other1 = i1
-        other2 = i2
-        vAlone = v0
-        vOther1 = v1
-        vOther2 = v2
-        lonAlone = lon0
-        lonOther1 = lon1
-        lonOther2 = lon2
-      } else {
-        // Edge 2-0 doesn't cross, so vertex 1 is alone
-        alone = i1
-        other1 = i2
-        other2 = i0
-        vAlone = v1
-        vOther1 = v2
-        vOther2 = v0
-        lonAlone = lon1
-        lonOther1 = lon2
-        lonOther2 = lon0
-      }
+      const idxArr = [i0, i1, i2]
+      const lonArr = [lon0, lon1, lon2]
+      const latArr = [lat0, lat1, lat2]
+      const uArr = [u0, u1, u2]
+      const vArr = [v0, v1, v2]
 
-      // Compute intersection points on the two crossing edges
+      const alone = idxArr[ai]
+      const other1 = idxArr[o1i]
+      const other2 = idxArr[o2i]
+      const lonAlone = lonArr[ai]
+      const latAlone = latArr[ai]
+      const uAlone = uArr[ai]
+      const vAlone = vArr[ai]
+      const lonOther1 = lonArr[o1i]
+      const latOther1 = latArr[o1i]
+      const uOther1 = uArr[o1i]
+      const vOther1 = vArr[o1i]
+      const lonOther2 = lonArr[o2i]
+      const latOther2 = latArr[o2i]
+      const uOther2 = uArr[o2i]
+      const vOther2 = vArr[o2i]
+
+      // Compute intersection points
       const int1 = computeAntimeridianIntersection(
         lonAlone,
-        vAlone.lat,
+        latAlone,
         lonOther1,
-        vOther1.lat
+        latOther1
       )
       const int2 = computeAntimeridianIntersection(
         lonAlone,
-        vAlone.lat,
+        latAlone,
         lonOther2,
-        vOther2.lat
+        latOther2
       )
 
       // Interpolate texture coordinates
-      const u1 = vAlone.u + int1.t * (vOther1.u - vAlone.u)
-      const v1Tex = vAlone.v + int1.t * (vOther1.v - vAlone.v)
-      const u2 = vAlone.u + int2.t * (vOther2.u - vAlone.u)
-      const v2Tex = vAlone.v + int2.t * (vOther2.v - vAlone.v)
+      const intU1 = uAlone + int1.t * (uOther1 - uAlone)
+      const intV1 = vAlone + int1.t * (vOther1 - vAlone)
+      const intU2 = uAlone + int2.t * (uOther2 - uAlone)
+      const intV2 = vAlone + int2.t * (vOther2 - vAlone)
 
       // Determine which side the alone vertex is on
       const aloneOnEast = lonAlone > 0
-
-      // Create new vertices at the intersection points
-      // Use 179.9999 and -179.9999 instead of exactly ±180 to avoid normalization
-      // issues where 180° gets converted to -180° (same geographic point but wrong
-      // normalized position). This ensures east-side triangles have their boundary
-      // at the far right (x≈1) and west-side triangles at the far left (x≈-1).
       const lonAloneSide = aloneOnEast ? 179.9999 : -179.9999
       const lonOtherSide = aloneOnEast ? -179.9999 : 179.9999
 
-      const intAlone1 = addVertex(lonAloneSide, int1.lat, u1, v1Tex)
-      const intAlone2 = addVertex(lonAloneSide, int2.lat, u2, v2Tex)
-      const intOther1 = addVertex(lonOtherSide, int1.lat, u1, v1Tex)
-      const intOther2 = addVertex(lonOtherSide, int2.lat, u2, v2Tex)
+      // Add new vertices at intersection points
+      const baseIdx = newPositions.length / 2
+      newPositions.push(lonAloneSide, int1.lat, lonAloneSide, int2.lat)
+      newPositions.push(lonOtherSide, int1.lat, lonOtherSide, int2.lat)
+      newTexCoords.push(intU1, intV1, intU2, intV2)
+      newTexCoords.push(intU1, intV1, intU2, intV2)
 
-      // Create triangle on the "alone" side
+      const intAlone1 = baseIdx
+      const intAlone2 = baseIdx + 1
+      const intOther1 = baseIdx + 2
+      const intOther2 = baseIdx + 3
+
+      // Create triangles
       newIndices.push(alone, intAlone1, intAlone2)
-
-      // Create triangles on the "other" side (quadrilateral split into 2 triangles)
       newIndices.push(intOther1, other1, other2)
       newIndices.push(intOther1, other2, intOther2)
+    } else {
+      // crossCount === 1 or 3: preserve triangle to avoid holes
+      newIndices.push(i0, i1, i2)
     }
-    // crossCount === 1 or 3 are degenerate cases (shouldn't happen with well-formed triangles)
-    // We skip them
   }
 
   return {
@@ -372,23 +421,6 @@ function splitAntimeridianTriangles(
 // ============================================================================
 // Public API
 // ============================================================================
-
-export interface AdaptiveMeshResult {
-  positions: Float32Array // Normalized 4326 coords [-1,1] for shader
-  texCoords: Float32Array // UVs for texture sampling
-  indices: Uint32Array // Triangle indices
-  wgs84Bounds: Wgs84Bounds
-}
-
-export interface HybridMeshOptions {
-  geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
-  width: number
-  height: number
-  subdivisions: number
-  transformer: ProjectionTransformer
-  latIsAscending: boolean
-  maxError?: number
-}
 
 /**
  * Create a hybrid mesh that combines adaptive refinement with uniform grid vertices.
@@ -424,9 +456,6 @@ export function createHybridMesh(
   })
 
   // Run adaptive refinement with vertex limit to prevent hanging on polar data.
-  const MAX_ADAPTIVE_VERTICES = 10000
-  const MAX_ITERATIONS = 1000
-
   for (
     let i = 0;
     i < MAX_ITERATIONS && reprojector.getMaxError() > maxError;
@@ -465,11 +494,10 @@ export function createHybridMesh(
   const delaunay = new Delaunator(mergedUVs)
   const triangles = delaunay.triangles
 
-  // Transform all UVs to WGS84 and compute bounds
+  // Transform all UVs to WGS84, collect normalized lons, and track lat bounds
   const numVerts = mergedUVs.length / 2
   const wgs84Positions = new Float64Array(numVerts * 2)
-  let minLon = Infinity,
-    maxLon = -Infinity
+  const lons: number[] = []
   let minLat = Infinity,
     maxLat = -Infinity
 
@@ -490,57 +518,50 @@ export function createHybridMesh(
     wgs84Positions[i * 2 + 1] = lat
 
     if (isFinite(lon) && isFinite(lat)) {
-      minLon = Math.min(minLon, lon)
-      maxLon = Math.max(maxLon, lon)
+      lons.push(normalizeLon180(lon))
       minLat = Math.min(minLat, lat)
       maxLat = Math.max(maxLat, lat)
     }
   }
 
   // Fallback if no valid coords found
-  if (!isFinite(minLon)) minLon = -180
-  if (!isFinite(maxLon)) maxLon = 180
   if (!isFinite(minLat)) minLat = -90
   if (!isFinite(maxLat)) maxLat = 90
 
-  // Detect antimeridian crossing using gap analysis
-  const lons: number[] = []
-  for (let i = 0; i < numVerts; i++) {
-    const lon = wgs84Positions[i * 2]
-    if (isFinite(lon)) lons.push(lon)
-  }
-
-  let crossesAntimeridian = false
+  // Detect antimeridian crossing and compute lon bounds from sorted list
+  let minLon = -180,
+    maxLon = 180,
+    crossesAntimeridian = false
   if (lons.length > 0) {
     lons.sort((a, b) => a - b)
 
-    // Find the largest gap between consecutive longitudes
-    let maxGap = 0
-    let gapEndIndex = 0
-    for (let i = 0; i < lons.length - 1; i++) {
-      const gap = lons[i + 1] - lons[i]
-      if (gap > maxGap) {
-        maxGap = gap
-        gapEndIndex = i + 1
+    // Set bounds from normalized sorted list
+    minLon = lons[0]
+    maxLon = lons[lons.length - 1]
+    const lonCoverage = maxLon - minLon
+
+    // Skip crossing detection if no coverage (crossesAntimeridian stays false)
+    if (lonCoverage > 0) {
+      // Find largest internal gap
+      let maxGap = 0
+      let gapEndIndex = 0
+      for (let i = 0; i < lons.length - 1; i++) {
+        const gap = lons[i + 1] - lons[i]
+        if (gap > maxGap) {
+          maxGap = gap
+          gapEndIndex = i + 1
+        }
       }
-    }
 
-    // Check the wrap-around gap (from max lon back to min lon)
-    const wrapGap = lons[0] + 360 - lons[lons.length - 1]
+      // Wrap-around gap
+      const wrapGap = lons[0] + 360 - lons[lons.length - 1]
 
-    // Total longitude coverage from simple min/max
-    const lonCoverage = lons[lons.length - 1] - lons[0]
-
-    // If wrap gap is smaller than the largest internal gap,
-    // data crosses the antimeridian (the "gap" is in the data, not at ±180°)
-    // EXCEPTION: If coverage is wide (>270°), this is likely polar data
-    // spanning most longitudes, not antimeridian crossing. The gaps are from
-    // projection singularities, not actual data boundaries.
-    if (wrapGap < maxGap && lonCoverage < 270) {
-      crossesAntimeridian = true
-      // Recompute bounds: minLon is after the gap, maxLon is before it
-      minLon = lons[gapEndIndex]
-      maxLon = lons[gapEndIndex - 1]
+      // Crossing if wrap gap < max internal gap (and not polar data)
+      if (wrapGap < maxGap && lonCoverage < POLAR_LON_COVERAGE_THRESHOLD) {
+        crossesAntimeridian = true
+        minLon = lons[gapEndIndex]
+        maxLon = lons[gapEndIndex - 1]
+      }
     }
   }
 
@@ -552,12 +573,15 @@ export function createHybridMesh(
     }
   }
 
-  // Split triangles at antimeridian (also filters polar triangles)
+  // Split triangles at antimeridian (also filters invalid triangles)
+  // If lon range < 180°, no edge can cross antimeridian, so skip crossing checks
+  const canCrossAntimeridian = crossesAntimeridian || maxLon - minLon >= 180
   const texCoords = new Float64Array(mergedUVs)
   const splitResult = splitAntimeridianTriangles(
     wgs84Positions,
     texCoords,
-    triangles
+    triangles,
+    canCrossAntimeridian
   )
 
   // Normalize with antimeridian awareness
