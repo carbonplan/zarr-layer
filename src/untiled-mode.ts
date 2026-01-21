@@ -1543,7 +1543,7 @@ export class UntiledMode implements ZarrMode {
       // - EPSG:4326 datasets: subdivided quad + wgs84 shader (4326→Mercator)
       // No CPU resampling needed - mercatorBounds computed in createRegionGeometry
       const needsProj4MercBounds =
-        this.proj4def && this.cached4326Transformer && this.crs !== 'EPSG:4326'
+        this.proj4def && this.cachedMercatorTransformer
 
       if (needsProj4MercBounds && this.xyLimits && !region.mercatorBounds) {
         const levelMeta: LevelMeta = {
