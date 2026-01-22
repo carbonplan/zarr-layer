@@ -8,6 +8,7 @@ import {
   Colorbar,
   Badge,
   Button,
+  Input,
   // @ts-expect-error - carbonplan components types not available
 } from '@carbonplan/components'
 // @ts-expect-error - carbonplan colormaps types not available
@@ -331,23 +332,51 @@ const Controls = () => {
     [regionResult, fillValue]
   )
 
+  const [climInputs, setClimInputs] = useState<[string, string]>([
+    String(clim[0]),
+    String(clim[1]),
+  ])
+
+  useEffect(() => {
+    setClimInputs([String(clim[0]), String(clim[1])])
+  }, [clim])
+
+  const commitClimInput = (index: 0 | 1, value?: string) => {
+    const val = parseFloat(value ?? climInputs[index])
+    if (Number.isFinite(val)) {
+      handleClimChange((prev) =>
+        index === 0 ? [val, prev[1]] : [prev[0], val]
+      )
+    } else {
+      // Reset to current clim if invalid
+      setClimInputs([String(clim[0]), String(clim[1])])
+    }
+  }
+
+  const handleClimInputChange = (index: 0 | 1, newValue: string) => {
+    const newNum = parseFloat(newValue)
+    const oldNum = clim[index]
+    // Detect arrow click: valid number that differs by ~1 (step)
+    const isArrowClick =
+      Number.isFinite(newNum) && Math.abs(newNum - oldNum) <= 1.01
+
+    if (isArrowClick) {
+      commitClimInput(index, newValue)
+    } else {
+      setClimInputs(
+        index === 0 ? [newValue, climInputs[1]] : [climInputs[0], newValue]
+      )
+    }
+  }
+
   const handleClimChange = (
     next: (prev: [number, number]) => [number, number]
   ) => {
-    const base = datasetModule.clim
     const resolved = next(clim)
-    if (!Array.isArray(resolved) || resolved.length < 2) return setClim(base)
 
-    const [rawLo, rawHi] = resolved
-    if (!Number.isFinite(rawLo) || !Number.isFinite(rawHi)) return setClim(base)
-
-    const span = Math.max(base[1] - base[0], 1)
-    const lower = base[0] - span * 0.5
-    const upper = base[1] + span * 0.5
-    const [lo, hiRaw] = [Math.min(rawLo, rawHi), Math.max(rawLo, rawHi)].map(
-      (value) => clamp(value, lower, upper)
-    )
-    const hi = hiRaw === lo ? lo + span * 0.001 : hiRaw
+    if (!Array.isArray(resolved) || resolved.length < 2) return
+    const [lo, hi] = resolved
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return
 
     setClim([lo, hi])
   }
@@ -515,14 +544,37 @@ const Controls = () => {
           <Box sx={subheadingSx}>Range</Box>
         </Column>
         <Column start={2} width={3}>
-          <Colorbar
-            width='100%'
-            colormap={themedColormap}
-            units=''
-            clim={clim}
-            setClim={handleClimChange}
-            horizontal
-          />
+          <Flex sx={{ gap: 2, alignItems: 'center' }}>
+            <Input
+              size='xs'
+              type='number'
+              value={climInputs[0]}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                handleClimInputChange(0, e.target.value)
+              }
+              onBlur={() => commitClimInput(0)}
+              onKeyDown={(e: React.KeyboardEvent) => {
+                if (e.key === 'Enter') commitClimInput(0)
+              }}
+              sx={{ width: '55px', flexShrink: 0 }}
+            />
+            <Box sx={{ flex: 1 }}>
+              <Colorbar width='100%' colormap={themedColormap} horizontal />
+            </Box>
+            <Input
+              size='xs'
+              type='number'
+              value={climInputs[1]}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                handleClimInputChange(1, e.target.value)
+              }
+              onBlur={() => commitClimInput(1)}
+              onKeyDown={(e: React.KeyboardEvent) => {
+                if (e.key === 'Enter') commitClimInput(1)
+              }}
+              sx={{ width: '55px', flexShrink: 0 }}
+            />
+          </Flex>
         </Column>
       </Row>
 
