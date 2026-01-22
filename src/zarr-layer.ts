@@ -127,6 +127,17 @@ export class ZarrLayer {
     return this._fillValue
   }
 
+  /**
+   * Get the spatial bounds of the layer in EPSG:4326 (longitude/latitude).
+   * Returns null if bounds are not yet available (layer not initialized).
+   * @returns Bounds tuple [west, south, east, north] or null
+   */
+  getBounds(): Bounds | null {
+    const xyLimits = this.mode?.getXYLimits()
+    if (!xyLimits) return null
+    return [xyLimits.xMin, xyLimits.yMin, xyLimits.xMax, xyLimits.yMax]
+  }
+
   private isGlobeProjection(): boolean {
     const projection = this.map?.getProjection ? this.map.getProjection() : null
     return checkGlobeProjection(projection)
