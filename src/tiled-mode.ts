@@ -7,6 +7,7 @@ import type {
 import type { QueryGeometry, QueryResult } from './query/types'
 import { queryRegionTiled } from './query/region-query'
 import type {
+  Bounds,
   LoadingStateCallback,
   MapLike,
   NormalizedSelector,
@@ -37,6 +38,8 @@ import {
   isGlobeProjection,
   latToMercatorNorm,
   lonToMercatorNorm,
+  mercatorNormToLat,
+  mercatorNormToLon,
   normalizeGlobalExtent,
   parseLevelZoom,
   type MercatorBounds,
@@ -347,6 +350,22 @@ export class TiledMode implements ZarrMode {
 
   getXYLimits(): XYLimits | null {
     return this.xyLimits
+  }
+
+  /**
+   * Get bounds in EPSG:4326 [west, south, east, north] for map.fitBounds().
+   * For tiled mode, xyLimits is always in EPSG:4326.
+   */
+  getLonLatBounds(): Bounds | null {
+    if (!this.xyLimits) return null
+    // For tiled datasets, xyLimits is already in lon/lat (EPSG:4326)
+    // Format: [west, south, east, north]
+    return [
+      this.xyLimits.xMin,
+      this.xyLimits.yMin,
+      this.xyLimits.xMax,
+      this.xyLimits.yMax,
+    ]
   }
 
   getMaxLevelIndex(): number {

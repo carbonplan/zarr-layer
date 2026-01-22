@@ -133,9 +133,7 @@ export class ZarrLayer {
    * @returns Bounds tuple [west, south, east, north] or null
    */
   getBounds(): Bounds | null {
-    const xyLimits = this.mode?.getXYLimits()
-    if (!xyLimits) return null
-    return [xyLimits.xMin, xyLimits.yMin, xyLimits.xMax, xyLimits.yMax]
+    return this.mode?.getLonLatBounds() ?? null
   }
 
   private isGlobeProjection(): boolean {

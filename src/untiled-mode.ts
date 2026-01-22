@@ -23,6 +23,7 @@ import type {
 } from './zarr-mode'
 import type { QueryGeometry, QueryResult } from './query/types'
 import type {
+  Bounds,
   LoadingStateCallback,
   MapLike,
   NormalizedSelector,
@@ -38,6 +39,7 @@ import {
   latToMercatorNorm,
   lonToMercatorNorm,
   mercatorNormToLat,
+  mercatorNormToLon,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
@@ -2079,6 +2081,38 @@ export class UntiledMode implements ZarrMode {
 
   getXYLimits(): XYLimits | null {
     return this.xyLimits
+  }
+
+  /**
+   * Get bounds in EPSG:4326 [west, south, east, north] for map.fitBounds().
+   * Converts from source CRS to lon/lat as needed.
+   */
+  getLonLatBounds(): Bounds | null {
+    if (!this.mercatorBounds) return null
+
+    // If mercatorBounds has explicit lon/lat fields (from EPSG:4326 data), use those
+    if (
+      this.mercatorBounds.lonMin !== undefined &&
+      this.mercatorBounds.lonMax !== undefined &&
+      this.mercatorBounds.latMin !== undefined &&
+      this.mercatorBounds.latMax !== undefined
+    ) {
+      return [
+        this.mercatorBounds.lonMin,
+        this.mercatorBounds.latMin,
+        this.mercatorBounds.lonMax,
+        this.mercatorBounds.latMax,
+      ]
+    }
+
+    // Convert from normalized mercator coordinates to lon/lat
+    // Note: y0 is the north edge (smaller mercator Y = higher lat), y1 is south
+    const west = mercatorNormToLon(this.mercatorBounds.x0)
+    const east = mercatorNormToLon(this.mercatorBounds.x1)
+    const north = mercatorNormToLat(this.mercatorBounds.y0)
+    const south = mercatorNormToLat(this.mercatorBounds.y1)
+
+    return [west, south, east, north]
   }
 
   /**

@@ -1,3 +1,4 @@
+import type { Bounds } from './types'
 import type { MercatorBounds, TileTuple, XYLimits } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 import type { Tiles } from './tiles'
@@ -88,6 +89,8 @@ export interface ZarrMode {
   setLoadingCallback(callback: LoadingStateCallback | undefined): void
   getCRS(): CRS
   getXYLimits(): XYLimits | null
+  /** Get bounds in EPSG:4326 [west, south, east, north] for map.fitBounds() */
+  getLonLatBounds(): Bounds | null
   getMaxLevelIndex(): number
   getLevels(): string[]
   getTiledState?(): TiledRenderState | null
