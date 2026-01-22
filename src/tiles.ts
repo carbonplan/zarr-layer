@@ -117,7 +117,43 @@ export class Tiles {
   }
 
   updateClim(clim: [number, number]) {
+    const oldScale = Math.max(Math.abs(this.clim[0]), Math.abs(this.clim[1]), 1)
+    const newScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
     this.clim = clim
+
+    // If scale changed, re-normalize all cached tile data in place
+    if (oldScale !== newScale && this.gl) {
+      const scaleFactor = oldScale / newScale
+      for (const tile of this.tiles.values()) {
+        // Rescale main texture data
+        if (tile.data) {
+          for (let i = 0; i < tile.data.length; i++) {
+            const v = tile.data[i]
+            if (!isNaN(v)) {
+              tile.data[i] = v * scaleFactor
+            }
+          }
+          tile.dataScale = newScale
+          this.uploadTileTexture(tile)
+        }
+
+        // Rescale per-band data for custom shaders
+        for (const [bandName, bandData] of tile.bandData) {
+          for (let i = 0; i < bandData.length; i++) {
+            const v = bandData[i]
+            if (!isNaN(v)) {
+              bandData[i] = v * scaleFactor
+            }
+          }
+          // Mark band texture for re-upload
+          tile.bandTexturesUploaded.delete(bandName)
+        }
+        // Update per-band scales
+        for (const [bandName] of tile.bandDataScales) {
+          tile.bandDataScales.set(bandName, newScale)
+        }
+      }
+    }
   }
 
   private getDimKeyForName(dimName: string): string {

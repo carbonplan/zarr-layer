@@ -2133,7 +2133,49 @@ export class UntiledMode implements ZarrMode {
   }
 
   updateClim(clim: [number, number]): void {
+    const oldScale = Math.max(Math.abs(this.clim[0]), Math.abs(this.clim[1]), 1)
+    const newScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
     this.clim = clim
+
+    // If scale changed, re-normalize all cached region data in place
+    if (oldScale !== newScale && this.cachedGl) {
+      const scaleFactor = oldScale / newScale
+      const gl = this.cachedGl
+      for (const region of this.regionCache.values()) {
+        // Rescale main texture data
+        if (region.data) {
+          for (let i = 0; i < region.data.length; i++) {
+            const v = region.data[i]
+            if (!isNaN(v)) {
+              region.data[i] = v * scaleFactor
+            }
+          }
+          // Re-upload texture
+          if (region.texture) {
+            uploadDataTexture(gl, {
+              texture: region.texture,
+              data: region.data,
+              width: region.width,
+              height: region.height,
+              channels: region.channels,
+              configured: true,
+            })
+          }
+        }
+
+        // Rescale per-band data for custom shaders
+        for (const [bandName, bandData] of region.bandData) {
+          for (let i = 0; i < bandData.length; i++) {
+            const v = bandData[i]
+            if (!isNaN(v)) {
+              bandData[i] = v * scaleFactor
+            }
+          }
+          // Mark band texture for re-upload
+          region.bandTexturesUploaded.delete(bandName)
+        }
+      }
+    }
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
