@@ -150,22 +150,19 @@ export function configureDataTexture(gl: WebGL2RenderingContext) {
 
 /**
  * Normalize data for texture upload to ensure half-float safe range on mobile GPUs.
- * Uses clim to determine scale (avoids scanning all data).
+ * Uses fixedScale to normalize data (frozen to initial clim).
  * Fill values are converted to NaN for reliable detection.
  *
  * @param data - Raw float data to normalize
  * @param fillValue - Fill value to convert to NaN
- * @param clim - Color limits [min, max] used to determine normalization scale
+ * @param fixedScale - Fixed scale factor for normalization
  * @returns Object with normalized data and scale factor
  */
 export function normalizeDataForTexture(
   data: Float32Array,
   fillValue: number | null,
-  clim: [number, number]
+  fixedScale: number
 ): { normalized: Float32Array; scale: number } {
-  // Use clim to determine scale
-  const scale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
-
   const normalized = new Float32Array(data.length)
 
   for (let i = 0; i < data.length; i++) {
@@ -175,11 +172,11 @@ export function normalizeDataForTexture(
     if ((fillValue !== null && v === fillValue) || v !== v) {
       normalized[i] = NaN
     } else {
-      normalized[i] = v / scale
+      normalized[i] = v / fixedScale
     }
   }
 
-  return { normalized, scale }
+  return { normalized, scale: fixedScale }
 }
 
 /**

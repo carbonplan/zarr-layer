@@ -65,6 +65,9 @@ export class ZarrLayer {
   private _fillValue: number | null = null
   private scaleFactor: number = 1
   private offset: number = 0
+  private fixedDataScale: number
+  // Once true, fixedDataScale is locked (mode has captured it)
+  private dataScaleLocked: boolean = false
 
   private gl: WebGL2RenderingContext | undefined
   private map: MapLike | null = null
@@ -203,6 +206,7 @@ export class ZarrLayer {
     this.invalidate = () => {}
     this.colormap = new ColormapState(colormap)
     this.clim = clim
+    this.fixedDataScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
     this.opacity = opacity
     this.minZoom = minzoom
     this.maxZoom = maxzoom
@@ -251,7 +255,10 @@ export class ZarrLayer {
 
   setClim(clim: [number, number]) {
     this.clim = clim
-    this.mode?.updateClim(clim)
+    // Allow fixedDataScale to update until mode captures it
+    if (!this.dataScaleLocked) {
+      this.fixedDataScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
+    }
     this.invalidate()
   }
 
@@ -291,6 +298,13 @@ export class ZarrLayer {
       }
       this.dimensionValues = {}
       this._fillValue = null
+      // Reset and recompute fixedDataScale from current clim for new mode
+      this.dataScaleLocked = false
+      this.fixedDataScale = Math.max(
+        Math.abs(this.clim[0]),
+        Math.abs(this.clim[1]),
+        1
+      )
       await this.initialize()
       await this.initializeMode()
       this.invalidate()
@@ -439,7 +453,8 @@ export class ZarrLayer {
         this.variable,
         this.normalizedSelector,
         this.invalidate,
-        this.throttleMs
+        this.throttleMs,
+        this.fixedDataScale
       )
     } else {
       // Use UntiledMode for untiled multiscales and single-level datasets
@@ -448,13 +463,16 @@ export class ZarrLayer {
         this.variable,
         this.normalizedSelector,
         this.invalidate,
-        this.throttleMs
+        this.throttleMs,
+        this.fixedDataScale
       )
     }
 
+    // Lock immediately after mode captures the value, before async initialize()
+    this.dataScaleLocked = true
+
     this.mode.setLoadingCallback(this.handleChunkLoadingChange)
     await this.mode.initialize()
-    this.mode.updateClim(this.clim)
 
     if (this.map && this.gl) {
       this.mode.update(this.map, this.gl)
@@ -622,6 +640,7 @@ export class ZarrLayer {
         fillValue: this._fillValue,
         scaleFactor: this.scaleFactor,
         offset: this.offset,
+        fixedDataScale: this.fixedDataScale,
       },
       colormapTexture,
       worldOffsets,
@@ -664,6 +683,7 @@ export class ZarrLayer {
         fillValue: this._fillValue,
         scaleFactor: this.scaleFactor,
         offset: this.offset,
+        fixedDataScale: this.fixedDataScale,
       },
       colormapTexture,
       worldOffsets: [0],

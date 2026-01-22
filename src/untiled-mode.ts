@@ -212,9 +212,6 @@ export class UntiledMode implements ZarrMode {
   // Dimension values cache
   private dimensionValues: { [key: string]: Float64Array | number[] } = {}
 
-  // Data processing
-  private clim: [number, number] = [0, 1]
-
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
   private regionCache: Map<string, RegionState> = new Map()
@@ -245,12 +242,16 @@ export class UntiledMode implements ZarrMode {
   // Track current projection for subdivision optimization
   private isGlobeProjection: boolean = false
 
+  // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
+  private fixedDataScale: number = 1
+
   constructor(
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    throttleMs: number = 100
+    throttleMs: number = 100,
+    fixedDataScale: number = 1
   ) {
     this.zarrStore = store
     this.variable = variable
@@ -258,6 +259,7 @@ export class UntiledMode implements ZarrMode {
     this.bandNames = getBands(variable, selector)
     this.invalidate = invalidate
     this.throttleMs = throttleMs
+    this.fixedDataScale = fixedDataScale
   }
 
   async initialize(): Promise<void> {
@@ -1593,7 +1595,7 @@ export class UntiledMode implements ZarrMode {
         const { normalized: bandNormalized } = normalizeDataForTexture(
           bandData,
           effectiveFillValue,
-          this.clim
+          this.fixedDataScale
         )
         region.bandData.set(bandName, bandNormalized)
         normalizedBands.push(bandNormalized)
@@ -2130,52 +2132,6 @@ export class UntiledMode implements ZarrMode {
 
   getLevels(): string[] {
     return this.levels.map((l) => l.asset)
-  }
-
-  updateClim(clim: [number, number]): void {
-    const oldScale = Math.max(Math.abs(this.clim[0]), Math.abs(this.clim[1]), 1)
-    const newScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
-    this.clim = clim
-
-    // If scale changed, re-normalize all cached region data in place
-    if (oldScale !== newScale && this.cachedGl) {
-      const scaleFactor = oldScale / newScale
-      const gl = this.cachedGl
-      for (const region of this.regionCache.values()) {
-        // Rescale main texture data
-        if (region.data) {
-          for (let i = 0; i < region.data.length; i++) {
-            const v = region.data[i]
-            if (!isNaN(v)) {
-              region.data[i] = v * scaleFactor
-            }
-          }
-          // Re-upload texture
-          if (region.texture) {
-            uploadDataTexture(gl, {
-              texture: region.texture,
-              data: region.data,
-              width: region.width,
-              height: region.height,
-              channels: region.channels,
-              configured: true,
-            })
-          }
-        }
-
-        // Rescale per-band data for custom shaders
-        for (const [bandName, bandData] of region.bandData) {
-          for (let i = 0; i < bandData.length; i++) {
-            const v = bandData[i]
-            if (!isNaN(v)) {
-              bandData[i] = v * scaleFactor
-            }
-          }
-          // Mark band texture for re-upload
-          region.bandTexturesUploaded.delete(bandName)
-        }
-      }
-    }
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {

@@ -91,7 +91,6 @@ export interface ZarrMode {
   getMaxLevelIndex(): number
   getLevels(): string[]
   getTiledState?(): TiledRenderState | null
-  updateClim(clim: [number, number]): void
 
   // Query methods (optional)
   queryData?(geometry: QueryGeometry, selector?: Selector): Promise<QueryResult>

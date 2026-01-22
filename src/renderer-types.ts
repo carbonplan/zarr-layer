@@ -4,6 +4,7 @@ export interface RendererUniforms {
   fillValue: number | null
   scaleFactor: number
   offset: number
+  fixedDataScale: number
 }
 
 export interface CustomShaderConfig {

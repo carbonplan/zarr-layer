@@ -115,6 +115,7 @@ export class TiledMode implements ZarrMode {
   private currentLevel: number | null = null
   private selectorVersion: number = 0
   private throttleMs: number
+  private fixedDataScale: number
 
   // Shared state managers
   private throttleState: ThrottleState = createThrottleState()
@@ -126,13 +127,15 @@ export class TiledMode implements ZarrMode {
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    throttleMs: number = 100
+    throttleMs: number = 100,
+    fixedDataScale: number = 1
   ) {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
     this.invalidate = invalidate
     this.throttleMs = throttleMs
+    this.fixedDataScale = fixedDataScale
   }
 
   async initialize(): Promise<void> {
@@ -158,6 +161,7 @@ export class TiledMode implements ZarrMode {
         maxCachedTiles: MAX_CACHED_TILES,
         bandNames,
         crs: this.crs,
+        fixedDataScale: this.fixedDataScale,
       })
 
       this.updateGeometryForProjection(false)
@@ -351,10 +355,6 @@ export class TiledMode implements ZarrMode {
 
   getLevels(): string[] {
     return this.zarrStore.levels
-  }
-
-  updateClim(clim: [number, number]): void {
-    this.tileCache?.updateClim(clim)
   }
 
   private emitLoadingState(): void {
