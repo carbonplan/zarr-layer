@@ -57,7 +57,7 @@
     "@developmentseed/raster-reproject": "^0.1.0",
     "delaunator": "^5.0.1",
     "proj4": "^2.20.2",
-    "zarrita": "^0.5.4"
+    "zarrita": "^0.6.1"
   },
   "lint-staged": {
     "*.{js,ts,tsx,json,md}": "prettier --write"
