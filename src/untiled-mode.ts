@@ -85,6 +85,10 @@ import {
 } from './mode-utils'
 import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
+import {
+  VisibleRegionsManager,
+  type RegionWithBounds,
+} from './visible-regions-manager'
 
 /** State for a single region (chunk/shard) in region-based loading */
 interface RegionState {
@@ -200,6 +204,14 @@ export class UntiledMode implements ZarrMode {
     typeof createTransformerTo4326
   > | null = null
 
+  // Web Worker manager for async visible regions calculation (proj4 datasets)
+  private visibleRegionsManager: VisibleRegionsManager | null = null
+  // Sequence number tracking for worker results to prevent stale updates
+  private lastAcceptedSequence: number = 0
+  // Cached region bounds for visible region calculation (rebuilt on level switch)
+  private cachedAllRegions: RegionWithBounds[] | null = null
+  private cachedAllRegionsLevel: number = -1
+
   // Loading state
   private isRemoved: boolean = false
   private throttleMs: number
@@ -294,6 +306,30 @@ export class UntiledMode implements ZarrMode {
           this.proj4def,
           bounds
         )
+
+        // Initialize Web Worker for async visible regions calculation
+        // This moves expensive proj4 reprojection off the main thread
+        this.visibleRegionsManager = new VisibleRegionsManager({
+          onVisibleRegionsUpdate: (result) => {
+            // Only accept results with sequence >= last accepted to prevent stale updates
+            if (result.sequence >= this.lastAcceptedSequence) {
+              this.lastAcceptedSequence = result.sequence
+              this.lastVisibleRegions = result.cachedRegions
+              this.invalidate()
+            }
+          },
+        })
+        // Initialize the worker with proj4 definition (async, but don't block).
+        // Note: The first few getVisibleRegions() calls may return empty results
+        // while the worker is initializing. The worker triggers a repaint when ready.
+        this.visibleRegionsManager.init(this.proj4def).catch((err) => {
+          console.warn(
+            '[UntiledMode] Failed to initialize visible regions worker:',
+            err
+          )
+          // Worker failed - proj4 datasets won't render visible regions correctly
+          this.visibleRegionsManager = null
+        })
       }
 
       if (this.crs !== 'EPSG:4326' && this.crs !== 'EPSG:3857') {
@@ -518,6 +554,10 @@ export class UntiledMode implements ZarrMode {
 
   /**
    * Calculate which regions are visible in the current viewport.
+   *
+   * For proj4 datasets, this uses a Web Worker to avoid blocking the main thread.
+   * When using the worker, this method returns immediately with cached/previous results,
+   * and the worker will trigger a repaint when the calculation completes.
    */
   private getVisibleRegions(
     map: MapLike
@@ -529,63 +569,23 @@ export class UntiledMode implements ZarrMode {
     const { xMin, xMax, yMin, yMax } = this.xyLimits
     const [regionH, regionW] = this.regionSize
 
-    if (this.proj4def && this.cachedWGS84Transformer) {
-      // For projected data, check each region's geographic footprint against viewport
-      const transformer = this.cachedWGS84Transformer
-      const numRegionsX = Math.ceil(this.width / regionW)
-      const numRegionsY = Math.ceil(this.height / regionH)
-
-      const regions: Array<{ regionX: number; regionY: number }> = []
-
-      for (let ry = 0; ry < numRegionsY; ry++) {
-        for (let rx = 0; rx < numRegionsX; rx++) {
-          // Get region bounds in source CRS
-          const regBounds = this.getRegionBounds(rx, ry)
-          const xMid = (regBounds.xMin + regBounds.xMax) / 2
-          const yMid = (regBounds.yMin + regBounds.yMax) / 2
-
-          // Transform region corners and edge midpoints to WGS84
-          // Edge midpoints are needed for curved projections where extrema may not be at corners
-          const samplePoints = [
-            // Corners
-            transformer.inverse(regBounds.xMin, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, regBounds.yMax),
-            // Edge midpoints
-            transformer.inverse(xMid, regBounds.yMin),
-            transformer.inverse(xMid, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, yMid),
-            transformer.inverse(regBounds.xMax, yMid),
-          ]
-
-          // Filter out invalid points but continue if we have at least one valid point
-          const validPoints = samplePoints.filter(
-            (c) => isFinite(c[0]) && isFinite(c[1])
-          )
-          if (validPoints.length === 0) {
-            continue
-          }
-
-          // Get geographic bounds of this region
-          const regWest = Math.min(...validPoints.map((c) => c[0]))
-          const regEast = Math.max(...validPoints.map((c) => c[0]))
-          const regSouth = Math.min(...validPoints.map((c) => c[1]))
-          const regNorth = Math.max(...validPoints.map((c) => c[1]))
-
-          // Check if region overlaps with viewport
-          if (
-            regEast >= west &&
-            regWest <= east &&
-            regNorth >= south &&
-            regSouth <= north
-          ) {
-            regions.push({ regionX: rx, regionY: ry })
-          }
-        }
+    if (this.proj4def) {
+      // Use the worker for non-blocking calculation
+      // If worker isn't ready yet, return empty array - worker will trigger repaint when done
+      if (!this.visibleRegionsManager?.ready) {
+        return []
       }
 
-      return regions
+      const allRegions = this.getAllRegionBounds()
+
+      // Request calculation from worker
+      const result = this.visibleRegionsManager.requestVisibleRegions(
+        { west, south, east, north },
+        allRegions
+      )
+
+      // Return cached regions (worker will trigger repaint when new results ready)
+      return result.cachedRegions
     }
 
     // Standard case: viewport bounds are in same CRS as xyLimits
@@ -863,6 +863,40 @@ export class UntiledMode implements ZarrMode {
     }
 
     return { xMin: geoXMin, xMax: geoXMax, yMin: geoYMin, yMax: geoYMax }
+  }
+
+  /**
+   * Get all region bounds, using cache if valid.
+   * Cache is invalidated on level switch.
+   */
+  private getAllRegionBounds(): RegionWithBounds[] {
+    if (
+      this.cachedAllRegions &&
+      this.cachedAllRegionsLevel === this.currentLevelIndex
+    ) {
+      return this.cachedAllRegions
+    }
+
+    if (!this.regionSize) return []
+
+    const [regionH, regionW] = this.regionSize
+    const numRegionsX = Math.ceil(this.width / regionW)
+    const numRegionsY = Math.ceil(this.height / regionH)
+
+    this.cachedAllRegions = []
+    for (let ry = 0; ry < numRegionsY; ry++) {
+      for (let rx = 0; rx < numRegionsX; rx++) {
+        const regBounds = this.getRegionBounds(rx, ry)
+        this.cachedAllRegions.push({
+          regionX: rx,
+          regionY: ry,
+          bounds: regBounds,
+        })
+      }
+    }
+    this.cachedAllRegionsLevel = this.currentLevelIndex
+
+    return this.cachedAllRegions
   }
 
   /**
@@ -2062,9 +2096,16 @@ export class UntiledMode implements ZarrMode {
     // Clean up region caches
     this.clearRegionCache(gl)
     this.regionSize = null
+    this.cachedAllRegions = null
+    this.cachedAllRegionsLevel = -1
     this.cachedMercatorTransformer = null
     this.cachedWGS84Transformer = null
     this.cached4326Transformer = null
+    // Dispose of the visible regions worker
+    if (this.visibleRegionsManager) {
+      this.visibleRegionsManager.dispose()
+      this.visibleRegionsManager = null
+    }
     this.loadingManager.chunksLoading = false
     this.emitLoadingState()
   }
