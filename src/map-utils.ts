@@ -273,18 +273,14 @@ export function parseLevelZoom(
 
 /**
  * Converts longitude in degrees to normalized Web Mercator X coordinate [0, 1].
- * Handles wraparound for longitudes outside -180 to 180 range.
+ * Clamps longitude to [-180, 180] range to handle coordinates that slightly
+ * exceed bounds due to half-pixel expansion at coordinate array edges.
  * @param lon - Longitude in degrees.
  * @returns Normalized mercator X coordinate.
  */
 export function lonToMercatorNorm(lon: number): number {
-  let normalizedLon = lon
-  if (lon > 180) {
-    normalizedLon = lon - 360
-  } else if (lon < -180) {
-    normalizedLon = lon + 360
-  }
-  return (normalizedLon + 180) / 360
+  const clamped = Math.max(-180, Math.min(180, lon))
+  return (clamped + 180) / 360
 }
 
 /**
