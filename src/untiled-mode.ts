@@ -209,8 +209,10 @@ export class UntiledMode implements ZarrMode {
   private requestCanceller: RequestCanceller = createRequestCanceller()
   private loadingManager: LoadingManager = createLoadingManager()
 
-  // Dimension values cache
-  private dimensionValues: { [key: string]: Float64Array | number[] } = {}
+  // Dimension values cache (supports numeric and string coordinate arrays)
+  private dimensionValues: {
+    [key: string]: Float64Array | number[] | string[]
+  } = {}
 
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
@@ -1325,13 +1327,22 @@ export class UntiledMode implements ZarrMode {
       })),
     }
 
+    // Filter out regions that are out of bounds for the current snapshot dimensions
+    // This can happen with async worker results from a different level
+    const [regionH, regionW] = snapshot.regionSize
+    const validRegions = regions.filter(({ regionX, regionY }) => {
+      const yStart = regionY * regionH
+      const xStart = regionX * regionW
+      return xStart < snapshot.width && yStart < snapshot.height
+    })
+
     // Emit loading state
     this.loadingManager.chunksLoading = true
     this.emitLoadingState()
 
-    // Mark ALL regions as loading upfront to prevent duplicate fetches
+    // Mark ALL valid regions as loading upfront to prevent duplicate fetches
     // from subsequent update() calls before we've processed them all
-    for (const { regionX, regionY } of regions) {
+    for (const { regionX, regionY } of validRegions) {
       const key = this.makeRegionKey(snapshot.index, regionX, regionY)
       let region = this.regionCache.get(key)
       if (!region) {
@@ -1344,11 +1355,11 @@ export class UntiledMode implements ZarrMode {
     const MAX_CONCURRENT = 32
     const executing: Promise<void>[] = []
 
-    for (const { regionX, regionY } of regions) {
+    for (const { regionX, regionY } of validRegions) {
       // Check if level switched - bail out to avoid stale fetches
       if (this.currentLevelIndex !== snapshot.index) {
         cancelAllRequests(this.requestCanceller)
-        this.clearBatchLoadingFlags(regions, snapshot.index)
+        this.clearBatchLoadingFlags(validRegions, snapshot.index)
         break
       }
 
@@ -1426,6 +1437,26 @@ export class UntiledMode implements ZarrMode {
     const actualW = xEnd - xStart
     const actualH = yEnd - yStart
 
+    // Guard against invalid region bounds (can happen during level transitions).
+    // This is a secondary defense - the primary filter is in fetchRegions() which
+    // removes out-of-bounds regions before they reach here. However, this guard
+    // catches edge cases where:
+    // 1. Region indices were valid when filtered but dimensions changed during async fetch
+    // 2. Floating point precision issues in region boundary calculations
+    // The warning helps diagnose if this path is hit unexpectedly.
+    if (actualW <= 0 || actualH <= 0) {
+      console.warn(
+        `[fetchRegion] Skipping out-of-bounds region ${key}: ` +
+          `regionX=${regionX}, regionY=${regionY}, ` +
+          `regionSize=[${regionH},${regionW}], ` +
+          `snapshot.width=${snapshot.width}, snapshot.height=${snapshot.height}, ` +
+          `xStart=${xStart}, xEnd=${xEnd}, yStart=${yStart}, yEnd=${yEnd}`
+      )
+      region.loading = false
+      this.requestCanceller.controllers.delete(requestId)
+      return
+    }
+
     try {
       // Build base slice args with spatial region bounds
       const baseSliceArgs = [...snapshot.baseSliceArgs]
@@ -1480,18 +1511,20 @@ export class UntiledMode implements ZarrMode {
         bandArrays.push(rawData)
         packedData.set(rawData)
       } else {
-        // Multi-channel - fetch each channel's data
-        for (let c = 0; c < numChannels; c++) {
-          // Check if already aborted or level changed before starting fetch
-          if (
-            controller.signal.aborted ||
-            this.currentLevelIndex !== snapshot.index
-          ) {
-            region.loading = false
-            this.requestCanceller.controllers.delete(requestId)
-            return
-          }
+        // Multi-channel - fetch all channels in parallel
+        // Check if already aborted or level changed before starting fetches
+        if (
+          controller.signal.aborted ||
+          this.currentLevelIndex !== snapshot.index
+        ) {
+          region.loading = false
+          this.requestCanceller.controllers.delete(requestId)
+          return
+        }
 
+        // Build slice args for all channels upfront
+        const allSliceArgs: (number | zarr.Slice)[][] = []
+        for (let c = 0; c < numChannels; c++) {
           const sliceArgs = [...baseSliceArgs]
           const combo = channelCombinations[c]
 
@@ -1499,22 +1532,33 @@ export class UntiledMode implements ZarrMode {
           for (let i = 0; i < snapshot.baseMultiValueDims.length; i++) {
             sliceArgs[snapshot.baseMultiValueDims[i].dimIndex] = combo[i]
           }
+          allSliceArgs.push(sliceArgs)
+        }
 
-          const result = (await zarr.get(snapshot.zarrArray, sliceArgs, {
-            opts: { signal: controller.signal },
-          })) as { data: ArrayLike<number> }
+        // Fetch all bands in parallel
+        const results = await Promise.all(
+          allSliceArgs.map((sliceArgs) =>
+            zarr.get(snapshot.zarrArray, sliceArgs, {
+              opts: { signal: controller.signal },
+            })
+          )
+        )
 
-          if (controller.signal.aborted || this.isRemoved) {
-            region.loading = false
-            return
-          }
+        // Check abort/level again after all fetches complete
+        if (controller.signal.aborted || this.isRemoved) {
+          region.loading = false
+          return
+        }
 
-          if (this.currentLevelIndex !== snapshot.index) {
-            region.loading = false
-            this.requestCanceller.controllers.delete(requestId)
-            return
-          }
+        if (this.currentLevelIndex !== snapshot.index) {
+          region.loading = false
+          this.requestCanceller.controllers.delete(requestId)
+          return
+        }
 
+        // Process results in order
+        for (let c = 0; c < numChannels; c++) {
+          const result = results[c] as { data: ArrayLike<number> }
           const bandData = new Float32Array(result.data as ArrayLike<number>)
           bandArrays.push(bandData)
 
@@ -2188,10 +2232,15 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
+    // Get current level path for coordinate array lookup
+    // Coordinate arrays are often stored alongside each level in multiscale zarrs
+    const currentLevel = this.levels[this.currentLevelIndex]
+    const levelPath = currentLevel?.asset ?? null
+
     try {
       const coords = await loadDimensionValues(
         this.dimensionValues,
-        null,
+        levelPath,
         dimInfo,
         this.zarrStore.root,
         this.zarrStore.version
