@@ -77,7 +77,6 @@ import {
   scheduleThrottledUpdate,
   markFetchStart,
   clearThrottle,
-  cancelOlderRequests,
   cancelAllRequests,
   hasActiveRequests,
   setLoadingCallback as setLoadingCallbackUtil,
@@ -1449,15 +1448,16 @@ export class UntiledMode implements ZarrMode {
       const packedData = new Float32Array(pixelCount * numChannels)
       packedData.fill(fillValue ?? 0)
 
+      // Helper to check if this fetch is still relevant
+      const isStale = () =>
+        controller.signal.aborted ||
+        this.isRemoved ||
+        this.currentLevelIndex !== snapshot.index
+
       if (numChannels === 1) {
         // Single channel - simple fetch
-        // Check if already aborted or level changed before starting fetch
-        if (
-          controller.signal.aborted ||
-          this.currentLevelIndex !== snapshot.index
-        ) {
+        if (isStale()) {
           region.loading = false
-          this.requestCanceller.controllers.delete(requestId)
           return
         }
 
@@ -1465,14 +1465,8 @@ export class UntiledMode implements ZarrMode {
           opts: { signal: controller.signal },
         })) as { data: ArrayLike<number> }
 
-        if (controller.signal.aborted || this.isRemoved) {
+        if (isStale()) {
           region.loading = false
-          return
-        }
-
-        if (this.currentLevelIndex !== snapshot.index) {
-          region.loading = false
-          this.requestCanceller.controllers.delete(requestId)
           return
         }
 
@@ -1482,13 +1476,8 @@ export class UntiledMode implements ZarrMode {
       } else {
         // Multi-channel - fetch each channel's data
         for (let c = 0; c < numChannels; c++) {
-          // Check if already aborted or level changed before starting fetch
-          if (
-            controller.signal.aborted ||
-            this.currentLevelIndex !== snapshot.index
-          ) {
+          if (isStale()) {
             region.loading = false
-            this.requestCanceller.controllers.delete(requestId)
             return
           }
 
@@ -1504,14 +1493,8 @@ export class UntiledMode implements ZarrMode {
             opts: { signal: controller.signal },
           })) as { data: ArrayLike<number> }
 
-          if (controller.signal.aborted || this.isRemoved) {
+          if (isStale()) {
             region.loading = false
-            return
-          }
-
-          if (this.currentLevelIndex !== snapshot.index) {
-            region.loading = false
-            this.requestCanceller.controllers.delete(requestId)
             return
           }
 
@@ -1531,9 +1514,8 @@ export class UntiledMode implements ZarrMode {
         return
       }
 
-      // Update region's selector version and cancel any older pending requests
+      // Update region's selector version
       region.selectorVersion = fetchSelectorVersion
-      cancelOlderRequests(this.requestCanceller, requestId)
 
       // Resample bands to Mercator space if needed (EPSG:4326 or custom projection)
       let bandDataToProcess = bandArrays
