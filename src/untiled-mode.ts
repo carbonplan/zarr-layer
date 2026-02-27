@@ -200,6 +200,17 @@ export class UntiledMode implements ZarrMode {
     typeof createTransformerTo4326
   > | null = null
 
+  // Cached WGS84 bounds for each region (computed once per level, used for fast overlap checks)
+  private cachedRegionWGS84Bounds: Array<{
+    regionX: number
+    regionY: number
+    west: number
+    east: number
+    south: number
+    north: number
+  }> | null = null
+  private cachedRegionWGS84BoundsLevel: number = -1
+
   // Loading state
   private isRemoved: boolean = false
   private throttleMs: number
@@ -530,58 +541,19 @@ export class UntiledMode implements ZarrMode {
     const [regionH, regionW] = this.regionSize
 
     if (this.proj4def && this.cachedWGS84Transformer) {
-      // For projected data, check each region's geographic footprint against viewport
-      const transformer = this.cachedWGS84Transformer
-      const numRegionsX = Math.ceil(this.width / regionW)
-      const numRegionsY = Math.ceil(this.height / regionH)
+      // Build WGS84 bounds cache once per level (expensive proj4 transforms),
+      // then just do fast overlap checks on each frame
+      const wgs84Bounds = this.getRegionWGS84Bounds()
 
       const regions: Array<{ regionX: number; regionY: number }> = []
-
-      for (let ry = 0; ry < numRegionsY; ry++) {
-        for (let rx = 0; rx < numRegionsX; rx++) {
-          // Get region bounds in source CRS
-          const regBounds = this.getRegionBounds(rx, ry)
-          const xMid = (regBounds.xMin + regBounds.xMax) / 2
-          const yMid = (regBounds.yMin + regBounds.yMax) / 2
-
-          // Transform region corners and edge midpoints to WGS84
-          // Edge midpoints are needed for curved projections where extrema may not be at corners
-          const samplePoints = [
-            // Corners
-            transformer.inverse(regBounds.xMin, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, regBounds.yMax),
-            // Edge midpoints
-            transformer.inverse(xMid, regBounds.yMin),
-            transformer.inverse(xMid, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, yMid),
-            transformer.inverse(regBounds.xMax, yMid),
-          ]
-
-          // Filter out invalid points but continue if we have at least one valid point
-          const validPoints = samplePoints.filter(
-            (c) => isFinite(c[0]) && isFinite(c[1])
-          )
-          if (validPoints.length === 0) {
-            continue
-          }
-
-          // Get geographic bounds of this region
-          const regWest = Math.min(...validPoints.map((c) => c[0]))
-          const regEast = Math.max(...validPoints.map((c) => c[0]))
-          const regSouth = Math.min(...validPoints.map((c) => c[1]))
-          const regNorth = Math.max(...validPoints.map((c) => c[1]))
-
-          // Check if region overlaps with viewport
-          if (
-            regEast >= west &&
-            regWest <= east &&
-            regNorth >= south &&
-            regSouth <= north
-          ) {
-            regions.push({ regionX: rx, regionY: ry })
-          }
+      for (const rb of wgs84Bounds) {
+        if (
+          rb.east >= west &&
+          rb.west <= east &&
+          rb.north >= south &&
+          rb.south <= north
+        ) {
+          regions.push({ regionX: rb.regionX, regionY: rb.regionY })
         }
       }
 
@@ -863,6 +835,71 @@ export class UntiledMode implements ZarrMode {
     }
 
     return { xMin: geoXMin, xMax: geoXMax, yMin: geoYMin, yMax: geoYMax }
+  }
+
+  /**
+   * Get WGS84 bounds for all regions, computing and caching on first call per level.
+   * The proj4 transforms only run once per level switch; subsequent calls return cached results.
+   */
+  private getRegionWGS84Bounds(): Array<{
+    regionX: number
+    regionY: number
+    west: number
+    east: number
+    south: number
+    north: number
+  }> {
+    if (
+      this.cachedRegionWGS84Bounds &&
+      this.cachedRegionWGS84BoundsLevel === this.currentLevelIndex
+    ) {
+      return this.cachedRegionWGS84Bounds
+    }
+
+    const transformer = this.cachedWGS84Transformer
+    if (!transformer || !this.regionSize) return []
+
+    const [regionH, regionW] = this.regionSize
+    const numRegionsX = Math.ceil(this.width / regionW)
+    const numRegionsY = Math.ceil(this.height / regionH)
+
+    this.cachedRegionWGS84Bounds = []
+    for (let ry = 0; ry < numRegionsY; ry++) {
+      for (let rx = 0; rx < numRegionsX; rx++) {
+        const regBounds = this.getRegionBounds(rx, ry)
+        const xMid = (regBounds.xMin + regBounds.xMax) / 2
+        const yMid = (regBounds.yMin + regBounds.yMax) / 2
+
+        // Transform corners and edge midpoints to WGS84
+        const samplePoints = [
+          transformer.inverse(regBounds.xMin, regBounds.yMin),
+          transformer.inverse(regBounds.xMax, regBounds.yMin),
+          transformer.inverse(regBounds.xMax, regBounds.yMax),
+          transformer.inverse(regBounds.xMin, regBounds.yMax),
+          transformer.inverse(xMid, regBounds.yMin),
+          transformer.inverse(xMid, regBounds.yMax),
+          transformer.inverse(regBounds.xMin, yMid),
+          transformer.inverse(regBounds.xMax, yMid),
+        ]
+
+        const validPoints = samplePoints.filter(
+          (c) => isFinite(c[0]) && isFinite(c[1])
+        )
+        if (validPoints.length === 0) continue
+
+        this.cachedRegionWGS84Bounds.push({
+          regionX: rx,
+          regionY: ry,
+          west: Math.min(...validPoints.map((c) => c[0])),
+          east: Math.max(...validPoints.map((c) => c[0])),
+          south: Math.min(...validPoints.map((c) => c[1])),
+          north: Math.max(...validPoints.map((c) => c[1])),
+        })
+      }
+    }
+    this.cachedRegionWGS84BoundsLevel = this.currentLevelIndex
+
+    return this.cachedRegionWGS84Bounds
   }
 
   /**
@@ -2065,6 +2102,8 @@ export class UntiledMode implements ZarrMode {
     this.cachedMercatorTransformer = null
     this.cachedWGS84Transformer = null
     this.cached4326Transformer = null
+    this.cachedRegionWGS84Bounds = null
+    this.cachedRegionWGS84BoundsLevel = -1
     this.loadingManager.chunksLoading = false
     this.emitLoadingState()
   }
