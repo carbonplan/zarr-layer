@@ -164,7 +164,7 @@ const result = await layer.queryData(
 
 ## custom shaders and uniforms
 
-Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Note that in order to access different bands/time slices etc., the data need to be in the same chunk. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
+Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. In tiled mode, data for all selected bands must be in the same chunk. In untiled mode, bands can span separate chunks — each band is fetched in parallel and combined for rendering. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
 
 ```ts
 new ZarrLayer({
@@ -178,6 +178,56 @@ new ZarrLayer({
   `,
   uniforms: { u_weight: 1.0 },
 })
+```
+
+## band math helpers
+
+For common multi-band operations, we provide helper functions that return ready-to-use configuration objects. These include the `selector`, `customFrag`, and `clim` settings needed for the calculation. The default `clim` values can be overridden by setting `clim` after spreading the config.
+
+### NDVI (Normalized Difference Vegetation Index)
+
+```ts
+import { ZarrLayer, ndvi } from '@carbonplan/zarr-layer'
+
+const config = ndvi({ nir: 'B08', red: 'B04' })
+// Returns: { selector: { band: ['B08', 'B04'] }, customFrag: '...', clim: [-1, 1] }
+
+new ZarrLayer({
+  source: 'https://example.com/sentinel2.zarr',
+  variable: 'data',
+  colormap: 'rdylgn',
+  ...config,
+  // Override clim to focus on vegetation range:
+  clim: [0, 0.8],
+  // Merge additional selector dimensions as needed:
+  selector: { ...config.selector, time: 0 },
+})
+```
+
+### True Color RGB
+
+```ts
+import { ZarrLayer, trueColor } from '@carbonplan/zarr-layer'
+
+const config = trueColor({ red: 'B04', green: 'B03', blue: 'B02' })
+// Returns: { selector: { band: ['B04', 'B03', 'B02'] }, customFrag: '...', clim: [0, 1] }
+
+new ZarrLayer({
+  source: 'https://example.com/sentinel2.zarr',
+  variable: 'data',
+  ...config,
+  // For raw reflectance data (e.g., Sentinel-2 0-10000), override clim:
+  clim: [0, 3000],
+})
+```
+
+### Options
+
+Both helpers accept a `dimension` parameter (default: `'band'`) to specify which dimension contains the band values:
+
+```ts
+ndvi({ nir: 'B08', red: 'B04', dimension: 'wavelength' })
+trueColor({ red: 'B04', green: 'B03', blue: 'B02', dimension: 'wavelength' })
 ```
 
 ## custom projections

@@ -28,6 +28,28 @@ const resolveOpenFunc = (zarrVersion: 2 | 3 | null): typeof zarr.open => {
 }
 
 /**
+ * Sanitizes a string to be a valid GLSL identifier.
+ * GLSL identifiers must start with a letter or underscore,
+ * and contain only letters, digits, and underscores.
+ *
+ * @example
+ * sanitizeGlslName('nir:B08') // returns 'nir_B08'
+ * sanitizeGlslName('123abc') // returns '_123abc'
+ * sanitizeGlslName('band-1') // returns 'band_1'
+ */
+export function sanitizeGlslName(name: string): string {
+  // Replace any non-alphanumeric character (except underscore) with underscore
+  let sanitized = name.replace(/[^a-zA-Z0-9_]/g, '_')
+
+  // If it starts with a digit, prefix with underscore
+  if (/^[0-9]/.test(sanitized)) {
+    sanitized = '_' + sanitized
+  }
+
+  return sanitized
+}
+
+/**
  * Identify the indices of spatial dimensions (lat, lon) in a Zarr array.
  *
  * Auto-detects common dimension names (lat, latitude, y, lon, longitude, x, lng).
@@ -95,13 +117,13 @@ export function identifyDimensionIndices(
  * @returns The loaded coordinate array for the dimension.
  */
 export async function loadDimensionValues(
-  dimensionValues: Record<string, Float64Array | number[]>,
+  dimensionValues: Record<string, Float64Array | number[] | string[]>,
   levelInfo: string | null,
   dimIndices: DimIndicesProps[string],
   root: zarr.Location<zarr.FetchStore>,
   zarrVersion: 2 | 3 | null,
   slice?: [number, number]
-): Promise<Float64Array | number[]> {
+): Promise<Float64Array | number[] | string[]> {
   if (dimensionValues[dimIndices.name]) return dimensionValues[dimIndices.name]
   const targetRoot = levelInfo ? root.resolve(levelInfo) : root
   let coordArr
@@ -113,8 +135,20 @@ export async function loadDimensionValues(
     coordArr = await localFunc(coordVar, { kind: 'array' })
   }
   const coordData = await zarr.get(coordArr)
+  const data = coordData.data
+
+  // Handle string arrays (zarrita returns Array<string> for vlen-utf8)
+  if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+    const stringArray = data as string[]
+    if (slice) {
+      return stringArray.slice(slice[0], slice[1])
+    }
+    return stringArray
+  }
+
+  // Handle numeric arrays
   const coordArray = Array.from(
-    coordData.data as ArrayLike<number | bigint>,
+    data as ArrayLike<number | bigint>,
     (v: number | bigint) => (typeof v === 'bigint' ? Number(v) : v)
   )
   if (slice) {
@@ -140,8 +174,10 @@ function getBandInformation(
     if (normalized && Array.isArray(normalized)) {
       normalized.forEach((v, idx) => {
         const bandValue = v as string | number
-        const bandName =
+        // Sanitize band names to be valid GLSL identifiers
+        const rawName =
           typeof bandValue === 'string' ? bandValue : `${key}_${bandValue}`
+        const bandName = sanitizeGlslName(rawName)
         result[bandName] = { band: bandValue, index: idx }
       })
     }

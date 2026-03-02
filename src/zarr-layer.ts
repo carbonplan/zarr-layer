@@ -106,7 +106,9 @@ export class ZarrLayer {
   private zarrStore: ZarrStore | null = null
   private levelInfos: string[] = []
   private dimIndices: DimIndicesProps = {}
-  private dimensionValues: { [key: string]: Float64Array | number[] } = {}
+  private dimensionValues: {
+    [key: string]: Float64Array | number[] | string[]
+  } = {}
   private normalizedSelector: NormalizedSelector = {}
   private isRemoved: boolean = false
   private fragmentShaderSource: string = maplibreFragmentShaderSource
