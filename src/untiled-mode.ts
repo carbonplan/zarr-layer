@@ -851,7 +851,8 @@ export class UntiledMode implements ZarrMode {
     if (!this.xyLimits) return []
     const { xMin, xMax, yMin, yMax } = this.xyLimits
 
-    // Densely sample viewport edges to capture projection curvature.
+    // Densely sample viewport edges and interior to capture projection curvature
+    // and extrema that may fall inside the viewport (e.g., pole in polar stereo).
     const edgeSamples = 16
     let srcXMin = Infinity
     let srcXMax = -Infinity
@@ -870,6 +871,23 @@ export class UntiledMode implements ZarrMode {
         transformer.forward(east, lat),
       ]
       for (const [x, y] of points) {
+        totalCount++
+        if (!isFinite(x) || !isFinite(y)) continue
+        validCount++
+        if (x < srcXMin) srcXMin = x
+        if (x > srcXMax) srcXMax = x
+        if (y < srcYMin) srcYMin = y
+        if (y > srcYMax) srcYMax = y
+      }
+    }
+
+    // Sample interior grid to catch extrema inside viewport (e.g., pole in polar stereo)
+    const interiorSamples = 4
+    for (let iy = 1; iy <= interiorSamples; iy++) {
+      for (let ix = 1; ix <= interiorSamples; ix++) {
+        const lon = west + (ix / (interiorSamples + 1)) * (east - west)
+        const lat = south + (iy / (interiorSamples + 1)) * (north - south)
+        const [x, y] = transformer.forward(lon, lat)
         totalCount++
         if (!isFinite(x) || !isFinite(y)) continue
         validCount++
