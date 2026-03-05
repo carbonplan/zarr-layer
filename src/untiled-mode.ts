@@ -530,58 +530,69 @@ export class UntiledMode implements ZarrMode {
     const [regionH, regionW] = this.regionSize
 
     if (this.proj4def && this.cachedWGS84Transformer) {
-      // For projected data, check each region's geographic footprint against viewport
+      // For projected data, use a two-pass approach:
+      // 1. Forward-transform viewport edges to source CRS to find candidate regions
+      //    via index math (O(1) proj4 cost, may include false positives for non-
+      //    bijective projections like UTM outside their zone)
+      // 2. Inverse-transform candidate region bounds to WGS84 for precise overlap
       const transformer = this.cachedWGS84Transformer
       const numRegionsX = Math.ceil(this.width / regionW)
       const numRegionsY = Math.ceil(this.height / regionH)
 
+      const candidates = this.getCandidateRegions(
+        west,
+        south,
+        east,
+        north,
+        transformer,
+        numRegionsX,
+        numRegionsY,
+        regionW,
+        regionH
+      )
+
+      // Verify candidates via inverse transform to WGS84 for precise overlap.
+      // This handles non-bijective projections where forward transforms can
+      // produce false positives.
       const regions: Array<{ regionX: number; regionY: number }> = []
+      for (const { regionX, regionY } of candidates) {
+        const regBounds = this.getRegionBounds(regionX, regionY)
+        const xMid = (regBounds.xMin + regBounds.xMax) / 2
+        const yMid = (regBounds.yMin + regBounds.yMax) / 2
 
-      for (let ry = 0; ry < numRegionsY; ry++) {
-        for (let rx = 0; rx < numRegionsX; rx++) {
-          // Get region bounds in source CRS
-          const regBounds = this.getRegionBounds(rx, ry)
-          const xMid = (regBounds.xMin + regBounds.xMax) / 2
-          const yMid = (regBounds.yMin + regBounds.yMax) / 2
+        const samplePoints = [
+          transformer.inverse(regBounds.xMin, regBounds.yMin),
+          transformer.inverse(regBounds.xMax, regBounds.yMin),
+          transformer.inverse(regBounds.xMax, regBounds.yMax),
+          transformer.inverse(regBounds.xMin, regBounds.yMax),
+          transformer.inverse(xMid, regBounds.yMin),
+          transformer.inverse(xMid, regBounds.yMax),
+          transformer.inverse(regBounds.xMin, yMid),
+          transformer.inverse(regBounds.xMax, yMid),
+        ]
 
-          // Transform region corners and edge midpoints to WGS84
-          // Edge midpoints are needed for curved projections where extrema may not be at corners
-          const samplePoints = [
-            // Corners
-            transformer.inverse(regBounds.xMin, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMin),
-            transformer.inverse(regBounds.xMax, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, regBounds.yMax),
-            // Edge midpoints
-            transformer.inverse(xMid, regBounds.yMin),
-            transformer.inverse(xMid, regBounds.yMax),
-            transformer.inverse(regBounds.xMin, yMid),
-            transformer.inverse(regBounds.xMax, yMid),
-          ]
+        let regWest = Infinity
+        let regEast = -Infinity
+        let regSouth = Infinity
+        let regNorth = -Infinity
+        let hasValid = false
+        for (const [lon, lat] of samplePoints) {
+          if (!isFinite(lon) || !isFinite(lat)) continue
+          hasValid = true
+          if (lon < regWest) regWest = lon
+          if (lon > regEast) regEast = lon
+          if (lat < regSouth) regSouth = lat
+          if (lat > regNorth) regNorth = lat
+        }
+        if (!hasValid) continue
 
-          // Filter out invalid points but continue if we have at least one valid point
-          const validPoints = samplePoints.filter(
-            (c) => isFinite(c[0]) && isFinite(c[1])
-          )
-          if (validPoints.length === 0) {
-            continue
-          }
-
-          // Get geographic bounds of this region
-          const regWest = Math.min(...validPoints.map((c) => c[0]))
-          const regEast = Math.max(...validPoints.map((c) => c[0]))
-          const regSouth = Math.min(...validPoints.map((c) => c[1]))
-          const regNorth = Math.max(...validPoints.map((c) => c[1]))
-
-          // Check if region overlaps with viewport
-          if (
-            regEast >= west &&
-            regWest <= east &&
-            regNorth >= south &&
-            regSouth <= north
-          ) {
-            regions.push({ regionX: rx, regionY: ry })
-          }
+        if (
+          regEast >= west &&
+          regWest <= east &&
+          regNorth >= south &&
+          regSouth <= north
+        ) {
+          regions.push({ regionX, regionY })
         }
       }
 
@@ -819,6 +830,124 @@ export class UntiledMode implements ZarrMode {
     }
 
     return { combinations, labelCombinations }
+  }
+
+  /**
+   * Find candidate regions by forward-transforming viewport edges to source CRS
+   * and using grid index math to find overlapping region indices.
+   *
+   * This is a fast prefilter that may include false positives (e.g., for non-
+   * bijective projections like UTM outside their zone). Callers must verify
+   * candidates with inverse-transform overlap checks.
+   *
+   * On partial transform failures (projection boundary), uses valid points
+   * with a wider margin. Falls back to all regions only if no points are valid.
+   */
+  private getCandidateRegions(
+    west: number,
+    south: number,
+    east: number,
+    north: number,
+    transformer: { forward: (lon: number, lat: number) => [number, number] },
+    numRegionsX: number,
+    numRegionsY: number,
+    regionW: number,
+    regionH: number
+  ): Array<{ regionX: number; regionY: number }> {
+    if (!this.xyLimits) return []
+    const { xMin, xMax, yMin, yMax } = this.xyLimits
+
+    // Densely sample viewport edges and interior to capture projection curvature
+    // and extrema that may fall inside the viewport (e.g., pole in polar stereo).
+    const edgeSamples = 16
+    let srcXMin = Infinity
+    let srcXMax = -Infinity
+    let srcYMin = Infinity
+    let srcYMax = -Infinity
+    let validCount = 0
+    let totalCount = 0
+    for (let i = 0; i <= edgeSamples; i++) {
+      const t = i / edgeSamples
+      const lon = west + t * (east - west)
+      const lat = south + t * (north - south)
+      const points = [
+        transformer.forward(lon, south),
+        transformer.forward(lon, north),
+        transformer.forward(west, lat),
+        transformer.forward(east, lat),
+      ]
+      for (const [x, y] of points) {
+        totalCount++
+        if (!isFinite(x) || !isFinite(y)) continue
+        validCount++
+        if (x < srcXMin) srcXMin = x
+        if (x > srcXMax) srcXMax = x
+        if (y < srcYMin) srcYMin = y
+        if (y > srcYMax) srcYMax = y
+      }
+    }
+
+    // Sample interior grid to catch extrema inside viewport (e.g., pole in polar stereo)
+    const interiorSamples = 4
+    for (let iy = 1; iy <= interiorSamples; iy++) {
+      for (let ix = 1; ix <= interiorSamples; ix++) {
+        const lon = west + (ix / (interiorSamples + 1)) * (east - west)
+        const lat = south + (iy / (interiorSamples + 1)) * (north - south)
+        const [x, y] = transformer.forward(lon, lat)
+        totalCount++
+        if (!isFinite(x) || !isFinite(y)) continue
+        validCount++
+        if (x < srcXMin) srcXMin = x
+        if (x > srcXMax) srcXMax = x
+        if (y < srcYMin) srcYMin = y
+        if (y > srcYMax) srcYMax = y
+      }
+    }
+
+    // No valid points — fall back to all regions
+    if (validCount === 0) {
+      const all: Array<{ regionX: number; regionY: number }> = []
+      for (let ry = 0; ry < numRegionsY; ry++) {
+        for (let rx = 0; rx < numRegionsX; rx++) {
+          all.push({ regionX: rx, regionY: ry })
+        }
+      }
+      return all
+    }
+
+    // Widen margin when some samples failed (projection boundary)
+    const margin = validCount < totalCount ? 8 : 2
+
+    const pxXMin = ((srcXMin - xMin) / (xMax - xMin)) * this.width
+    const pxXMax = ((srcXMax - xMin) / (xMax - xMin)) * this.width
+    const pxYMin = ((srcYMin - yMin) / (yMax - yMin)) * this.height
+    const pxYMax = ((srcYMax - yMin) / (yMax - yMin)) * this.height
+    let rXMin: number, rXMax: number, rYMin: number, rYMax: number
+    if (this.latIsAscending === false) {
+      const invYMin = this.height - pxYMax
+      const invYMax = this.height - pxYMin
+      rYMin = Math.floor(invYMin / regionH) - margin
+      rYMax = Math.floor(invYMax / regionH) + margin
+    } else {
+      rYMin = Math.floor(pxYMin / regionH) - margin
+      rYMax = Math.floor(pxYMax / regionH) + margin
+    }
+    rXMin = Math.floor(pxXMin / regionW) - margin
+    rXMax = Math.floor(pxXMax / regionW) + margin
+
+    // Clamp to valid range
+    rXMin = Math.max(0, rXMin)
+    rXMax = Math.min(numRegionsX - 1, rXMax)
+    rYMin = Math.max(0, rYMin)
+    rYMax = Math.min(numRegionsY - 1, rYMax)
+
+    const candidates: Array<{ regionX: number; regionY: number }> = []
+    for (let ry = rYMin; ry <= rYMax; ry++) {
+      for (let rx = rXMin; rx <= rXMax; rx++) {
+        candidates.push({ regionX: rx, regionY: ry })
+      }
+    }
+    return candidates
   }
 
   /**
