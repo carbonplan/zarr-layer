@@ -1,4 +1,4 @@
 {
-  "installCommand": "cd .. && npm install && npm run build && cd demo && npm install",
+  "installCommand": "git clone --branch icechunk-js --single-branch https://github.com/carbonplan/icechunk.git ../../icechunk && (cd ../../icechunk/icechunk-js && npm install && npm run build) && cd .. && npm install && npm run build && cd demo && npm install",
   "buildCommand": "npm run build"
 }

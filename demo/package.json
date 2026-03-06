@@ -12,6 +12,7 @@
   "dependencies": {
     "@carbonplan/colormaps": "^4.0.0",
     "@carbonplan/components": "^13.1.1",
+    "@carbonplan/icechunk-js": "^0.2.3",
     "@carbonplan/icons": "^2.0.0",
     "@carbonplan/layouts": "5.1.0",
     "@carbonplan/theme": "^8.1.0",

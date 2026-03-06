@@ -5,6 +5,7 @@
  * Implements CustomLayerInterface for direct WebGL rendering.
  */
 
+import type { Readable } from '@zarrita/storage'
 import {
   loadDimensionValues,
   getBands,
@@ -12,7 +13,7 @@ import {
   normalizeSelector,
 } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
-import { maplibreFragmentShaderSource } from './shaders'
+import { maplibreFragmentShaderSource, type ShaderData } from './shaders'
 import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
@@ -121,6 +122,7 @@ export class ZarrLayer {
   private throttleMs: number
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
+  private customStore: Readable<unknown> | undefined
   private lastIsGlobe: boolean | null = null
 
   get fillValue(): number | null {
@@ -165,12 +167,15 @@ export class ZarrLayer {
     throttleMs = 100,
     proj4,
     transformRequest,
+    store,
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
     }
-    if (!source) {
-      throw new Error('[ZarrLayer] source is required')
+    if (!source && !store) {
+      throw new Error(
+        '[ZarrLayer] source is required when store is not provided'
+      )
     }
     if (!variable) {
       throw new Error('[ZarrLayer] variable is required')
@@ -192,7 +197,7 @@ export class ZarrLayer {
     }
 
     this.id = id
-    this.url = source
+    this.url = source ?? id // Use id as fallback identifier when using custom store
     this.variable = variable
     this.zarrVersion = zarrVersion ?? null
     this.spatialDimensions = spatialDimensions
@@ -228,6 +233,7 @@ export class ZarrLayer {
     this.throttleMs = throttleMs
     this.proj4 = proj4
     this.transformRequest = transformRequest
+    this.customStore = store
   }
 
   private emitLoadingState(): void {
@@ -492,6 +498,7 @@ export class ZarrLayer {
         coordinateKeys: Object.keys(this.selector),
         proj4: this.proj4,
         transformRequest: this.transformRequest,
+        customStore: this.customStore,
       })
 
       await this.zarrStore.initialized
