@@ -167,6 +167,8 @@ const result = await layer.queryData(
 
 Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. In tiled mode, data for all selected bands must be in the same chunk. In untiled mode, bands can span separate chunks — each band is fetched in parallel and combined for rendering. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
 
+Band names are automatically sanitized to valid GLSL identifiers: any characters that aren't letters, digits, or underscores are replaced with underscores, and names starting with a digit are prefixed with an underscore. For example, `s2med_harvest:B02` becomes `s2med_harvest_B02` and `123band` becomes `_123band`.
+
 ```ts
 new ZarrLayer({
   // ...
