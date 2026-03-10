@@ -181,54 +181,24 @@ new ZarrLayer({
 })
 ```
 
-## band math helpers
+### NDVI example
 
-For common multi-band operations, we provide helper functions that return ready-to-use configuration objects. These include the `selector`, `customFrag`, and `clim` settings needed for the calculation. The default `clim` values can be overridden by setting `clim` after spreading the config.
-
-### NDVI (Normalized Difference Vegetation Index)
+Here's an example of computing NDVI (Normalized Difference Vegetation Index) using custom shaders:
 
 ```ts
-import { ZarrLayer, ndvi } from '@carbonplan/zarr-layer'
-
-const config = ndvi({ nir: 'B08', red: 'B04' })
-// Returns: { selector: { band: ['B08', 'B04'] }, customFrag: '...', clim: [-1, 1] }
-
 new ZarrLayer({
   source: 'https://example.com/sentinel2.zarr',
   variable: 'data',
   colormap: 'rdylgn',
-  ...config,
-  // Override clim to focus on vegetation range:
-  clim: [0, 0.8],
-  // Merge additional selector dimensions as needed:
-  selector: { ...config.selector, time: 0 },
+  selector: { band: ['B08', 'B04'], time: 0 },
+  clim: [-1, 1],
+  customFrag: `
+    float ndvi = (B08 - B04) / (B08 + B04);
+    float norm = (ndvi - clim.x) / (clim.y - clim.x);
+    vec4 c = texture(colormap, vec2(clamp(norm, 0.0, 1.0), 0.5));
+    fragColor = vec4(c.rgb, opacity);
+  `,
 })
-```
-
-### True Color RGB
-
-```ts
-import { ZarrLayer, trueColor } from '@carbonplan/zarr-layer'
-
-const config = trueColor({ red: 'B04', green: 'B03', blue: 'B02' })
-// Returns: { selector: { band: ['B04', 'B03', 'B02'] }, customFrag: '...', clim: [0, 1] }
-
-new ZarrLayer({
-  source: 'https://example.com/sentinel2.zarr',
-  variable: 'data',
-  ...config,
-  // For raw reflectance data (e.g., Sentinel-2 0-10000), override clim:
-  clim: [0, 3000],
-})
-```
-
-### Options
-
-Both helpers accept a `dimension` parameter (default: `'band'`) to specify which dimension contains the band values:
-
-```ts
-ndvi({ nir: 'B08', red: 'B04', dimension: 'wavelength' })
-trueColor({ red: 'B04', green: 'B03', blue: 'B02', dimension: 'wavelength' })
 ```
 
 ## custom projections

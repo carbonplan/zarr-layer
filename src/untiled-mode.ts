@@ -1480,22 +1480,13 @@ export class UntiledMode implements ZarrMode {
       })),
     }
 
-    // Filter out regions that are out of bounds for the current snapshot dimensions
-    // This can happen with async worker results from a different level
-    const [regionH, regionW] = snapshot.regionSize
-    const validRegions = regions.filter(({ regionX, regionY }) => {
-      const yStart = regionY * regionH
-      const xStart = regionX * regionW
-      return xStart < snapshot.width && yStart < snapshot.height
-    })
-
     // Emit loading state
     this.loadingManager.chunksLoading = true
     this.emitLoadingState()
 
-    // Mark ALL valid regions as loading upfront to prevent duplicate fetches
+    // Mark ALL regions as loading upfront to prevent duplicate fetches
     // from subsequent update() calls before we've processed them all
-    for (const { regionX, regionY } of validRegions) {
+    for (const { regionX, regionY } of regions) {
       const key = this.makeRegionKey(snapshot.index, regionX, regionY)
       let region = this.regionCache.get(key)
       if (!region) {
@@ -1508,14 +1499,14 @@ export class UntiledMode implements ZarrMode {
     const MAX_CONCURRENT = 32
     const executing: Promise<void>[] = []
 
-    for (const { regionX, regionY } of validRegions) {
+    for (const { regionX, regionY } of regions) {
       // Check if level or selector changed - bail out to avoid stale fetches
       if (
         this.currentLevelIndex !== snapshot.index ||
         this.selectorVersion !== snapshot.selectorVersion
       ) {
         cancelAllRequests(this.requestCanceller)
-        this.clearBatchLoadingFlags(validRegions, snapshot.index)
+        this.clearBatchLoadingFlags(regions, snapshot.index)
         break
       }
 
@@ -1593,26 +1584,6 @@ export class UntiledMode implements ZarrMode {
     const xEnd = Math.min(xStart + regionW, snapshot.width)
     const actualW = xEnd - xStart
     const actualH = yEnd - yStart
-
-    // Guard against invalid region bounds (can happen during level transitions).
-    // This is a secondary defense - the primary filter is in fetchRegions() which
-    // removes out-of-bounds regions before they reach here. However, this guard
-    // catches edge cases where:
-    // 1. Region indices were valid when filtered but dimensions changed during async fetch
-    // 2. Floating point precision issues in region boundary calculations
-    // The warning helps diagnose if this path is hit unexpectedly.
-    if (actualW <= 0 || actualH <= 0) {
-      console.warn(
-        `[fetchRegion] Skipping out-of-bounds region ${key}: ` +
-          `regionX=${regionX}, regionY=${regionY}, ` +
-          `regionSize=[${regionH},${regionW}], ` +
-          `snapshot.width=${snapshot.width}, snapshot.height=${snapshot.height}, ` +
-          `xStart=${xStart}, xEnd=${xEnd}, yStart=${yStart}, yEnd=${yEnd}`
-      )
-      region.loading = false
-      this.requestCanceller.controllers.delete(requestId)
-      return
-    }
 
     try {
       // Build base slice args with spatial region bounds
@@ -2369,15 +2340,10 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
-    // Get current level path for coordinate array lookup
-    // Coordinate arrays are often stored alongside each level in multiscale zarrs
-    const currentLevel = this.levels[this.currentLevelIndex]
-    const levelPath = currentLevel?.asset ?? null
-
     try {
       const coords = await loadDimensionValues(
         this.dimensionValues,
-        levelPath,
+        null,
         dimInfo,
         this.zarrStore.root,
         this.zarrStore.version
