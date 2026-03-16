@@ -191,7 +191,7 @@ Here's an example of computing NDVI (Normalized Difference Vegetation Index) usi
 new ZarrLayer({
   source: 'https://example.com/sentinel2.zarr',
   variable: 'data',
-  colormap: 'rdylgn',
+  colormap: [/* gradient */],
   selector: { band: ['B08', 'B04'], time: 0 },
   clim: [-1, 1],
   customFrag: `
