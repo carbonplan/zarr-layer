@@ -135,12 +135,14 @@ const mergeInit = (
 }
 
 /**
- * Handle fetch response, returning bytes or undefined for 404.
+ * Handle fetch response, returning bytes or undefined for 404/403.
+ * 403 is treated as "not found" for S3/CloudFront compatibility: these
+ * services return 403 (not 404) for missing or inaccessible paths.
  */
 const handleResponse = async (
   response: Response
 ): Promise<Uint8Array | undefined> => {
-  if (response.status === 404) return undefined
+  if (response.status === 404 || response.status === 403) return undefined
   if (response.status === 200 || response.status === 206) {
     return new Uint8Array(await response.arrayBuffer())
   }
