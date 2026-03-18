@@ -41,6 +41,43 @@ import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
 import type { QueryGeometry, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
 
+type MapboxInternals = {
+  transform?: {
+    expandedFarZProjMatrix?: Float32Array | Float64Array | number[]
+    worldSize?: number
+  }
+  painter?: {
+    transform?: {
+      expandedFarZProjMatrix?: Float32Array | Float64Array | number[]
+      worldSize?: number
+    }
+  }
+}
+
+function scaleMercatorMatrix(
+  matrix: number[] | Float32Array | Float64Array,
+  scale: number
+): Float32Array {
+  // Mapbox's customLayerMatrix() is the projection matrix scaled from world
+  // pixels to normalized Mercator units. To mimic its expanded-far variant,
+  // scale the basis columns but leave translation unchanged.
+  const out = new Float32Array(matrix)
+  for (let i = 0; i < 4; i++) out[i] *= scale
+  for (let i = 4; i < 8; i++) out[i] *= scale
+  for (let i = 8; i < 12; i++) out[i] *= scale
+  return out
+}
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)))
+  return t * t * (3 - 2 * t)
+}
+
+function mapboxGlobeToMercatorTransition(zoom: number): number {
+  // Mirrors Mapbox's current globeToMercatorTransition(zoom) helper.
+  return smoothstep(5, 6, zoom)
+}
+
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
   readonly renderingMode: '2d' | '3d'
@@ -125,7 +162,113 @@ export class ZarrLayer {
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
   private customStore: Readable<unknown> | undefined
+  private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
+  private usingDirectMapboxGlobePath: boolean = false
+  private mapboxDirectGlobePathAvailable: boolean = false
+  private expandedFarZSource: Float32Array | Float64Array | number[] | undefined
+  private expandedFarZWorldSize: number | undefined
+  private expandedFarZMercatorMatrix: Float32Array | undefined
+
+  private getExpandedFarZMercatorMatrix(
+    expandedFarZProjMatrix?: Float32Array | Float64Array | number[],
+    worldSize?: number
+  ): Float32Array | undefined {
+    if (!expandedFarZProjMatrix || !worldSize) return undefined
+    if (
+      this.expandedFarZSource === expandedFarZProjMatrix &&
+      this.expandedFarZWorldSize === worldSize
+    ) {
+      return this.expandedFarZMercatorMatrix
+    }
+
+    this.expandedFarZSource = expandedFarZProjMatrix
+    this.expandedFarZWorldSize = worldSize
+    this.expandedFarZMercatorMatrix = scaleMercatorMatrix(
+      expandedFarZProjMatrix,
+      worldSize
+    )
+    return this.expandedFarZMercatorMatrix
+  }
+
+  private canUseMapboxDirectGlobePath(): boolean {
+    if (this.mapboxDirectGlobePathAvailable) {
+      return true
+    }
+    if (!this.map || !this.isGlobeProjection()) {
+      return false
+    }
+
+    const mapWithInternals = this.map as typeof this.map & MapboxInternals
+    const worldSize =
+      mapWithInternals.transform?.worldSize ??
+      mapWithInternals.painter?.transform?.worldSize
+    const expandedFarZProjMatrix =
+      mapWithInternals.transform?.expandedFarZProjMatrix ??
+      mapWithInternals.painter?.transform?.expandedFarZProjMatrix
+
+    // Only cache on success — the private matrix may not be populated yet
+    // during early lifecycle events. Failed probes keep retrying until the
+    // matrix appears or the layer is removed.
+    const available = !!this.getExpandedFarZMercatorMatrix(
+      expandedFarZProjMatrix,
+      worldSize
+    )
+    if (available) {
+      this.mapboxDirectGlobePathAvailable = true
+    }
+    return available
+  }
+
+  private configureMapboxRenderPath(): void {
+    if (!this.map || !this.mode) return
+
+    const isMapbox = typeof this.map.getTerrain === 'function'
+    const isUntiled = this.mode instanceof UntiledMode
+    const resolvedProj4 = this.zarrStore?.proj4 ?? this.proj4
+    const resolvedCrs = this.zarrStore?.crs ?? this.crs
+    const isEcefEligible = !!resolvedProj4 || resolvedCrs === 'EPSG:4326'
+    const isGlobe = this.isGlobeProjection()
+    const transition =
+      this.map.getZoom && isGlobe
+        ? mapboxGlobeToMercatorTransition(this.map.getZoom())
+        : 1
+    // FRAGILE: Mapbox classifies a custom layer as draped whenever renderToTile
+    // exists. We use the direct globe path only for untiled, terrain-off,
+    // ECEF-eligible datasets at the fully-globe endpoint. During the zoom morph,
+    // restore the draped path so Mapbox handles the transition itself with its
+    // internal globe/mercator matrices. This means polar coverage can snap back
+    // to the draped path near the 5-6 zoom morph window; that is intentional,
+    // and is currently more stable than trying to carry the direct ECEF path
+    // through Mapbox's custom-layer transition contract.
+    const shouldUseDirectGlobePath =
+      this.renderPoles &&
+      isMapbox &&
+      isUntiled &&
+      isEcefEligible &&
+      !this.map.getTerrain?.() &&
+      isGlobe &&
+      this.canUseMapboxDirectGlobePath() &&
+      transition <= 1e-3
+
+    if (shouldUseDirectGlobePath === this.usingDirectMapboxGlobePath) return
+    this.usingDirectMapboxGlobePath = shouldUseDirectGlobePath
+
+    if (shouldUseDirectGlobePath) {
+      Object.defineProperty(this, 'renderToTile', {
+        value: undefined,
+        configurable: true,
+        writable: true,
+      })
+      this.map.triggerRepaint?.()
+    } else if (Object.prototype.hasOwnProperty.call(this, 'renderToTile')) {
+      delete (this as { renderToTile?: unknown }).renderToTile
+      // Re-entering the draped path requires fresh tile draws; otherwise Mapbox
+      // can show a one-frame gap before renderToTile repopulates tile textures.
+      this.tileNeedsRender = true
+      this.map.triggerRepaint?.()
+    }
+  }
 
   get fillValue(): number | null {
     return this._fillValue
@@ -170,6 +313,7 @@ export class ZarrLayer {
     proj4,
     transformRequest,
     store,
+    renderPoles = false,
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -236,6 +380,7 @@ export class ZarrLayer {
     this.proj4 = proj4
     this.transformRequest = transformRequest
     this.customStore = store
+    this.renderPoles = renderPoles
   }
 
   private emitLoadingState(): void {
@@ -392,15 +537,21 @@ export class ZarrLayer {
 
       this.projectionChangeHandler = () => {
         const isGlobe = this.isGlobeProjection()
-        this.mode?.onProjectionChange(isGlobe)
+        if (this.lastIsGlobe !== isGlobe) {
+          this.mode?.onProjectionChange(isGlobe)
+          this.lastIsGlobe = isGlobe
+        }
+        this.configureMapboxRenderPath()
       }
       if (typeof map.on === 'function' && this.projectionChangeHandler) {
         map.on('projectionchange', this.projectionChangeHandler)
         map.on('style.load', this.projectionChangeHandler)
+        map.on('move', this.projectionChangeHandler)
       }
 
       await this.initialize()
       await this.initializeMode()
+      this.configureMapboxRenderPath()
 
       const isGlobe = this.isGlobeProjection()
       this.lastIsGlobe = isGlobe
@@ -614,6 +765,8 @@ export class ZarrLayer {
       return
     }
 
+    this.configureMapboxRenderPath()
+
     const projectionParams = resolveProjectionParams(
       params,
       projection,
@@ -639,6 +792,24 @@ export class ZarrLayer {
     const isGlobe = this.isGlobeProjection()
     const worldOffsets = computeWorldOffsets(this.map, isGlobe)
     const colormapTexture = this.colormap.ensureTexture(this.gl)
+    let expandedFarZMercatorMatrix: Float32Array | undefined
+    if (projectionParams.mapbox?.projection.name === 'globe') {
+      const mapWithInternals = this.map as typeof this.map & MapboxInternals
+      const worldSize =
+        mapWithInternals.transform?.worldSize ??
+        mapWithInternals.painter?.transform?.worldSize
+      const expandedFarZProjMatrix =
+        mapWithInternals.transform?.expandedFarZProjMatrix ??
+        mapWithInternals.painter?.transform?.expandedFarZProjMatrix
+      // FRAGILE: Mapbox's internal globe raster pass uses expandedFarZProjMatrix,
+      // while customLayerMatrix() uses the regular far plane. Rebuild the
+      // Mercator-scaled variant here so the direct ECEF path shares the globe
+      // surface's depth behavior.
+      expandedFarZMercatorMatrix = this.getExpandedFarZMercatorMatrix(
+        expandedFarZProjMatrix,
+        worldSize
+      )
+    }
 
     const context: RenderContext = {
       gl: this.gl,
@@ -656,7 +827,16 @@ export class ZarrLayer {
       customShaderConfig: this.customShaderConfig || undefined,
       shaderData: projectionParams.shaderData,
       projectionData: projectionParams.projectionData,
-      mapbox: projectionParams.mapbox ?? legacyMapboxFallback,
+      mapbox: projectionParams.mapbox
+        ? {
+            ...projectionParams.mapbox,
+            directGlobePathActive: this.usingDirectMapboxGlobePath,
+            expandedFarZMercatorMatrix:
+              projectionParams.mapbox.projection.name === 'globe'
+                ? expandedFarZMercatorMatrix
+                : undefined,
+          }
+        : legacyMapboxFallback,
     }
 
     this.mode.render(this.renderer, context)
@@ -677,6 +857,8 @@ export class ZarrLayer {
     ) {
       return
     }
+
+    this.configureMapboxRenderPath()
 
     const isGlobe = this.syncProjectionState()
     this.mode.update(this.map, this.gl)
@@ -740,6 +922,7 @@ export class ZarrLayer {
     ) {
       this.map.off('projectionchange', this.projectionChangeHandler)
       this.map.off('style.load', this.projectionChangeHandler)
+      this.map.off('move', this.projectionChangeHandler)
     }
   }
 

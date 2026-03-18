@@ -135,6 +135,22 @@ export interface ZarrLayerOptions {
    * When provided, the store cache is bypassed to prevent credential sharing between layers.
    */
   transformRequest?: TransformRequest
+  /**
+   * Enable full polar coverage in Mapbox globe view for untiled EPSG:4326 or
+   * proj4 datasets. Has no effect on tiled or EPSG:3857 data.
+   *
+   * MapLibre globe always renders to the poles automatically.
+   *
+   * For Mapbox, this enables an experimental direct ECEF path that bypasses
+   * tile draping. Only activates at the fully-globe zoom endpoint; during
+   * the globe-to-mercator zoom morph the layer falls back to the standard
+   * draped path. Incompatible with Mapbox terrain — when terrain is enabled
+   * the layer uses the draped tile path. Relies on Mapbox internal APIs and
+   * may break across Mapbox GL JS versions.
+   *
+   * Default: `false`
+   */
+  renderPoles?: boolean
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'
@@ -180,6 +196,7 @@ export interface MapLike {
   // type can be string, array expression, or complex PropertyValueSpecification
   getProjection?(): { type?: unknown; name?: string } | null
   getRenderWorldCopies?(): boolean
+  getTerrain?(): unknown
   on?(event: string, handler: (...args: unknown[]) => void): void
   off?(event: string, handler: (...args: unknown[]) => void): void
   triggerRepaint?(): void

@@ -62,7 +62,8 @@ export function resolveProjectionMode(
   useWgs84: boolean = false,
   useDirectEcef: boolean = false
 ): ProjectionMode {
-  // For Mapbox (proj4 and non-proj4)
+  // For Mapbox (ECEF, proj4, and non-proj4)
+  if (useMapbox && useDirectEcef) return 'mapbox-ecef'
   if (useMapbox && useWgs84) return 'mapbox-proj4'
   if (useMapbox) return 'mapbox'
   // For MapLibre: projectTile() handles both globe and mercator modes
@@ -100,7 +101,7 @@ const toFloat32Array = (
 
 // Projection mode helpers - modes are combinations of input space + projection target
 const isMapboxMode = (mode: ProjectionMode) =>
-  mode === 'mapbox' || mode === 'mapbox-proj4'
+  mode === 'mapbox' || mode === 'mapbox-proj4' || mode === 'mapbox-ecef'
 const isMaplibreMode = (mode: ProjectionMode) =>
   mode === 'maplibre' || mode === 'maplibre-proj4' || mode === 'maplibre-ecef'
 
@@ -110,7 +111,7 @@ function getVertexShaderOptions(projectionMode: ProjectionMode): {
   projection: VertexShaderProjection
 } {
   const inputSpace: VertexShaderInputSpace =
-    projectionMode === 'maplibre-ecef'
+    projectionMode === 'maplibre-ecef' || projectionMode === 'mapbox-ecef'
       ? 'wgs84-direct'
       : projectionMode.includes('proj4')
       ? 'wgs84'
@@ -310,9 +311,18 @@ export function applyProjectionUniforms(
       break
     }
     case 'mapbox':
-    case 'mapbox-proj4': {
-      // mapbox is always present for Mapbox (mercator uses identity matrix + transition=1)
-      setMatrix4(shaderProgram.matrixLoc, matrix)
+    case 'mapbox-proj4':
+    case 'mapbox-ecef': {
+      // Mapbox's public custom-layer matrix uses the standard far plane, but
+      // the direct globe ECEF path needs the expanded-far variant to match
+      // the globe surface depth contract. Tile rendering still uses the tile matrix.
+      const mapboxMatrix =
+        shaderProgram.projectionMode === 'mapbox-ecef' &&
+        !isGlobeTileRender &&
+        mapbox?.expandedFarZMercatorMatrix
+          ? mapbox.expandedFarZMercatorMatrix
+          : matrix
+      setMatrix4(shaderProgram.matrixLoc, mapboxMatrix)
       setMatrix4(
         shaderProgram.globeToMercMatrixLoc,
         mapbox?.globeToMercatorMatrix

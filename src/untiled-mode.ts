@@ -141,7 +141,6 @@ type LevelMeta = {
 
 /** Maximum number of regions to keep in cache (LRU eviction) */
 const MAX_CACHED_REGIONS = 128
-
 /** Snapshot of level state captured at fetch start to prevent race conditions */
 interface LevelSnapshot {
   index: number
@@ -249,7 +248,6 @@ export class UntiledMode implements ZarrMode {
   // subdivisions to 1 while the ECEF shader is still rendering on the globe.
   // This flag defers the rebuild until projectionTransition reaches 0.
   private pendingGeometryRebuild: boolean = false
-
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
 
@@ -1031,6 +1029,8 @@ export class UntiledMode implements ZarrMode {
     // Defensive reset: wgs84Bounds is only set by the proj4 branch below.
     // Ensures it's not stale after projection toggle or geometry rebuild.
     region.wgs84Bounds = null
+    region.indexArr = null
+    region.useIndexedMesh = false
 
     const geoBounds = this.getRegionBounds(
       regionX,
@@ -1113,14 +1113,13 @@ export class UntiledMode implements ZarrMode {
           )
         : MERCATOR_SUBDIVISIONS
 
-      const subdivided = createSubdividedQuad(subdivisions)
-      region.vertexArr = subdivided.vertexArr
-      region.useIndexedMesh = false
-      region.vertexCount = subdivided.vertexArr.length / 2
-
       if (this.crs === 'EPSG:4326') {
         // EPSG:4326 datasets: use fragment shader reprojection
         // Mesh is in Mercator space, fragment shader inverts Mercator → lat for texture lookup
+        const subdivided = createSubdividedQuad(subdivisions)
+        region.vertexArr = subdivided.vertexArr
+        region.pixCoordArr = subdivided.texCoordArr
+        region.vertexCount = subdivided.vertexArr.length / 2
 
         // Compute Mercator bounds for vertex positioning
         // geoBounds for 4326 data: xMin/xMax = lon, yMin/yMax = lat
@@ -1138,10 +1137,11 @@ export class UntiledMode implements ZarrMode {
 
         // Store data orientation for fragment shader
         region.latIsAscending = this.latIsAscending
-
-        // Use linear texture coords - fragment shader handles orientation via latIsAscending
-        region.pixCoordArr = subdivided.texCoordArr
       } else {
+        const subdivided = createSubdividedQuad(subdivisions)
+        region.vertexArr = subdivided.vertexArr
+        region.vertexCount = subdivided.vertexArr.length / 2
+
         // EPSG:3857 and other Mercator-compatible CRS
         // Texture coords need V-flip if latitude is ascending
         region.pixCoordArr = this.latIsAscending
@@ -2059,18 +2059,34 @@ export class UntiledMode implements ZarrMode {
     // EPSG:4326 uses fragment shader reprojection instead
     const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
 
-    // Gate ECEF off projectionTransition (continuous), not isGlobeProjection (boolean).
-    // isGlobeProjection may flip to false at the START of the globe→flat animation,
-    // before u_projection_transition finishes blending to 0. Using the continuous
-    // transition value keeps the ECEF shader active for the full animation.
-    const hasGlobeTransition =
+    // MapLibre globe exposes a projectionTransition value in the shader prelude.
+    // Keep ECEF active while that transition is nonzero.
+    const hasMaplibreGlobeTransition =
       context.projectionData?.projectionTransition != null &&
       context.projectionData.projectionTransition > 0
-    const useDirectEcef =
-      hasGlobeTransition && !useMapbox && (useWgs84 || this.crs === 'EPSG:4326')
+    // Mapbox's globe→mercator zoom morph uses internal globe/mercator matrices
+    // that the public custom-layer callback does not expose. Keep direct ECEF
+    // only for the fully-globe endpoint; during the morph, fall back to the
+    // regular direct Mapbox path so the zoom transition stays stable.
+    const hasMapboxGlobe = useMapbox && this.isGlobeProjection
+    // Match shader selection to the active render path. The layer-level
+    // draped/direct switch is decided in ZarrLayer before this render call;
+    // using that same flag here avoids one-frame depth mismatches near the
+    // zoom-morph threshold where the public transition value and the layer path
+    // can momentarily diverge.
+    const hasMapboxDirectGlobePath =
+      hasMapboxGlobe && context.mapbox?.directGlobePathActive === true
+    const ecefEligible = useWgs84 || this.crs === 'EPSG:4326'
+    const useDirectEcef = useMapbox
+      ? hasMapboxDirectGlobePath && ecefEligible
+      : hasMaplibreGlobeTransition && ecefEligible
 
     // Flush deferred geometry rebuild once transition completes
-    if (this.pendingGeometryRebuild && !hasGlobeTransition) {
+    if (
+      this.pendingGeometryRebuild &&
+      !hasMaplibreGlobeTransition &&
+      !hasMapboxGlobe
+    ) {
       this.pendingGeometryRebuild = false
       this.rebuildAllGeometry()
     }
@@ -2102,7 +2118,6 @@ export class UntiledMode implements ZarrMode {
     // Rendering at shifted world offsets on the globe produces duplicate renders.
     const worldOffsets = useDirectEcef ? [0] : context.worldOffsets
 
-    // Always use region-based rendering (unified path)
     this.renderRegions(
       renderer,
       shaderProgram,
@@ -2205,6 +2220,8 @@ export class UntiledMode implements ZarrMode {
     tileId: TileId,
     context: RenderContext
   ): boolean {
+    // This method is only used for draped Mapbox rendering. The direct
+    // untiled ECEF path disables renderToTile at the layer level.
     return renderMapboxTile({
       renderer,
       mode: this,

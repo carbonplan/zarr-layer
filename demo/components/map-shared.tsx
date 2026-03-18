@@ -236,6 +236,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
         latIsAscending: datasetModule.latIsAscending,
         proj4: datasetModule.proj4,
         onLoadingStateChange: setLoadingState,
+        renderPoles: true,
       }
 
       if (datasetModule.store) {
@@ -379,8 +380,6 @@ export const Map = () => {
 
   const mapConfig = getMapConfig(mapProvider)
 
-  useMapLayer(map, isMapLoaded)
-
   useEffect(() => {
     if (!mapContainer.current) return
 
@@ -425,6 +424,8 @@ export const Map = () => {
       console.warn('Error toggling terrain:', e)
     }
   }, [map, isMapLoaded, terrainEnabled, mapProvider])
+
+  useMapLayer(map, isMapLoaded)
 
   useEffect(() => {
     if (!map || !isMapLoaded) return

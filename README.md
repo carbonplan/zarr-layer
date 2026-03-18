@@ -34,6 +34,21 @@ Support for the emerging [multiscales](https://github.com/zarr-conventions/multi
 
 See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
+## globe rendering and polar coverage
+
+Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For untiled EPSG:4326 and `proj4` datasets:
+
+**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed.
+
+**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. This relies on Mapbox internal APIs and may break across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the standard draped path (with pole holes visible). Incompatible with draping the zarr layer over Mapbox terrain — when terrain is enabled the layer always uses the draped tile path.
+
+```ts
+new ZarrLayer({
+  // ...
+  renderPoles: true, // Mapbox only — MapLibre always renders to the poles
+})
+```
+
 ## install
 
 ```bash
@@ -101,6 +116,7 @@ map.on('load', () => {
 | onLoadingStateChange | function | - | Loading state callback |
 | throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to `0` to disable. |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
+| renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for untiled EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on tiled or EPSG:3857 data. MapLibre always renders to the poles. |
 
 ## methods
 
@@ -191,7 +207,9 @@ Here's an example of computing NDVI (Normalized Difference Vegetation Index) usi
 new ZarrLayer({
   source: 'https://example.com/sentinel2.zarr',
   variable: 'data',
-  colormap: [/* gradient */],
+  colormap: [
+    /* gradient */
+  ],
   selector: { band: ['B08', 'B04'], time: 0 },
   clim: [-1, 1],
   customFrag: `
