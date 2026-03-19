@@ -20,6 +20,14 @@ Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js
 
 High resolution datasets require multiscales. There are two main ways to store these. We recommend the untiled path for ease of data creation. Performance appears similar between the two options in most cases.
 
+### Datatree roots
+
+If a root store contains child dataset groups (for example `region_a/<variable>`, `region_b/<variable>`), `zarr-layer` auto-detects this and renders/query each child as part of one layer (consolidated metadata required at the root). Current datatree behavior assumes child footprints do not overlap and that value scaling metadata (`scale_factor` / `add_offset`) is consistent across children.
+
+Datatree init is fastest when each child group has zarr-conventions `multiscales` layout metadata: child footprints can be derived directly from root consolidated metadata (no extra coordinate-array reads). If child `multiscales` layout metadata is missing, bounds are resolved per child by loading coordinate arrays during initialization, which is slower for many children.
+
+It also assumes the coordinates are shared except the spatial dimensions (e.g., `lat`, `lon`) which can differ across children. This allows for use cases like regionally chunked datasets where each child covers a different spatial extent but they share the same time dimension.
+
 #### Tiled
 
 Classic approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
@@ -93,6 +101,7 @@ map.on('load', () => {
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
 | crs | string | auto | CRS identifier for built-in projections (`EPSG:4326` or `EPSG:3857`). For other CRS, use `proj4`. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
+| resolveProj4 | boolean \| function | `true` | Resolve missing proj4 definitions for CRS codes. `true` uses online lookup (`epsg.io`), `false` disables, function provides custom resolver. |
 | bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857). These are interpreted as edge bounds (not center-to-center) |
 | latIsAscending | boolean | auto | Latitude orientation |
 | renderingMode | `'2d'` \| `'3d'` | `'3d'` | Custom layer rendering mode |
@@ -191,7 +200,9 @@ Here's an example of computing NDVI (Normalized Difference Vegetation Index) usi
 new ZarrLayer({
   source: 'https://example.com/sentinel2.zarr',
   variable: 'data',
-  colormap: [/* gradient */],
+  colormap: [
+    /* gradient */
+  ],
   selector: { band: ['B08', 'B04'], time: 0 },
   clim: [-1, 1],
   customFrag: `
@@ -221,6 +232,12 @@ new ZarrLayer({
 ```
 
 The data will be reprojected to Web Mercator for display using GPU-accelerated mesh reprojection powered by [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster). Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+
+If metadata only provides a CRS code (for example `EPSG:6933`) and no inline `proj4`, set `resolveProj4` to:
+
+- `true` (default): fetch from `https://epsg.io/<code>.proj4`
+- `false`: disable online lookup
+- custom function: plug in your own CRS registry/API
 
 ## queries
 

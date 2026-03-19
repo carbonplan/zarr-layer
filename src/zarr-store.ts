@@ -1,4 +1,6 @@
 import * as zarr from 'zarrita'
+import parseWkt from 'wkt-parser'
+import proj4 from 'proj4'
 import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
   Bounds,
@@ -7,6 +9,8 @@ import type {
   CRS,
   UntiledLevel,
   TransformRequest,
+  ResolveProj4,
+  ResolveProj4Context,
 } from './types'
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
@@ -16,6 +20,14 @@ const textDecoder = new TextDecoder()
 const decodeJSON = (bytes: Uint8Array | undefined): unknown => {
   if (!bytes) return null
   return JSON.parse(textDecoder.decode(bytes))
+}
+
+const EPSG_AUTHORITY_REGEX = /AUTHORITY\["EPSG","(\d+)"\]/g
+const PROJ4_EXTENSION_REGEX = /EXTENSION\["PROJ4","([^"]+)"\]/
+
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== 'object' || value === null) return null
+  return value as Record<string, unknown>
 }
 
 interface PyramidMetadata {
@@ -48,7 +60,7 @@ interface UntiledMultiscaleLayoutEntry {
 interface UntiledMultiscaleMetadata {
   layout: UntiledMultiscaleLayoutEntry[]
   resampling_method?: string
-  crs?: 'EPSG:4326' | 'EPSG:3857'
+  crs?: string
 }
 
 interface ZarrV2ConsolidatedMetadata {
@@ -169,6 +181,20 @@ const fetchRange = (
   })
 }
 
+const fetchSuffix = (
+  url: string | URL,
+  suffixLength: number,
+  opts: RequestInit = {}
+): Promise<Response> => {
+  return fetch(url, {
+    ...opts,
+    headers: {
+      ...(opts.headers as Record<string, string>),
+      Range: `bytes=-${suffixLength}`,
+    },
+  })
+}
+
 /**
  * Custom store that calls transformRequest for each request with the fully resolved URL.
  * This enables per-path authentication like presigned S3 URLs.
@@ -216,34 +242,13 @@ class TransformingFetchStore implements AsyncReadable<RequestInit> {
     let response: Response
 
     if ('suffixLength' in range) {
-      // For suffix queries, we need separate signed URLs for HEAD and GET
-      const { url: headUrl, ...headOverrides } = await this.transformRequest(
-        resolvedUrl,
-        { method: 'HEAD' }
-      )
-      const headMerged = mergeInit(headOverrides, opts)
-      const headResponse = await fetch(headUrl, {
-        ...headMerged,
-        method: 'HEAD',
-      })
-      if (!headResponse.ok) {
-        return handleResponse(headResponse)
-      }
-      const contentLength = headResponse.headers.get('Content-Length')
-      const length = Number(contentLength)
-
-      // Now get the actual range with a GET-signed URL
+      // Use a single suffix-range request to avoid extra HEAD probes.
       const { url: getUrl, ...getOverrides } = await this.transformRequest(
         resolvedUrl,
         { method: 'GET' }
       )
       const getMerged = mergeInit(getOverrides, opts)
-      response = await fetchRange(
-        getUrl,
-        length - range.suffixLength,
-        range.suffixLength,
-        getMerged
-      )
+      response = await fetchSuffix(getUrl, range.suffixLength, getMerged)
     } else {
       const { url: transformedUrl, ...overrides } = await this.transformRequest(
         resolvedUrl,
@@ -281,6 +286,7 @@ interface ZarrStoreOptions {
   coordinateKeys?: string[]
   latIsAscending?: boolean | null
   proj4?: string
+  resolveProj4?: boolean | ResolveProj4
   transformRequest?: TransformRequest
   /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
   customStore?: Readable<unknown> | AsyncReadable<unknown>
@@ -319,7 +325,7 @@ const createFetchStore = (
   transformRequest?: TransformRequest
 ): zarr.FetchStore | TransformingFetchStore => {
   if (!transformRequest) {
-    return new zarr.FetchStore(url)
+    return new zarr.FetchStore(url, { useSuffixRequest: true })
   }
   return new TransformingFetchStore(url, transformRequest)
 }
@@ -330,6 +336,7 @@ export class ZarrStore {
     ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | ZarrV3ArrayMetadata
   >()
   private static _storeCache = new Map<string, Promise<ZarrStoreType>>()
+  private static _proj4LookupCache = new Map<string, Promise<string | null>>()
 
   source: string
   version: 2 | 3 | null
@@ -338,6 +345,8 @@ export class ZarrStore {
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
   private transformRequest?: TransformRequest
+  private resolveProj4?: ResolveProj4
+  private enableOnlineProj4Lookup: boolean = true
   private customStore?: Readable<unknown> | AsyncReadable<unknown>
 
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
@@ -363,6 +372,430 @@ export class ZarrStore {
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
+  private _variableMetadataMissing: boolean = false
+  private _pendingUserCrs: string | null = null
+  private _pendingMetadataCrs: string | null = null
+
+  private normalizeCrsCode(crs: unknown): string | null {
+    if (typeof crs === 'number' && Number.isFinite(crs)) {
+      return `EPSG:${Math.trunc(crs)}`
+    }
+    if (typeof crs !== 'string') return null
+
+    const value = crs.trim()
+    if (!value) return null
+
+    if (/^EPSG:\d+$/i.test(value)) {
+      return value.toUpperCase()
+    }
+
+    if (/^\d+$/.test(value)) {
+      return `EPSG:${value}`
+    }
+
+    const urnMatch = value.match(/EPSG(?:::|\/0\/)(\d+)$/i)
+    if (urnMatch) {
+      return `EPSG:${urnMatch[1]}`
+    }
+
+    return value
+  }
+
+  private logCrsCandidate(
+    source: string,
+    kind: 'proj' | 'spatial_ref',
+    candidate: { crs?: string; proj4?: string }
+  ): void {
+    const hasProj4 =
+      typeof candidate.proj4 === 'string' && candidate.proj4.trim().length > 0
+    console.info(
+      `[zarr-layer] CRS candidate (${kind}) from ${source}: ` +
+        `crs="${candidate.crs ?? 'none'}", proj4=${
+          hasProj4 ? 'present' : 'missing'
+        }`
+    )
+  }
+
+  private normalizeProj4Definition(
+    proj4Candidate: unknown,
+    source: string
+  ): string | null {
+    if (typeof proj4Candidate !== 'string') return null
+    const value = proj4Candidate.trim()
+    if (!value) return null
+
+    // Accept EPSG codes only when they are already registered in proj4.
+    if (/^EPSG:\d+$/i.test(value)) {
+      const code = value.toUpperCase()
+      const existing = proj4.defs(code)
+      if (existing) {
+        try {
+          // Ensure registered definition is actually usable by proj4.
+          proj4(code, 'EPSG:4326')
+          return code
+        } catch (err) {
+          console.warn(
+            `[zarr-layer] Registered proj4 definition for "${code}" is unusable: ` +
+              `${err instanceof Error ? err.message : err}`
+          )
+        }
+      }
+      console.warn(
+        `[zarr-layer] Ignoring proj4 candidate "${value}" from ${source}: ` +
+          `EPSG code is not registered in proj4.`
+      )
+      return null
+    }
+
+    try {
+      // Validate parseability early so invalid strings don't poison CRS inference.
+      proj4(value, 'EPSG:4326')
+      return value
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Ignoring invalid proj4 candidate from ${source}: ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+      return null
+    }
+  }
+
+  private extractFromWkt(wkt: unknown): { crs?: string; proj4?: string } {
+    if (typeof wkt !== 'string' || !wkt.trim()) return {}
+
+    // Prefer parser-based extraction via proj4js/wkt-parser.
+    // Keep regex fallback for malformed or non-standard WKT strings.
+    try {
+      const parsed = asRecord(parseWkt(wkt))
+      if (parsed) {
+        const directTitle = this.normalizeCrsCode(parsed.title)
+        const authorityObj = asRecord(parsed.AUTHORITY)
+        const authorityCode = this.normalizeCrsCode(authorityObj?.EPSG)
+
+        const extension = asRecord(parsed.EXTENSION)
+        const proj4FromExtension =
+          typeof extension?.PROJ4 === 'string' ? extension.PROJ4 : undefined
+
+        const crs = authorityCode ?? directTitle
+        const proj4FromParsed =
+          !proj4FromExtension && crs
+            ? this.registerProjectionDefinition(
+                crs,
+                parsed as proj4.ProjectionDefinition,
+                'parsed WKT'
+              )
+            : undefined
+        const proj4FromWkt =
+          !proj4FromExtension && !proj4FromParsed && crs
+            ? this.registerProjectionDefinition(crs, wkt, 'raw WKT')
+            : undefined
+        const inferredProj4 =
+          proj4FromExtension ?? proj4FromParsed ?? proj4FromWkt
+        if (crs || inferredProj4) {
+          return { crs: crs ?? undefined, proj4: inferredProj4 }
+        }
+      }
+    } catch {
+      // Fall through to regex-based fallback.
+    }
+
+    const epsgMatches = [...wkt.matchAll(EPSG_AUTHORITY_REGEX)]
+    const last = epsgMatches[epsgMatches.length - 1]
+    const crs = last ? `EPSG:${last[1]}` : undefined
+
+    const proj4Match = wkt.match(PROJ4_EXTENSION_REGEX)
+    const proj4 =
+      proj4Match?.[1] ??
+      (crs ? this.registerProjectionDefinition(crs, wkt, 'raw WKT') : undefined)
+
+    return { crs, proj4 }
+  }
+
+  private registerProjectionDefinition(
+    crs: string,
+    definition: string | proj4.ProjectionDefinition,
+    sourceLabel: string
+  ): string | undefined {
+    if (!/^EPSG:\d+$/i.test(crs)) return undefined
+
+    try {
+      const code = crs.toUpperCase()
+      proj4.defs(code, definition)
+      // Validate immediately: proj4.defs can accept unusable definitions.
+      proj4(code, 'EPSG:4326')
+      console.info(
+        `[zarr-layer] Registered proj4 definition for "${code}" from ${sourceLabel}.`
+      )
+      return code
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Failed to register projection for "${crs}" from ${sourceLabel}: ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+      return undefined
+    }
+  }
+
+  private applyInferredProjection(
+    candidate: { crs?: string; proj4?: string },
+    source: string
+  ): void {
+    if (this._crsOverride) return
+
+    const inferredProj4 = this.normalizeProj4Definition(candidate.proj4, source)
+    if (inferredProj4 && !this.proj4) {
+      this.proj4 = inferredProj4
+      if (!candidate.crs) {
+        console.info(
+          `[zarr-layer] Inferred proj4 from ${source} without CRS code; ` +
+            `continuing CRS inference from other metadata.`
+        )
+      }
+    }
+
+    if (!candidate.crs) return
+    const normalized = this.normalizeCrsCode(candidate.crs)
+    if (!normalized) return
+
+    if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
+      this.crs = normalized
+      this._crsFromMetadata = true
+      this._pendingMetadataCrs = null
+      console.info(
+        `[zarr-layer] Using inferred CRS "${normalized}" from ${source}.`
+      )
+      return
+    }
+
+    if (this.proj4) {
+      this.crs = normalized as CRS
+      this._crsFromMetadata = true
+      this._pendingMetadataCrs = null
+      console.info(
+        `[zarr-layer] Using inferred CRS "${normalized}" from ${source} ` +
+          `with proj4 reprojection.`
+      )
+      return
+    }
+
+    const preRegistered = this.normalizeProj4Definition(
+      normalized,
+      `${source} (pre-registered proj4 definition)`
+    )
+    if (preRegistered) {
+      this.proj4 = preRegistered
+      this.crs = normalized as CRS
+      this._crsFromMetadata = true
+      this._pendingMetadataCrs = null
+      console.info(
+        `[zarr-layer] Using inferred CRS "${normalized}" from ${source} ` +
+          `with pre-registered proj4 definition.`
+      )
+      return
+    }
+
+    this._pendingMetadataCrs = normalized
+    console.warn(
+      `[zarr-layer] Inferred CRS "${normalized}" from ${source}, but no proj4 definition was found. ` +
+        `Will attempt resolver/online lookup before final fallback.`
+    )
+  }
+
+  private inferFromProjConvention(
+    attrs: Record<string, unknown> | null
+  ): { crs?: string; proj4?: string } | null {
+    if (!attrs) return null
+
+    const fromCode = this.normalizeCrsCode(attrs['proj:code'])
+    const fromEpsg = this.normalizeCrsCode(attrs['proj:epsg'])
+    const fromCrs = this.normalizeCrsCode(attrs['proj:crs'])
+
+    const proj4 =
+      typeof attrs['proj:proj4'] === 'string' ? attrs['proj:proj4'] : undefined
+
+    const wktCandidate =
+      attrs['proj:wkt2'] ?? attrs['proj:wkt'] ?? attrs['proj:wkt2_2019']
+    const fromWkt = this.extractFromWkt(wktCandidate)
+
+    let fromProjJson: string | null = null
+    const projJson = asRecord(attrs['proj:projjson'])
+    if (projJson) {
+      const id = asRecord(projJson.id)
+      const authority =
+        typeof id?.authority === 'string' ? id.authority.toUpperCase() : null
+      const code = id?.code
+      if (authority === 'EPSG') {
+        fromProjJson = this.normalizeCrsCode(code)
+      }
+    }
+
+    const crs = fromCode ?? fromEpsg ?? fromCrs ?? fromProjJson ?? fromWkt.crs
+    const inferredProj4 = proj4 ?? fromWkt.proj4
+
+    if (!crs && !inferredProj4) return null
+    return { crs: crs ?? undefined, proj4: inferredProj4 }
+  }
+
+  private inferFromSpatialRef(
+    attrs: Record<string, unknown> | null
+  ): { crs?: string; proj4?: string } | null {
+    if (!attrs) return null
+    const wkt = attrs.crs_wkt ?? attrs.spatial_ref
+    const parsed = this.extractFromWkt(wkt)
+    if (!parsed.crs && !parsed.proj4) return null
+    return parsed
+  }
+
+  private listAncestorPrefixes(path: string): string[] {
+    const cleaned = path.replace(/^\/+|\/+$/g, '')
+    if (!cleaned) return ['']
+    const parts = cleaned.split('/')
+    const prefixes: string[] = []
+    for (let i = parts.length; i >= 0; i--) {
+      const prefix = parts.slice(0, i).join('/')
+      prefixes.push(prefix)
+    }
+    return Array.from(new Set(prefixes))
+  }
+
+  private inferCrsFromAttrs(
+    projCandidates: Array<{
+      source: string
+      attrs: Record<string, unknown> | null
+    }>,
+    spatialRefCandidates: Array<{
+      source: string
+      attrs: Record<string, unknown> | null
+    }>
+  ): void {
+    if (this._crsOverride) return
+
+    for (const candidate of projCandidates) {
+      const inferred = this.inferFromProjConvention(candidate.attrs)
+      if (!inferred) continue
+      this.logCrsCandidate(candidate.source, 'proj', inferred)
+      this.applyInferredProjection(inferred, candidate.source)
+      if (this._crsFromMetadata) return
+    }
+
+    for (const candidate of spatialRefCandidates) {
+      const inferred = this.inferFromSpatialRef(candidate.attrs)
+      if (!inferred) continue
+      this.logCrsCandidate(candidate.source, 'spatial_ref', inferred)
+      this.applyInferredProjection(inferred, candidate.source)
+      if (this._crsFromMetadata) return
+    }
+  }
+
+  private async lookupProj4Online(crs: string): Promise<string | null> {
+    const normalized = this.normalizeCrsCode(crs)
+    const match = normalized?.match(/^EPSG:(\d+)$/i)
+    if (!match) return null
+
+    const code = `EPSG:${match[1]}`
+    let pending = ZarrStore._proj4LookupCache.get(code)
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const response = await fetch(`https://epsg.io/${match[1]}.proj4`)
+          if (!response.ok) return null
+          const text = (await response.text()).trim()
+          return text || null
+        } catch {
+          return null
+        }
+      })()
+      ZarrStore._proj4LookupCache.set(code, pending)
+    }
+    return pending
+  }
+
+  private async resolveProj4IfNeeded(): Promise<void> {
+    if (this.proj4) {
+      const validated = this.normalizeProj4Definition(
+        this.proj4,
+        'existing proj4 definition'
+      )
+      if (validated) {
+        this.proj4 = validated
+        return
+      }
+      this.proj4 = null
+    }
+
+    let targetCrs: string | null = null
+    let reason: ResolveProj4Context['reason'] = 'metadata-crs'
+
+    if (this._pendingUserCrs) {
+      targetCrs = this._pendingUserCrs
+      reason = 'user-crs'
+    } else if (this._pendingMetadataCrs) {
+      targetCrs = this._pendingMetadataCrs
+      reason = 'metadata-crs'
+    } else if (this.crs !== 'EPSG:4326' && this.crs !== 'EPSG:3857') {
+      targetCrs = this.crs
+      reason = 'metadata-crs'
+    }
+
+    if (!targetCrs) return
+
+    const context: ResolveProj4Context = {
+      source: this.source,
+      variable: this.variable,
+      reason,
+    }
+
+    let resolved: string | null | undefined = null
+    if (this.resolveProj4) {
+      try {
+        resolved = await this.resolveProj4(targetCrs, context)
+      } catch (err) {
+        console.warn(
+          `[zarr-layer] resolveProj4 callback failed for "${targetCrs}": ` +
+            `${err instanceof Error ? err.message : err}`
+        )
+      }
+    } else if (this.enableOnlineProj4Lookup) {
+      console.info(
+        `[zarr-layer] Attempting online EPSG lookup for "${targetCrs}".`
+      )
+      resolved = await this.lookupProj4Online(targetCrs)
+      if (resolved) {
+        console.info(
+          `[zarr-layer] Resolved proj4 for "${targetCrs}" from online EPSG lookup: ${resolved}`
+        )
+      } else {
+        console.warn(
+          `[zarr-layer] Online EPSG lookup returned no proj4 definition for "${targetCrs}".`
+        )
+      }
+    }
+
+    const normalized = this.normalizeProj4Definition(
+      resolved,
+      this.resolveProj4 ? 'resolveProj4 callback' : 'online EPSG lookup'
+    )
+    if (!normalized) {
+      console.warn(
+        `[zarr-layer] Could not resolve a usable proj4 definition for "${targetCrs}".`
+      )
+      return
+    }
+
+    this.proj4 = normalized
+    this.crs = targetCrs as CRS
+    if (reason === 'user-crs') {
+      this._crsOverride = true
+      this._pendingUserCrs = null
+    } else {
+      this._crsFromMetadata = true
+      this._pendingMetadataCrs = null
+    }
+
+    console.info(
+      `[zarr-layer] Using resolved proj4 definition for "${targetCrs}".`
+    )
+  }
 
   /**
    * Returns the coarsest (lowest resolution) level path.
@@ -395,6 +828,7 @@ export class ZarrStore {
     coordinateKeys = [],
     latIsAscending = null,
     proj4,
+    resolveProj4,
     transformRequest,
     customStore,
   }: ZarrStoreOptions) {
@@ -414,16 +848,35 @@ export class ZarrStore {
       this.latIsAscending = latIsAscending
       this._latIsAscendingUserSet = true
     }
-    this.proj4 = proj4 ?? null
+    this.proj4 =
+      proj4 !== undefined
+        ? this.normalizeProj4Definition(proj4, 'layer options')
+        : null
+    if (typeof resolveProj4 === 'function') {
+      this.resolveProj4 = resolveProj4
+      this.enableOnlineProj4Lookup = false
+    } else {
+      this.enableOnlineProj4Lookup = resolveProj4 !== false
+    }
     if (crs) {
-      const normalized = crs.toUpperCase()
+      const normalized = this.normalizeCrsCode(crs) ?? crs.toUpperCase()
       if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
         this.crs = normalized
         this._crsOverride = true
-      } else if (!this.proj4) {
+        console.info(
+          `[zarr-layer] Using user-provided CRS override "${this.crs}" for "${this.variable}".`
+        )
+      } else if (this.proj4) {
+        this.crs = normalized as CRS
+        this._crsOverride = true
+        console.info(
+          `[zarr-layer] Using user-provided CRS "${normalized}" with proj4 definition.`
+        )
+      } else {
+        this._pendingUserCrs = normalized
         console.warn(
           `[zarr-layer] CRS "${crs}" requires 'proj4' to render correctly. ` +
-            `Falling back to inferred CRS.`
+            `Attempting resolver and metadata inference.`
         )
       }
     }
@@ -458,7 +911,9 @@ export class ZarrStore {
       // Use cached store for standard requests
       storeHandle = ZarrStore._storeCache.get(storeCacheKey)
       if (!storeHandle) {
-        const baseStore = new zarr.FetchStore(this.source)
+        const baseStore = new zarr.FetchStore(this.source, {
+          useSuffixRequest: true,
+        })
         if (this.version === 3) {
           storeHandle = Promise.resolve(baseStore)
         } else {
@@ -485,6 +940,7 @@ export class ZarrStore {
       }
     }
 
+    await this.resolveProj4IfNeeded()
     await this._loadSpatialMetadata()
     await this._loadCoordinates()
 
@@ -538,6 +994,14 @@ export class ZarrStore {
       latIsAscending: this.latIsAscending,
       proj4: this.proj4,
     }
+  }
+
+  hasMissingVariableMetadata(): boolean {
+    return this._variableMetadataMissing
+  }
+
+  getVariablePath(): string {
+    return this.variable
   }
 
   async getChunk(
@@ -771,20 +1235,38 @@ export class ZarrStore {
       | undefined
 
     if (!zattrs || !zarray) {
-      ;[zattrs, zarray] = await Promise.all([
-        zattrs
-          ? Promise.resolve(zattrs)
-          : (this._getJSON(`/${basePath}/.zattrs`).catch(
-              () => ({})
-            ) as Promise<ZarrV2Attributes>),
-        zarray
-          ? Promise.resolve(zarray)
-          : (this._getJSON(
-              `/${basePath}/.zarray`
-            ) as Promise<ZarrV2ArrayMetadata>),
-      ])
-      v2Metadata.metadata[`${basePath}/.zattrs`] = zattrs
-      v2Metadata.metadata[`${basePath}/.zarray`] = zarray
+      try {
+        ;[zattrs, zarray] = await Promise.all([
+          zattrs
+            ? Promise.resolve(zattrs)
+            : (this._getJSON(`/${basePath}/.zattrs`).catch(
+                () => ({})
+              ) as Promise<ZarrV2Attributes>),
+          zarray
+            ? Promise.resolve(zarray)
+            : (this._getJSON(
+                `/${basePath}/.zarray`
+              ) as Promise<ZarrV2ArrayMetadata>),
+        ])
+        v2Metadata.metadata[`${basePath}/.zattrs`] = zattrs
+        v2Metadata.metadata[`${basePath}/.zarray`] = zarray
+      } catch (err) {
+        const hasChildVariable = Object.keys(v2Metadata.metadata).some((key) =>
+          key.endsWith(`/${this.variable}/.zarray`)
+        )
+        if (hasChildVariable) {
+          this._variableMetadataMissing = true
+          this.dimensions = []
+          this.shape = []
+          this.chunks = []
+          this.fill_value = null
+          this.dtype = null
+          this.scaleFactor = 1
+          this.addOffset = 0
+          return
+        }
+        throw err
+      }
     }
 
     this.dimensions = zattrs?._ARRAY_DIMENSIONS || []
@@ -794,6 +1276,42 @@ export class ZarrStore {
     this.dtype = zarray?.dtype || null
     this.scaleFactor = zattrs?.scale_factor ?? 1
     this.addOffset = zattrs?.add_offset ?? 0
+
+    const groupPath = basePath.includes('/')
+      ? basePath.slice(0, basePath.lastIndexOf('/'))
+      : ''
+    const prefixes = this.listAncestorPrefixes(groupPath)
+    const spatialRefAttrs =
+      (v2Metadata.metadata[
+        prefixes
+          .map((prefix) =>
+            prefix ? `${prefix}/spatial_ref/.zattrs` : 'spatial_ref/.zattrs'
+          )
+          .find((key) => Boolean(v2Metadata.metadata[key])) ?? ''
+      ] as Record<string, unknown> | undefined) ?? null
+    const nearestGroupAttrs =
+      (v2Metadata.metadata[
+        prefixes
+          .map((prefix) => (prefix ? `${prefix}/.zattrs` : '.zattrs'))
+          .find((key) => Boolean(v2Metadata.metadata[key])) ?? '.zattrs'
+      ] as Record<string, unknown> | undefined) ?? null
+
+    this.inferCrsFromAttrs(
+      [
+        { source: `${basePath}/.zattrs`, attrs: asRecord(zattrs) },
+        { source: 'nearest group .zattrs', attrs: asRecord(nearestGroupAttrs) },
+        { source: 'root .zattrs', attrs: asRecord(rootAttrs) },
+      ],
+      [
+        { source: 'spatial_ref/.zattrs', attrs: asRecord(spatialRefAttrs) },
+        { source: `${basePath}/.zattrs`, attrs: asRecord(zattrs) },
+        {
+          source: 'nearest group .zattrs',
+          attrs: asRecord(nearestGroupAttrs),
+        },
+        { source: 'root .zattrs', attrs: asRecord(rootAttrs) },
+      ]
+    )
 
     await this._computeDimIndices()
   }
@@ -844,9 +1362,32 @@ export class ZarrStore {
       ? undefined
       : (ZarrStore._cache.get(arrayCacheKey) as ZarrV3ArrayMetadata | undefined)
     if (!arrayMetadata) {
-      arrayMetadata = (await this._getJSON(
-        `/${arrayKey}/zarr.json`
-      )) as ZarrV3ArrayMetadata
+      try {
+        arrayMetadata = (await this._getJSON(
+          `/${arrayKey}/zarr.json`
+        )) as ZarrV3ArrayMetadata
+      } catch (err) {
+        const consolidated = metadata.consolidated_metadata?.metadata
+        const hasChildVariable = consolidated
+          ? Object.entries(consolidated).some(
+              ([key, value]) =>
+                key.endsWith(`/${this.variable}`) &&
+                (value as { node_type?: string }).node_type === 'array'
+            )
+          : false
+        if (hasChildVariable) {
+          this._variableMetadataMissing = true
+          this.dimensions = []
+          this.shape = []
+          this.chunks = []
+          this.fill_value = null
+          this.dtype = null
+          this.scaleFactor = 1
+          this.addOffset = 0
+          return
+        }
+        throw err
+      }
       if (!bypassCache) ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
     }
     this.arrayMetadata = arrayMetadata
@@ -881,6 +1422,47 @@ export class ZarrStore {
       typeof attrs?.scale_factor === 'number' ? attrs.scale_factor : 1
     this.addOffset =
       typeof attrs?.add_offset === 'number' ? attrs.add_offset : 0
+
+    const consolidated = metadata.consolidated_metadata?.metadata
+    const groupPath = arrayKey.includes('/')
+      ? arrayKey.slice(0, arrayKey.lastIndexOf('/'))
+      : ''
+    const prefixes = this.listAncestorPrefixes(groupPath)
+
+    const firstMatchingSpatialRefPath = prefixes
+      .map((prefix) => (prefix ? `${prefix}/spatial_ref` : 'spatial_ref'))
+      .find((key) => Boolean(consolidated?.[key]))
+    const spatialRefAttrs = firstMatchingSpatialRefPath
+      ? asRecord(
+          (
+            consolidated?.[firstMatchingSpatialRefPath] as {
+              attributes?: unknown
+            }
+          )?.attributes
+        )
+      : null
+
+    const nearestGroupAttrs = (() => {
+      const key = prefixes.find((prefix) => Boolean(consolidated?.[prefix]))
+      if (!key) return null
+      return asRecord(
+        (consolidated?.[key] as { attributes?: unknown })?.attributes
+      )
+    })()
+
+    this.inferCrsFromAttrs(
+      [
+        { source: `${arrayKey}.zarr.json attributes`, attrs: asRecord(attrs) },
+        { source: 'nearest group attributes', attrs: nearestGroupAttrs },
+        { source: 'root attributes', attrs: asRecord(metadata.attributes) },
+      ],
+      [
+        { source: 'spatial_ref attributes', attrs: spatialRefAttrs },
+        { source: `${arrayKey}.zarr.json attributes`, attrs: asRecord(attrs) },
+        { source: 'nearest group attributes', attrs: nearestGroupAttrs },
+        { source: 'root attributes', attrs: asRecord(metadata.attributes) },
+      ]
+    )
 
     await this._computeDimIndices()
   }
@@ -1118,8 +1700,11 @@ export class ZarrStore {
           const rootPick = pickLargest(rootCandidates)
           if (rootPick) return rootPick
         } else if (this.variable) {
+          const variablePrefix = this.variable.includes('/')
+            ? this.variable.slice(0, this.variable.lastIndexOf('/'))
+            : this.variable
           const varCandidates = candidates.filter((c) =>
-            c.path.startsWith(`${this.variable}/`)
+            c.path.startsWith(`${variablePrefix}/`)
           )
           const varPick = pickLargest(varCandidates)
           if (varPick) return varPick
@@ -1256,6 +1841,15 @@ export class ZarrStore {
       )
       if (maxAbsX > 360) {
         this.crs = 'EPSG:3857'
+        console.warn(
+          `[zarr-layer] Inferred CRS "${this.crs}" from bounds heuristic ` +
+            `(max |x| > 360) for "${this.variable}".`
+        )
+      } else if (this.crs === 'EPSG:4326') {
+        console.warn(
+          `[zarr-layer] CRS defaulted to "${this.crs}" for "${this.variable}". ` +
+            `No usable CRS code was inferred from proj/spatial_ref metadata.`
+        )
       }
     }
   }
@@ -1473,9 +2067,19 @@ export class ZarrStore {
 
     // Check for explicit CRS in metadata, otherwise use configured CRS
     // (bounds-based inference will happen after coordinate arrays are loaded)
-    const crs: CRS = metadata.crs ?? this.crs
-    if (metadata.crs && !this._crsOverride) {
-      this._crsFromMetadata = true
+    let crs: CRS = this.crs
+    const normalizedMetadataCrs = this.normalizeCrsCode(metadata.crs)
+    if (normalizedMetadataCrs && !this._crsOverride) {
+      if (
+        normalizedMetadataCrs === 'EPSG:4326' ||
+        normalizedMetadataCrs === 'EPSG:3857'
+      ) {
+        crs = normalizedMetadataCrs
+        this._crsFromMetadata = true
+      } else if (this.proj4) {
+        crs = normalizedMetadataCrs as CRS
+        this._crsFromMetadata = true
+      }
     }
 
     return {
@@ -1484,6 +2088,134 @@ export class ZarrStore {
       tileSize: 128, // Will be overridden by chunk shape
       crs,
     }
+  }
+
+  /**
+   * Discover child dataset groups within a datatree root.
+   *
+   * Walks consolidated metadata to find child groups that contain the given
+   * variable as a child array. Returns an empty array if the source is a
+   * single-dataset store (variable lives directly at root or root has multiscales).
+   *
+   * For child groups with multiscales layout metadata, bounds are derived from
+   * translation/scale/shape. Otherwise, bounds are null and will be resolved
+   * per-store from coordinate arrays during initialization.
+   */
+  static discoverDatasets(
+    metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null,
+    variable: string,
+    version: 2 | 3 | null
+  ): import('./types').DatasetDescriptor[] {
+    if (!metadata) return []
+
+    // If root has multiscales, it's a single-dataset store — not a datatree
+    if (version === 3 || version === null) {
+      const v3 = metadata as ZarrV3GroupMetadata
+      if (v3.attributes?.multiscales) return []
+    }
+    if (version === 2 || version === null) {
+      const v2 = metadata as ZarrV2ConsolidatedMetadata
+      const rootAttrs = v2.metadata?.['.zattrs'] as
+        | { multiscales?: unknown }
+        | undefined
+      if (rootAttrs?.multiscales) return []
+      if (v2.metadata?.[`${variable}/.zarray`]) return []
+    }
+
+    // Collect child groups that contain `variable` as a direct child array
+    const groups = new Map<string, import('./types').DatasetDescriptor>()
+
+    if (version === 3 || version === null) {
+      const v3 = metadata as ZarrV3GroupMetadata
+      const consolidated = v3.consolidated_metadata?.metadata
+      if (consolidated) {
+        const rootVariable = consolidated[variable] as
+          | ZarrV3ArrayMetadata
+          | undefined
+        if (rootVariable?.node_type === 'array') return []
+
+        const varSuffix = `/${variable}`
+        for (const [key, value] of Object.entries(consolidated)) {
+          // Match patterns like "region_a/temperature" (one-level group + variable)
+          if (!key.endsWith(varSuffix)) continue
+          const v3Meta = value as ZarrV3ArrayMetadata
+          if (v3Meta.node_type !== 'array') continue
+
+          const groupPath = key.slice(0, -varSuffix.length)
+          // Skip if variable is at root level (no group prefix)
+          if (!groupPath || groupPath.includes('/')) continue
+
+          if (!groups.has(groupPath)) {
+            groups.set(groupPath, { path: groupPath, bounds: null })
+          }
+        }
+
+        // Try to derive bounds from multiscales layout metadata on each child group
+        for (const [groupPath, descriptor] of groups) {
+          const groupMeta = consolidated[groupPath] as
+            | { node_type?: string; attributes?: Record<string, unknown> }
+            | undefined
+          if (!groupMeta?.attributes?.multiscales) continue
+
+          const ms = groupMeta.attributes.multiscales as
+            | UntiledMultiscaleMetadata
+            | Multiscale[]
+          if (
+            'layout' in ms &&
+            Array.isArray(ms.layout) &&
+            ms.layout.length > 0
+          ) {
+            // Use the finest resolution level (first in layout) to compute bounds
+            const finest = ms.layout[0]
+            const arrayKey = `${groupPath}/${finest.asset}/${variable}`
+            const arrayMeta = consolidated[arrayKey] as
+              | ZarrV3ArrayMetadata
+              | undefined
+            if (
+              arrayMeta?.shape &&
+              finest.transform?.scale &&
+              finest.transform?.translation
+            ) {
+              const [sx, sy] = finest.transform.scale
+              const [tx, ty] = finest.transform.translation
+              // shape is [..., y, x] — take last two dims
+              const height = arrayMeta.shape[arrayMeta.shape.length - 2]
+              const width = arrayMeta.shape[arrayMeta.shape.length - 1]
+              if (height && width) {
+                const xMin = tx
+                const yMax = ty
+                const xMax = tx + sx * width
+                const yMin = ty + sy * height // sy is typically negative
+                descriptor.bounds = [
+                  Math.min(xMin, xMax),
+                  Math.min(yMin, yMax),
+                  Math.max(xMin, xMax),
+                  Math.max(yMin, yMax),
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if ((version === 2 || version === null) && groups.size === 0) {
+      const v2 = metadata as ZarrV2ConsolidatedMetadata
+      if (v2.metadata) {
+        const varArraySuffix = `/${variable}/.zarray`
+        for (const key of Object.keys(v2.metadata)) {
+          if (!key.endsWith(varArraySuffix)) continue
+          const groupPath = key.slice(0, -varArraySuffix.length)
+          if (!groupPath || groupPath.includes('/')) continue
+
+          if (!groups.has(groupPath)) {
+            groups.set(groupPath, { path: groupPath, bounds: null })
+          }
+        }
+      }
+    }
+
+    return Array.from(groups.values())
   }
 
   static clearCache() {
