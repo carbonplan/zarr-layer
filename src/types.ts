@@ -21,6 +21,17 @@ export type TransformRequest = (
   options?: TransformRequestOptions
 ) => RequestParameters | Promise<RequestParameters>
 
+export interface ResolveProj4Context {
+  source: string
+  variable: string
+  reason: 'user-crs' | 'metadata-crs'
+}
+
+export type ResolveProj4 = (
+  crs: string,
+  context: ResolveProj4Context
+) => string | null | undefined | Promise<string | null | undefined>
+
 export type ColormapArray = number[][] | string[]
 
 export type SelectorValue = number | number[] | string | string[]
@@ -130,6 +141,13 @@ export interface ZarrLayerOptions {
    */
   proj4?: string
   /**
+   * CRS resolver for missing proj4 definitions.
+   * - `true` (default behavior when omitted): try online EPSG lookup (https://epsg.io/<code>.proj4)
+   * - `false`: disable online lookup fallback
+   * - function: custom resolver callback
+   */
+  resolveProj4?: boolean | ResolveProj4
+  /**
    * Function to transform request URLs and add custom headers/credentials.
    * Useful for authentication, proxy routing, or request customization.
    * When provided, the store cache is bypassed to prevent credential sharing between layers.
@@ -168,6 +186,14 @@ export interface VisibleChunk {
   chunkX: number
   chunkY: number
   fullIndices: number[]
+}
+
+/** Describes a child dataset discovered within a datatree root. */
+export interface DatasetDescriptor {
+  /** Path to the child group relative to the root (e.g., "region_a"). */
+  path: string
+  /** Spatial bounds in source CRS units, or null if must be derived from coordinate arrays. */
+  bounds: Bounds | null
 }
 
 export interface BoundsLike {
