@@ -53,7 +53,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   colormap: defaultModule.colormap,
   globeProjection: true,
   terrainEnabled: false,
-  renderPoles: true,
+  renderPoles: false,
   mapProvider: 'maplibre',
   datasetState: {
     [DEFAULT_DATASET_ID]: { ...defaultModule.defaultState },
