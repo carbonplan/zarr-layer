@@ -10,7 +10,10 @@ import type {
 } from './types'
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
-import { findGridMapping } from '../packages/zarr-metadata/src/crs'
+import {
+  findGridMapping,
+  extractCrsFromGroupAttributes,
+} from '../packages/zarr-metadata/src/crs'
 import type { CRSInfo } from '../packages/zarr-metadata/src/types'
 
 const textDecoder = new TextDecoder()
@@ -800,14 +803,25 @@ export class ZarrStore {
     this.scaleFactor = zattrs?.scale_factor ?? 1
     this.addOffset = zattrs?.add_offset ?? 0
 
-    // Detect CRS from CF grid_mapping if not already set
-    if (!this.proj4 && !this._crsOverride && zattrs) {
-      this._applyCrsFromGridMapping(
-        findGridMapping(
-          zattrs as unknown as Record<string, unknown>,
-          v2Metadata as unknown as Parameters<typeof findGridMapping>[1]
+    // Detect CRS from metadata if not already set
+    if (!this.proj4 && !this._crsOverride) {
+      // 1. Try proj:code from group attributes (GeoZarr / zarr-conventions)
+      this._applyCrsFromGroupAttributes(
+        extractCrsFromGroupAttributes(
+          v2Metadata as unknown as Parameters<
+            typeof extractCrsFromGroupAttributes
+          >[0]
         )
       )
+      // 2. Fall back to CF grid_mapping from array attributes
+      if (!this.proj4 && zattrs) {
+        this._applyCrsFromGridMapping(
+          findGridMapping(
+            zattrs as unknown as Record<string, unknown>,
+            v2Metadata as unknown as Parameters<typeof findGridMapping>[1]
+          )
+        )
+      }
     }
 
     await this._computeDimIndices()
@@ -897,14 +911,53 @@ export class ZarrStore {
     this.addOffset =
       typeof attrs?.add_offset === 'number' ? attrs.add_offset : 0
 
-    // Detect CRS from CF grid_mapping if not already set
-    if (!this.proj4 && !this._crsOverride && attrs) {
-      this._applyCrsFromGridMapping(
-        findGridMapping(attrs as Record<string, unknown>, metadata)
+    // Detect CRS from metadata if not already set
+    if (!this.proj4 && !this._crsOverride) {
+      // 1. Try proj:code from group attributes (GeoZarr / zarr-conventions)
+      this._applyCrsFromGroupAttributes(
+        extractCrsFromGroupAttributes(
+          metadata as unknown as Parameters<
+            typeof extractCrsFromGroupAttributes
+          >[0]
+        )
       )
+      // 2. Fall back to CF grid_mapping from array attributes
+      if (!this.proj4 && attrs) {
+        this._applyCrsFromGridMapping(
+          findGridMapping(attrs as Record<string, unknown>, metadata)
+        )
+      }
     }
 
     await this._computeDimIndices()
+  }
+
+  /**
+   * Apply CRS info from group-level attributes (proj:code from GeoZarr/zarr-conventions).
+   * Sets the CRS code if found. Note: proj:code gives us a code like 'EPSG:32632'
+   * but not a proj4 definition — consumers need to resolve the code to a proj4 string
+   * for non-standard CRS (EPSG:4326 and EPSG:3857 are handled natively).
+   */
+  private _applyCrsFromGroupAttributes(crsInfo: CRSInfo | null): void {
+    if (!crsInfo) return
+
+    // If proj:wkt2 provided a proj4def, use it (handles any CRS)
+    if (crsInfo.proj4def) {
+      this.proj4 = crsInfo.proj4def
+      this.crs = (crsInfo.code as CRS) ?? ('custom' as CRS)
+      this._crsFromMetadata = true
+      return
+    }
+
+    // proj:code only — handle standard CRS codes natively
+    if (crsInfo.code) {
+      const normalized = crsInfo.code.toUpperCase()
+      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
+        this.crs = normalized as CRS
+        this._crsFromMetadata = true
+      }
+      // Non-standard codes without proj4def need user-provided proj4 string
+    }
   }
 
   /**

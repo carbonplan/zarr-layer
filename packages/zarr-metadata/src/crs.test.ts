@@ -272,6 +272,41 @@ describe('extractCrsFromGroupAttributes', () => {
     expect(result?.code).toBe('EPSG:32632')
   })
 
+  it('extracts proj:wkt2 from V3 group attributes', () => {
+    const wkt = 'GEOGCS["WGS 84",DATUM["WGS_1984"]]'
+    const result = extractCrsFromGroupAttributes({
+      zarr_format: 3,
+      node_type: 'group',
+      attributes: { 'proj:wkt2': wkt },
+    })
+
+    expect(result).not.toBeNull()
+    expect(result?.proj4def).toBe(wkt)
+    expect(result?.code).toBeNull()
+    expect(result?.source).toBe('explicit')
+  })
+
+  it('prefers proj:wkt2 over proj:code when both present', () => {
+    const wkt = 'GEOGCS["WGS 84",DATUM["WGS_1984"]]'
+    const result = extractCrsFromGroupAttributes({
+      zarr_format: 3,
+      node_type: 'group',
+      attributes: { 'proj:wkt2': wkt, 'proj:code': 'EPSG:4326' },
+    })
+
+    expect(result?.proj4def).toBe(wkt)
+    expect(result?.code).toBe('EPSG:4326')
+  })
+
+  it('extracts proj:wkt2 from V2 root .zattrs', () => {
+    const wkt = 'PROJCS["UTM zone 32N"]'
+    const result = extractCrsFromGroupAttributes({
+      metadata: { '.zattrs': { 'proj:wkt2': wkt } },
+    })
+
+    expect(result?.proj4def).toBe(wkt)
+  })
+
   it('returns null when proj:code is not present', () => {
     const result = extractCrsFromGroupAttributes({
       zarr_format: 3,

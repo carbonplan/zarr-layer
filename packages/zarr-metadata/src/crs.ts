@@ -434,11 +434,11 @@ export function createExplicitCrs(crs: string, proj4def?: string): CRSInfo {
 /**
  * Extract CRS from group-level attributes.
  *
- * Per zarr-conventions/multiscales spec, CRS information may be at group level:
- * - `proj:code`: EPSG code (e.g., "EPSG:4326", "EPSG:32632")
- * - `spatial:dimensions`: dimension names for spatial axes
- * - `spatial:transform`: 6-element affine transform
+ * Supports the GeoZarr/zarr-conventions geo-proj convention:
+ * - `proj:wkt2`: WKT2 string (highest fidelity, passed as proj4def)
+ * - `proj:code`: Authority:code string (e.g., "EPSG:4326", "EPSG:32632")
  *
+ * @see https://github.com/zarr-conventions/geo-proj
  * @see https://github.com/zarr-conventions/multiscales
  */
 export function extractCrsFromGroupAttributes(
@@ -449,10 +449,8 @@ export function extractCrsFromGroupAttributes(
   // V3: check attributes on group
   const v3Meta = metadata as ZarrV3GroupMetadata
   if (v3Meta.attributes) {
-    const projCode = v3Meta.attributes['proj:code'] as string | undefined
-    if (projCode) {
-      return extractCrsFromProjCode(projCode)
-    }
+    const result = extractCrsFromProjAttributes(v3Meta.attributes)
+    if (result) return result
   }
 
   // V2: check root .zattrs
@@ -462,10 +460,8 @@ export function extractCrsFromGroupAttributes(
       | Record<string, unknown>
       | undefined
     if (rootAttrs) {
-      const projCode = rootAttrs['proj:code'] as string | undefined
-      if (projCode) {
-        return extractCrsFromProjCode(projCode)
-      }
+      const result = extractCrsFromProjAttributes(rootAttrs)
+      if (result) return result
     }
   }
 
@@ -473,12 +469,33 @@ export function extractCrsFromGroupAttributes(
 }
 
 /**
- * Parse a proj:code value into CRSInfo.
+ * Extract CRS from proj: attributes (GeoZarr geo-proj convention).
+ * Priority: proj:wkt2 > proj:code (wkt2 carries full CRS definition).
  */
-function extractCrsFromProjCode(projCode: string): CRSInfo {
-  return {
-    code: projCode.toUpperCase(),
-    proj4def: null,
-    source: 'explicit',
+function extractCrsFromProjAttributes(
+  attrs: Record<string, unknown>
+): CRSInfo | null {
+  // proj:wkt2 — full WKT2 CRS definition, proj4js can parse directly
+  const wkt2 = attrs['proj:wkt2'] as string | undefined
+  if (wkt2) {
+    // Also grab the code if available for labeling
+    const code = attrs['proj:code'] as string | undefined
+    return {
+      code: code?.toUpperCase() ?? null,
+      proj4def: wkt2,
+      source: 'explicit',
+    }
   }
+
+  // proj:code — authority:code string
+  const projCode = attrs['proj:code'] as string | undefined
+  if (projCode) {
+    return {
+      code: projCode.toUpperCase(),
+      proj4def: null,
+      source: 'explicit',
+    }
+  }
+
+  return null
 }
