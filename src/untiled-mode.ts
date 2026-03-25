@@ -1076,6 +1076,11 @@ export class UntiledMode implements ZarrMode {
       region.pixCoordArr = meshResult.texCoords
       region.indexArr = meshResult.indices
       region.wgs84Bounds = meshResult.wgs84Bounds
+      // If the mesh computed its own Mercator bounds (CPU-side Mercator conversion),
+      // use those instead of the initial mercatorBounds from boundsToMercatorNorm
+      if (meshResult.mercatorBounds) {
+        region.mercatorBounds = meshResult.mercatorBounds
+      }
       region.useIndexedMesh = true
       region.vertexCount = region.indexArr!.length
     } else {
@@ -2045,9 +2050,12 @@ export class UntiledMode implements ZarrMode {
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
     const useMapbox = !!context.mapbox
-    // Use wgs84 shader only for proj4 datasets (vertex shader reprojection)
-    // EPSG:4326 uses fragment shader reprojection instead
-    const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
+    // Only use WGS84→Mercator vertex shader if regions still have wgs84Bounds.
+    // When createHybridMesh converts to Mercator on CPU, wgs84Bounds is null
+    // and we should use the standard Mercator vertex shader instead.
+    const hasWgs84Regions = this.getLoadedRegions().some((r) => !!r.wgs84Bounds)
+    const useWgs84 =
+      hasWgs84Regions && !!this.proj4def && !!this.cached4326Transformer
 
     const shaderProgram = renderer.getProgram(
       context.shaderData,

@@ -8,7 +8,12 @@
 
 import Delaunator from 'delaunator'
 import { RasterReprojector } from '@developmentseed/raster-reproject'
-import { lonToMercatorNorm, type Wgs84Bounds } from './map-utils'
+import {
+  latToMercatorNorm,
+  lonToMercatorNorm,
+  type MercatorBounds,
+  type Wgs84Bounds,
+} from './map-utils'
 import {
   pixelToSourceCRS,
   sourceCRSToPixel,
@@ -47,10 +52,11 @@ interface ReprojectorConfig {
 }
 
 export interface AdaptiveMeshResult {
-  positions: Float32Array // Normalized 4326 coords [-1,1] for shader
+  positions: Float32Array // Vertex positions (either normalized 4326 or Mercator)
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
-  wgs84Bounds: Wgs84Bounds
+  wgs84Bounds: Wgs84Bounds | null // null when using CPU Mercator conversion
+  mercatorBounds?: MercatorBounds // Set when positions are in Mercator space
 }
 
 export interface HybridMeshOptions {
@@ -584,28 +590,66 @@ export function createHybridMesh(
     canCrossAntimeridian
   )
 
-  // Normalize with antimeridian awareness
-  const positions = normalizeToLocalCoords(
-    splitResult.positions,
-    minLon,
-    maxLon,
-    minLat,
-    maxLat,
-    crossesAntimeridian
-  )
+  // Convert WGS84 positions directly to normalized Mercator [0,1] on CPU.
+  // This ensures adjacent regions' shared-edge vertices have identical GPU values,
+  // eliminating seams caused by independent per-region bounding box encoding.
+  //
+  // Previously, vertices were normalized to per-region [-1,1] WGS84 space and the
+  // GPU shader converted WGS84→Mercator. But for non-conformal projections, the same
+  // source CRS Y coordinate maps to slightly different WGS84 latitudes at different X
+  // positions. Combined with Float32 truncation in normalizeToLocalCoords(), this caused
+  // adjacent regions' shared-edge vertices to diverge → visible gaps between regions.
+  const splitPositions = splitResult.positions
+  const numSplitVerts = splitPositions.length / 2
+  const mercPositions = new Float32Array(numSplitVerts * 2)
 
-  const wgs84Bounds = computeWgs84Bounds(
-    minLon,
-    maxLon,
-    minLat,
-    maxLat,
-    crossesAntimeridian
-  )
+  for (let i = 0; i < numSplitVerts; i++) {
+    let lon = normalizeLon180(splitPositions[i * 2])
+    const lat = splitPositions[i * 2 + 1]
+
+    if (crossesAntimeridian && lon < minLon) {
+      lon += 360
+    }
+
+    if (!isFinite(lon) || !isFinite(lat)) {
+      mercPositions[i * 2] = NaN
+      mercPositions[i * 2 + 1] = NaN
+      continue
+    }
+
+    const mx = lonToMercatorNorm(lon)
+    const my = latToMercatorNorm(lat)
+    mercPositions[i * 2] = mx
+    mercPositions[i * 2 + 1] = my
+  }
+
+  // Encode absolute Mercator [0,1] into [-1,1] vertex space for the shader.
+  //
+  // With mercatorBounds = {x0:0, x1:1, y0:0, y1:1}, renderRegion computes:
+  //   sx = 0.5, shift_x = 0.5, sy = 0.5, shift_y = 0.5
+  //
+  // The VERTEX_TO_MERCATOR shader does:
+  //   merc.x = vertex.x * sx + shift_x  → vertex.x * 0.5 + 0.5
+  //   merc.y = -vertex.y * sy + shift_y  → -vertex.y * 0.5 + 0.5
+  //
+  // To recover merc.x = mx and merc.y = my:
+  //   vertex.x = mx * 2 - 1   (maps [0,1] → [-1,1])
+  //   vertex.y = -(my * 2 - 1) (accounts for shader's Y negation)
+  for (let i = 0; i < numSplitVerts; i++) {
+    mercPositions[i * 2] = mercPositions[i * 2] * 2 - 1
+    mercPositions[i * 2 + 1] = -(mercPositions[i * 2 + 1] * 2 - 1)
+  }
 
   return {
-    positions,
+    positions: mercPositions,
     texCoords: new Float32Array(splitResult.texCoords),
     indices: splitResult.indices,
-    wgs84Bounds,
+    wgs84Bounds: null,
+    mercatorBounds: {
+      x0: 0,
+      x1: 1,
+      y0: 0,
+      y1: 1,
+    },
   }
 }
