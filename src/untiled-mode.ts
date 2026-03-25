@@ -1734,10 +1734,12 @@ export class UntiledMode implements ZarrMode {
           bandData = scaled
         }
 
-        // Compute the fill value in the same space as the data
+        // Compute the fill value in the same space as the data.
+        // Use Math.fround to match Float32Array truncation precision,
+        // ensuring exact equality in normalizeDataForTexture.
         const effectiveFillValue =
           fillValue !== null && (scaleFactor !== 1 || addOffset !== 0)
-            ? fillValue * scaleFactor + addOffset
+            ? Math.fround(fillValue * scaleFactor + addOffset)
             : fillValue
 
         const { normalized: bandNormalized } = normalizeDataForTexture(
