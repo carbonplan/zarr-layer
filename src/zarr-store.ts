@@ -10,6 +10,8 @@ import type {
 } from './types'
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
+import { findGridMapping } from '../packages/zarr-metadata/src/crs'
+import type { CRSInfo } from '../packages/zarr-metadata/src/types'
 
 const textDecoder = new TextDecoder()
 
@@ -306,6 +308,7 @@ interface StoreDescription {
   coordinates: Record<string, (string | number)[]>
   latIsAscending: boolean
   proj4: string | null
+  coordinateScale: number | null
 }
 
 /**
@@ -361,6 +364,7 @@ export class ZarrStore {
   latIsAscending: boolean = true // Default: row 0 = south; overridden by detection
   private _latIsAscendingUserSet: boolean = false
   proj4: string | null = null
+  coordinateScale: number | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
 
@@ -537,6 +541,7 @@ export class ZarrStore {
       coordinates: this.coordinates,
       latIsAscending: this.latIsAscending,
       proj4: this.proj4,
+      coordinateScale: this.coordinateScale,
     }
   }
 
@@ -795,6 +800,16 @@ export class ZarrStore {
     this.scaleFactor = zattrs?.scale_factor ?? 1
     this.addOffset = zattrs?.add_offset ?? 0
 
+    // Detect CRS from CF grid_mapping if not already set
+    if (!this.proj4 && !this._crsOverride && zattrs) {
+      this._applyCrsFromGridMapping(
+        findGridMapping(
+          zattrs as unknown as Record<string, unknown>,
+          v2Metadata as unknown as Parameters<typeof findGridMapping>[1]
+        )
+      )
+    }
+
     await this._computeDimIndices()
   }
 
@@ -882,7 +897,28 @@ export class ZarrStore {
     this.addOffset =
       typeof attrs?.add_offset === 'number' ? attrs.add_offset : 0
 
+    // Detect CRS from CF grid_mapping if not already set
+    if (!this.proj4 && !this._crsOverride && attrs) {
+      this._applyCrsFromGridMapping(
+        findGridMapping(attrs as Record<string, unknown>, metadata)
+      )
+    }
+
     await this._computeDimIndices()
+  }
+
+  /**
+   * Apply CRS info from CF grid_mapping detection.
+   * Sets proj4, crs, and coordinateScale if a grid_mapping was found.
+   */
+  private _applyCrsFromGridMapping(crsInfo: CRSInfo | null): void {
+    if (!crsInfo?.proj4def) return
+    this.proj4 = crsInfo.proj4def
+    this.crs = 'custom' as CRS
+    this._crsFromMetadata = true
+    if (crsInfo.coordinateScale) {
+      this.coordinateScale = crsInfo.coordinateScale
+    }
   }
 
   private async _computeDimIndices() {
@@ -1207,6 +1243,20 @@ export class ZarrStore {
 
       if (needsBounds) {
         this.xyLimits = { xMin, xMax, yMin, yMax }
+      }
+
+      // Apply coordinate scaling for projections where coordinate arrays
+      // use different units than the proj4 definition expects.
+      // E.g., GOES geostationary stores scanning angles in radians,
+      // but proj4 +proj=geos expects meters.
+      if (this.coordinateScale && this.xyLimits) {
+        const s = this.coordinateScale
+        this.xyLimits = {
+          xMin: this.xyLimits.xMin * s,
+          yMin: this.xyLimits.yMin * s,
+          xMax: this.xyLimits.xMax * s,
+          yMax: this.xyLimits.yMax * s,
+        }
       }
 
       // Warn users to set explicit values to skip future coordinate fetches
