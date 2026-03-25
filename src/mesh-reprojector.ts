@@ -236,7 +236,15 @@ function splitAntimeridianTriangles(
   for (let i = 0; i < numVerts; i++) {
     const lon = wgs84Positions[i * 2]
     const lat = wgs84Positions[i * 2 + 1]
-    validVertex[i] = isFinite(lon) && isFinite(lat) ? 1 : 0
+    if (isFinite(lon) && isFinite(lat)) {
+      validVertex[i] = 1
+    } else {
+      validVertex[i] = 0
+      // Clamp non-finite positions to 0 so vertex buffers don't contain
+      // NaN/Infinity (maplibre rejects non-finite coordinates)
+      wgs84Positions[i * 2] = 0
+      wgs84Positions[i * 2 + 1] = 0
+    }
   }
 
   // Fast path: no crossing possible, just filter invalid triangles

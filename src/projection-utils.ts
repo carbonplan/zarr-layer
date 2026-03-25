@@ -42,11 +42,28 @@ export function createTransformer(
     throw new Error(formatProj4Error(proj4def, err))
   }
 
+  const safeNaN: [number, number] = [NaN, NaN]
   return {
-    forward: (x: number, y: number) =>
-      converter.forward([x, y]) as [number, number],
-    inverse: (x: number, y: number) =>
-      converter.inverse([x, y]) as [number, number],
+    forward: (x: number, y: number) => {
+      if (!isFinite(x) || !isFinite(y)) return safeNaN
+      try {
+        const result = converter.forward([x, y]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN
+        return result
+      } catch {
+        return safeNaN
+      }
+    },
+    inverse: (x: number, y: number) => {
+      if (!isFinite(x) || !isFinite(y)) return safeNaN
+      try {
+        const result = converter.inverse([x, y]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN
+        return result
+      } catch {
+        return safeNaN
+      }
+    },
     bounds,
   }
 }
@@ -78,11 +95,28 @@ export function createTransformerTo4326(
     throw new Error(formatProj4Error(proj4def, err))
   }
 
+  const safeNaN4326: [number, number] = [NaN, NaN]
   return {
-    forward: (x: number, y: number) =>
-      converter.forward([x, y]) as [number, number],
-    inverse: (lon: number, lat: number) =>
-      converter.inverse([lon, lat]) as [number, number],
+    forward: (x: number, y: number) => {
+      if (!isFinite(x) || !isFinite(y)) return safeNaN4326
+      try {
+        const result = converter.forward([x, y]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN4326
+        return result
+      } catch {
+        return safeNaN4326
+      }
+    },
+    inverse: (lon: number, lat: number) => {
+      if (!isFinite(lon) || !isFinite(lat)) return safeNaN4326
+      try {
+        const result = converter.inverse([lon, lat]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN4326
+        return result
+      } catch {
+        return safeNaN4326
+      }
+    },
     bounds,
   }
 }
@@ -195,11 +229,28 @@ export function createWGS84ToSourceTransformer(proj4def: string): {
     throw new Error(formatProj4Error(proj4def, err))
   }
 
+  const safeNaNSrc: [number, number] = [NaN, NaN]
   return {
-    forward: (lon: number, lat: number) =>
-      converter.forward([lon, lat]) as [number, number],
-    inverse: (x: number, y: number) =>
-      converter.inverse([x, y]) as [number, number],
+    forward: (lon: number, lat: number) => {
+      if (!isFinite(lon) || !isFinite(lat)) return safeNaNSrc
+      try {
+        const result = converter.forward([lon, lat]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaNSrc
+        return result
+      } catch {
+        return safeNaNSrc
+      }
+    },
+    inverse: (x: number, y: number) => {
+      if (!isFinite(x) || !isFinite(y)) return safeNaNSrc
+      try {
+        const result = converter.inverse([x, y]) as [number, number]
+        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaNSrc
+        return result
+      } catch {
+        return safeNaNSrc
+      }
+    },
   }
 }
 
