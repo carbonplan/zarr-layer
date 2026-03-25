@@ -59,15 +59,20 @@ export interface ShaderProgram {
 
 export function resolveProjectionMode(
   useMapbox: boolean = false,
-  useWgs84: boolean = false
+  useWgs84: boolean = false,
+  useDirectEcef: boolean = false
 ): ProjectionMode {
-  // For Mapbox (proj4 and non-proj4)
-  if (useMapbox && useWgs84) return 'mapbox-wgs84'
+  // For Mapbox (ECEF, proj4, and non-proj4)
+  if (useMapbox && useDirectEcef) return 'mapbox-ecef'
+  if (useMapbox && useWgs84) return 'mapbox-proj4'
   if (useMapbox) return 'mapbox'
-  // For MapLibre: projectTile() handles both globe and mercator modes
-  // Requires MapLibre 3.0+ which provides vertexShaderPrelude
-  if (useWgs84) return 'wgs84-globe'
-  return 'maplibre-globe'
+  // For MapLibre: projectTile() handles the standard Mercator-driven paths.
+  // The ECEF variant is separate because untiled 4326/proj4 globe rendering
+  // needs vertices built directly on the sphere to avoid Mercator pole clipping.
+  // Requires MapLibre 3.0+ which provides vertexShaderPrelude.
+  if (useDirectEcef) return 'maplibre-ecef'
+  if (useWgs84) return 'maplibre-proj4'
+  return 'maplibre'
 }
 
 export function makeShaderVariantKey(options: {
@@ -98,22 +103,25 @@ const toFloat32Array = (
 
 // Projection mode helpers - modes are combinations of input space + projection target
 const isMapboxMode = (mode: ProjectionMode) =>
-  mode === 'mapbox' || mode === 'mapbox-wgs84'
-const isMaplibreGlobe = (mode: ProjectionMode) =>
-  mode === 'maplibre-globe' || mode === 'wgs84-globe'
+  mode === 'mapbox' || mode === 'mapbox-proj4' || mode === 'mapbox-ecef'
+const isMaplibreMode = (mode: ProjectionMode) =>
+  mode === 'maplibre' || mode === 'maplibre-proj4' || mode === 'maplibre-ecef'
 
 /** Map ProjectionMode to vertex shader options */
 function getVertexShaderOptions(projectionMode: ProjectionMode): {
   inputSpace: VertexShaderInputSpace
   projection: VertexShaderProjection
 } {
-  const inputSpace: VertexShaderInputSpace = projectionMode.includes('wgs84')
-    ? 'wgs84'
-    : 'mercator'
+  const inputSpace: VertexShaderInputSpace =
+    projectionMode === 'maplibre-ecef' || projectionMode === 'mapbox-ecef'
+      ? 'wgs84-direct'
+      : projectionMode.includes('proj4')
+      ? 'wgs84'
+      : 'mercator'
 
   const projection: VertexShaderProjection = isMapboxMode(projectionMode)
-    ? 'mapbox-globe'
-    : 'maplibre-globe'
+    ? 'mapbox'
+    : 'maplibre'
 
   return { inputSpace, projection }
 }
@@ -190,11 +198,11 @@ export function createShaderProgram(
     }
   }
 
-  // MapLibre globe modes use projectTile uniforms, Mapbox has its own
-  const needsMaplibreGlobe = isMaplibreGlobe(projectionMode)
+  // MapLibre modes use projectTile uniforms, Mapbox has its own
+  const needsMaplibre = isMaplibreMode(projectionMode)
   const needsMapbox = isMapboxMode(projectionMode)
   const maplibreUniform = (name: string) =>
-    needsMaplibreGlobe ? gl.getUniformLocation(program, name) : null
+    needsMaplibre ? gl.getUniformLocation(program, name) : null
   const mapboxUniform = (name: string) =>
     needsMapbox ? gl.getUniformLocation(program, name) : null
 
@@ -206,8 +214,8 @@ export function createShaderProgram(
     shiftXLoc: mustGetUniformLocation(gl, program, 'shift_x'),
     shiftYLoc: mustGetUniformLocation(gl, program, 'shift_y'),
     worldXOffsetLoc: mustGetUniformLocation(gl, program, 'u_worldXOffset'),
-    // MapLibre globe modes use projectTile instead of matrix
-    matrixLoc: needsMaplibreGlobe
+    // MapLibre modes use projectTile instead of matrix
+    matrixLoc: needsMaplibre
       ? null
       : mustGetUniformLocation(gl, program, 'matrix'),
     projMatrixLoc: maplibreUniform('u_projection_matrix'),
@@ -285,9 +293,10 @@ export function applyProjectionUniforms(
   }
 
   switch (shaderProgram.projectionMode) {
-    case 'maplibre-globe':
-    case 'wgs84-globe': {
-      // Both modes use MapLibre's projectTile uniforms
+    case 'maplibre':
+    case 'maplibre-proj4':
+    case 'maplibre-ecef': {
+      // All MapLibre modes use projectTile uniforms
       if (!projectionData) return
 
       setMatrix4(shaderProgram.projMatrixLoc, projectionData.mainMatrix)
@@ -304,9 +313,18 @@ export function applyProjectionUniforms(
       break
     }
     case 'mapbox':
-    case 'mapbox-wgs84': {
-      // mapbox is always present for Mapbox (mercator uses identity matrix + transition=1)
-      setMatrix4(shaderProgram.matrixLoc, matrix)
+    case 'mapbox-proj4':
+    case 'mapbox-ecef': {
+      // Mapbox's public custom-layer matrix uses the standard far plane, but
+      // the direct globe ECEF path needs the expanded-far variant to match
+      // the globe surface depth contract. Tile rendering still uses the tile matrix.
+      const mapboxMatrix =
+        shaderProgram.projectionMode === 'mapbox-ecef' &&
+        !isGlobeTileRender &&
+        mapbox?.expandedFarZMercatorMatrix
+          ? mapbox.expandedFarZMercatorMatrix
+          : matrix
+      setMatrix4(shaderProgram.matrixLoc, mapboxMatrix)
       setMatrix4(
         shaderProgram.globeToMercMatrixLoc,
         mapbox?.globeToMercatorMatrix

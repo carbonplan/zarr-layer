@@ -28,12 +28,18 @@ export interface RenderableRegion {
   indexBuffer?: WebGLBuffer | null
   useIndexedMesh?: boolean
 
-  // WGS84 bounds for two-stage reprojection (proj4 datasets)
+  // WGS84 bounds for vertex shader positioning (proj4 datasets, ECEF globe)
   wgs84Bounds?: Wgs84Bounds | null
 
   // Data orientation: true = row 0 is south (latitude ascending)
   // Resolved by ZarrStore during init
   latIsAscending: boolean
+
+  // Render-time mode fields (computed in regionToRenderable, not cached on RegionState)
+  // Defaults when unset: positionSpace = wgs84Bounds ? 'wgs84' : 'mercator'
+  //                      sampleMode = hasLatBounds && !wgs84Bounds ? 'mercator-invert' : 'linear'
+  positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
+  sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
 
   // Main texture (pre-uploaded)
   texture: WebGLTexture
@@ -72,25 +78,31 @@ export function renderRegion(
   worldOffsets: number[],
   customShaderConfig?: CustomShaderConfig
 ): boolean {
-  // Determine bounds for scale/shift uniforms
-  // For wgs84 shader (two-stage reprojection), use wgs84Bounds
-  // Otherwise use mercatorBounds
+  // Resolve position space and sample mode from explicit fields or defaults
   const wgs84Bounds = region.wgs84Bounds ?? null
+  const posSpace = region.positionSpace ?? (wgs84Bounds ? 'wgs84' : 'mercator')
 
-  // Set position uniforms
-  // For wgs84: bounds are in normalized 4326 [0,1], shader transforms to Mercator
-  // For mercator: bounds are in normalized Mercator [0,1]
+  const hasLatBounds =
+    region.mercatorBounds.latMin !== undefined &&
+    region.mercatorBounds.latMax !== undefined
+  const sampMode =
+    region.sampleMode ??
+    (hasLatBounds && !wgs84Bounds ? 'mercator-invert' : 'linear')
+
+  // Set position uniforms based on position space
   let scaleX: number, scaleY: number, shiftX: number, shiftY: number
-  if (wgs84Bounds) {
-    scaleX = (wgs84Bounds.lon1 - wgs84Bounds.lon0) / 2
-    scaleY = (wgs84Bounds.lat1 - wgs84Bounds.lat0) / 2
-    shiftX = (wgs84Bounds.lon0 + wgs84Bounds.lon1) / 2
-    shiftY = (wgs84Bounds.lat0 + wgs84Bounds.lat1) / 2
-  } else {
+  if (posSpace === 'mercator') {
     scaleX = (region.mercatorBounds.x1 - region.mercatorBounds.x0) / 2
     scaleY = (region.mercatorBounds.y1 - region.mercatorBounds.y0) / 2
     shiftX = (region.mercatorBounds.x0 + region.mercatorBounds.x1) / 2
     shiftY = (region.mercatorBounds.y0 + region.mercatorBounds.y1) / 2
+  } else {
+    // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift
+    if (!wgs84Bounds) return false
+    scaleX = (wgs84Bounds.lon1 - wgs84Bounds.lon0) / 2
+    scaleY = (wgs84Bounds.lat1 - wgs84Bounds.lat0) / 2
+    shiftX = (wgs84Bounds.lon0 + wgs84Bounds.lon1) / 2
+    shiftY = (wgs84Bounds.lat0 + wgs84Bounds.lat1) / 2
   }
 
   gl.uniform1f(shaderProgram.scaleLoc, 0)
@@ -105,28 +117,30 @@ export function renderRegion(
   gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
   gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 
-  // Set EPSG:4326 reprojection uniforms for fragment shader reprojection
-  // This is used when mercatorBounds has lat bounds but we're NOT using wgs84 vertex shader
-  const hasLatBounds =
-    region.mercatorBounds.latMin !== undefined &&
-    region.mercatorBounds.latMax !== undefined
-  const useFragmentReproject = hasLatBounds && !wgs84Bounds
-
+  // Set fragment shader reprojection uniforms based on sample mode
+  const needsLatLookup =
+    sampMode === 'mercator-invert' || sampMode === 'wgs84-lookup'
   if (shaderProgram.reprojectLoc !== null) {
-    gl.uniform1i(shaderProgram.reprojectLoc, useFragmentReproject ? 1 : 0)
+    switch (sampMode) {
+      case 'linear':
+        gl.uniform1i(shaderProgram.reprojectLoc, 0)
+        break
+      case 'mercator-invert':
+        gl.uniform1i(shaderProgram.reprojectLoc, 1)
+        break
+      case 'wgs84-lookup':
+        gl.uniform1i(shaderProgram.reprojectLoc, 2)
+        break
+    }
   }
-  if (
-    useFragmentReproject &&
-    shaderProgram.latBoundsLoc !== null &&
-    hasLatBounds
-  ) {
+  if (needsLatLookup && shaderProgram.latBoundsLoc !== null && hasLatBounds) {
     gl.uniform2f(
       shaderProgram.latBoundsLoc,
       region.mercatorBounds.latMin!,
       region.mercatorBounds.latMax!
     )
   }
-  if (useFragmentReproject && shaderProgram.latIsAscendingLoc !== null) {
+  if (needsLatLookup && shaderProgram.latIsAscendingLoc !== null) {
     gl.uniform1i(shaderProgram.latIsAscendingLoc, region.latIsAscending ? 1 : 0)
   }
 

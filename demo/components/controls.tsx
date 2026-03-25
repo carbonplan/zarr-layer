@@ -14,8 +14,8 @@ import {
 // @ts-expect-error - carbonplan colormaps types not available
 import { useThemedColormap } from '@carbonplan/colormaps'
 // @ts-expect-error - carbonplan icons types not available
-import { RotatingArrow } from '@carbonplan/icons'
-import { Box, Divider, Flex } from 'theme-ui'
+import { Info, RotatingArrow } from '@carbonplan/icons'
+import { Box, Divider, Flex, IconButton } from 'theme-ui'
 import { DATASET_MAP } from '../datasets'
 import { useAppStore } from '../lib/store'
 import type { ControlsProps } from '../datasets/types'
@@ -234,6 +234,8 @@ const Controls = () => {
   const colormap = useAppStore((state) => state.colormap)
   const globeProjection = useAppStore((state) => state.globeProjection)
   const terrainEnabled = useAppStore((state) => state.terrainEnabled)
+  const renderPoles = useAppStore((state) => state.renderPoles)
+  const setRenderPoles = useAppStore((state) => state.setRenderPoles)
   const mapProvider = useAppStore((state) => state.mapProvider)
   const pointResult = useAppStore((state) => state.pointResult)
   const regionResult = useAppStore((state) => state.regionResult)
@@ -332,6 +334,8 @@ const Controls = () => {
     [regionResult, fillValue]
   )
 
+  const [terrainInfo, setTerrainInfo] = useState(false)
+  const [renderPolesInfo, setRenderPolesInfo] = useState(false)
   const [climInputs, setClimInputs] = useState<[string, string]>([
     String(clim[0]),
     String(clim[1]),
@@ -635,26 +639,127 @@ const Controls = () => {
         </Column>
       </Row>
 
-      <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
-        <Column start={1} width={1} sx={subheadingSx}>
-          Terrain
-        </Column>
-        <Column start={2} width={3}>
-          {mapProvider === 'mapbox' ? (
-            <Filter
-              values={{ on: terrainEnabled, off: !terrainEnabled }}
-              setValues={(obj: Record<string, boolean>) => {
-                if (obj.off) setTerrainEnabled(false)
-                if (obj.on) setTerrainEnabled(true)
+      {mapProvider === 'mapbox' && (
+        <>
+          <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
+            <Column start={1} width={1} sx={subheadingSx}>
+              Terrain
+            </Column>
+            <Column start={2} width={3}>
+              <Flex sx={{ alignItems: 'center', gap: 2 }}>
+                <Filter
+                  values={{ on: terrainEnabled, off: !terrainEnabled }}
+                  setValues={(obj: Record<string, boolean>) => {
+                    if (obj.off) setTerrainEnabled(false)
+                    if (obj.on) {
+                      setTerrainEnabled(true)
+                      setRenderPoles(false)
+                    }
+                  }}
+                />
+                <IconButton
+                  onClick={() => setTerrainInfo(!terrainInfo)}
+                  aria-label='More information'
+                  aria-expanded={terrainInfo}
+                  sx={{
+                    cursor: 'pointer',
+                    width: '16px',
+                    height: '16px',
+                    p: 0,
+                    flexShrink: 0,
+                    '@media (hover: hover) and (pointer: fine)': {
+                      '&:hover > #terrain-info': { stroke: 'primary' },
+                    },
+                  }}
+                >
+                  <Info
+                    id='terrain-info'
+                    height='16px'
+                    width='16px'
+                    sx={{
+                      stroke: terrainInfo ? 'primary' : 'secondary',
+                      transition: '0.1s',
+                    }}
+                  />
+                </IconButton>
+              </Flex>
+            </Column>
+          </Row>
+          {terrainInfo && (
+            <Box
+              sx={{
+                fontSize: 0,
+                color: 'secondary',
+                mt: 1,
+                mb: 2,
+                fontFamily: 'body',
               }}
-            />
-          ) : (
-            <Box sx={{ color: 'secondary', fontSize: 1 }}>
-              Not yet supported in MapLibre
+            >
+              Drapes the zarr layer over Mapbox 3D terrain. Incompatible with
+              render poles. Mapbox only.
             </Box>
           )}
-        </Column>
-      </Row>
+
+          <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
+            <Column start={1} width={1} sx={subheadingSx}>
+              Render poles
+            </Column>
+            <Column start={2} width={3}>
+              <Flex sx={{ alignItems: 'center', gap: 2 }}>
+                <Filter
+                  values={{ on: renderPoles, off: !renderPoles }}
+                  setValues={(obj: Record<string, boolean>) => {
+                    if (obj.off) setRenderPoles(false)
+                    if (obj.on) {
+                      setRenderPoles(true)
+                      setTerrainEnabled(false)
+                    }
+                  }}
+                />
+                <IconButton
+                  onClick={() => setRenderPolesInfo(!renderPolesInfo)}
+                  aria-label='More information'
+                  aria-expanded={renderPolesInfo}
+                  sx={{
+                    cursor: 'pointer',
+                    width: '16px',
+                    height: '16px',
+                    p: 0,
+                    flexShrink: 0,
+                    '@media (hover: hover) and (pointer: fine)': {
+                      '&:hover > #render-poles-info': { stroke: 'primary' },
+                    },
+                  }}
+                >
+                  <Info
+                    id='render-poles-info'
+                    height='16px'
+                    width='16px'
+                    sx={{
+                      stroke: renderPolesInfo ? 'primary' : 'secondary',
+                      transition: '0.1s',
+                    }}
+                  />
+                </IconButton>
+              </Flex>
+            </Column>
+          </Row>
+          {renderPolesInfo && (
+            <Box
+              sx={{
+                fontSize: 0,
+                color: 'secondary',
+                mt: 1,
+                mb: 2,
+                fontFamily: 'body',
+              }}
+            >
+              Experimental direct ECEF rendering that avoids the visible polar
+              gap from Web Mercator clipping. Incompatible with terrain.
+            </Box>
+          )}
+        </>
+      )}
     </Box>
   )
 }

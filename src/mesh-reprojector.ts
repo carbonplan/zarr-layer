@@ -2,13 +2,13 @@
  * Mesh generation for client-side raster reprojection.
  *
  * Uses Delaunay triangulation on a uniform grid for reliable mesh generation.
- * Outputs EPSG:4326 coordinates for two-stage GPU reprojection
- * (source CRS → WGS84 on CPU, WGS84 → Mercator in shader).
+ * Outputs EPSG:4326 coordinates that the GPU projects to either
+ * Mercator (flat map) or ECEF (globe).
  */
 
 import Delaunator from 'delaunator'
 import { RasterReprojector } from '@developmentseed/raster-reproject'
-import { lonToMercatorNorm, type Wgs84Bounds } from './map-utils'
+import { type Wgs84Bounds } from './map-utils'
 import {
   pixelToSourceCRS,
   sourceCRSToPixel,
@@ -125,62 +125,27 @@ function createReprojector(config: ReprojectorConfig): RasterReprojector {
 }
 
 /**
- * Compute normalized WGS84 bounds from min/max lon/lat values.
- * For antimeridian-crossing data, minLon > maxLon (e.g., 170° to -170°).
+ * Encode WGS84 lon/lat positions as absolute normalized coordinates in [-1, 1].
  *
- * Note: For Mercator rendering, latitudes beyond ±85.05° will be clamped
- * in the shader. This may cause visual artifacts for polar data.
- * Globe mode can display full polar data without issues.
- */
-function computeWgs84Bounds(
-  minLon: number,
-  maxLon: number,
-  minLat: number,
-  maxLat: number,
-  crossesAntimeridian: boolean = false
-): Wgs84Bounds {
-  return {
-    lon0: lonToMercatorNorm(minLon),
-    lat0: (minLat + 90) / 180,
-    lon1: lonToMercatorNorm(maxLon),
-    lat1: (maxLat + 90) / 180,
-    crossesAntimeridian,
-  }
-}
-
-/**
- * Normalize lon/lat positions to local [-1, 1] coordinates.
- * This matches the standard mercator path where createSubdividedQuad outputs [-1, 1].
+ * Uses global WGS84 range (lon: [-180,180] → [0,1], lat: [-90,90] → [0,1])
+ * then maps [0,1] to [-1,1] for the shader's scale/shift convention.
  *
- * For antimeridian-crossing bounds (minLon > maxLon in degrees, e.g., 170° to -170°):
- * - Actual range is (360 - minLon + maxLon), e.g., (360 - 170 + (-170)) = 20°
- * - Longitudes < minLon get +360 to create a continuous range
+ * This ensures adjacent regions' shared-edge vertices produce identical Float32
+ * values, eliminating seams caused by per-region bounding box normalization.
+ * The companion identity wgs84Bounds ({0,0,1,1}) maps [-1,1] back to [0,1]
+ * in the shader via vertex * 0.5 + 0.5.
  */
-function normalizeToLocalCoords(
+function encodeAbsoluteWgs84(
   positions: ArrayLike<number>,
   minLon: number,
-  maxLon: number,
-  minLat: number,
-  maxLat: number,
-  crossesAntimeridian: boolean = false
+  crossesAntimeridian: boolean
 ): Float32Array {
   const numVerts = positions.length / 2
-  const normalized = new Float32Array(numVerts * 2)
-
-  // For antimeridian crossing: actual range wraps through 180°
-  // e.g., minLon=170, maxLon=-170 means range of 20° (not -340°)
-  const lonRange = crossesAntimeridian
-    ? 360 - minLon + maxLon || 1
-    : maxLon - minLon || 1
-  const latRange = maxLat - minLat || 1
+  const encoded = new Float32Array(numVerts * 2)
 
   for (let i = 0; i < numVerts; i++) {
-    let lon = positions[i * 2]
+    let lon = normalizeLon180(positions[i * 2])
     const lat = positions[i * 2 + 1]
-
-    // Normalize longitude to [-180, 180) range first
-    // This handles the case where proj4 outputs 180° which equals -180°
-    lon = normalizeLon180(lon)
 
     // For antimeridian crossing, shift negative longitudes up by 360
     // so they're in a continuous range with positive longitudes
@@ -188,12 +153,18 @@ function normalizeToLocalCoords(
       lon += 360
     }
 
-    // Map [minLon, maxLon] → [-1, 1] and [minLat, maxLat] → [-1, 1]
-    normalized[i * 2] = ((lon - minLon) / lonRange) * 2 - 1
-    normalized[i * 2 + 1] = ((lat - minLat) / latRange) * 2 - 1
+    if (!isFinite(lon) || !isFinite(lat)) {
+      encoded[i * 2] = NaN
+      encoded[i * 2 + 1] = NaN
+      continue
+    }
+
+    // Absolute WGS84 [0,1] encoded as [-1,1]
+    encoded[i * 2] = ((lon + 180) / 360) * 2 - 1
+    encoded[i * 2 + 1] = ((lat + 90) / 180) * 2 - 1
   }
 
-  return normalized
+  return encoded
 }
 
 // ============================================================================
@@ -584,23 +555,16 @@ export function createHybridMesh(
     canCrossAntimeridian
   )
 
-  // Normalize with antimeridian awareness
-  const positions = normalizeToLocalCoords(
+  // Encode as absolute WGS84 coordinates so that shared-edge vertices between
+  // adjacent regions produce identical Float32 values (eliminates seams).
+  const positions = encodeAbsoluteWgs84(
     splitResult.positions,
     minLon,
-    maxLon,
-    minLat,
-    maxLat,
     crossesAntimeridian
   )
 
-  const wgs84Bounds = computeWgs84Bounds(
-    minLon,
-    maxLon,
-    minLat,
-    maxLat,
-    crossesAntimeridian
-  )
+  // Identity bounds: shader maps [-1,1] → [0,1] via vertex * 0.5 + 0.5
+  const wgs84Bounds: Wgs84Bounds = { lon0: 0, lat0: 0, lon1: 1, lat1: 1 }
 
   return {
     positions,

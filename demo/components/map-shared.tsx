@@ -167,6 +167,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
   const clim = useAppStore((state) => state.clim)
   const colormap = useAppStore((state) => state.colormap)
   const mapProvider = useAppStore((state) => state.mapProvider)
+  const renderPoles = useAppStore((state) => state.renderPoles)
   const setLoadingState = useAppStore((state) => state.setLoadingState)
   const colormapArray = useThemedColormap(colormap, { format: 'hex' })
   const setPointResult = useAppStore((state) => state.setPointResult)
@@ -236,6 +237,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
         latIsAscending: datasetModule.latIsAscending,
         proj4: datasetModule.proj4,
         onLoadingStateChange: setLoadingState,
+        renderPoles,
       }
 
       if (datasetModule.store) {
@@ -343,6 +345,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
     layerConfig.customFrag,
     layerConfig.variable,
     mapProvider,
+    renderPoles,
     setLoadingState,
   ])
 
@@ -378,8 +381,6 @@ export const Map = () => {
   const setMapInstance = useAppStore((state) => state.setMapInstance)
 
   const mapConfig = getMapConfig(mapProvider)
-
-  useMapLayer(map, isMapLoaded)
 
   useEffect(() => {
     if (!mapContainer.current) return
@@ -425,6 +426,8 @@ export const Map = () => {
       console.warn('Error toggling terrain:', e)
     }
   }, [map, isMapLoaded, terrainEnabled, mapProvider])
+
+  useMapLayer(map, isMapLoaded)
 
   useEffect(() => {
     if (!map || !isMapLoaded) return

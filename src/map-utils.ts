@@ -311,6 +311,11 @@ export function mercatorNormToLat(mercY: number): number {
   return (180 / Math.PI) * Math.atan(Math.sinh(t))
 }
 
+/** Convert latitude in degrees to normalized WGS84 Y [0, 1] where -90 → 0, 90 → 1. */
+export function latToWgs84Norm(lat: number): number {
+  return (lat + 90) / 180
+}
+
 export function mercatorNormToLon(mercX: number): number {
   return mercX * 360 - 180
 }

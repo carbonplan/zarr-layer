@@ -19,6 +19,10 @@ export interface ProjectionData {
   projectionTransition: number
 }
 
+// Small clip-space depth bias keeps the direct Mapbox globe path from
+// z-fighting with the globe surface. This is only applied to the custom ECEF path.
+const MAPBOX_ECEF_DEPTH_BIAS = 5e-4
+
 // ============================================================================
 // Reusable Shader Components
 // ============================================================================
@@ -45,7 +49,8 @@ in vec2 pix_coord_in;
 in vec2 vertex;
 
 out vec2 pix_coord;
-out vec2 v_mercatorPos;`
+out vec2 v_mercatorPos;
+out vec2 v_wgs84Pos;`
 
 /** Scale handling (shared by all shaders) */
 const SCALE_HANDLING = `
@@ -119,12 +124,79 @@ const PROJECT_MAPBOX_GLOBE = `
     gl_Position = mix(globeClip, mercClip, clamp(u_globe_transition, 0.0, 1.0));
   }`
 
+/** Transform vertex from local space to WGS84 normalized coords, then compute ECEF + Mercator fallback */
+const VERTEX_WGS84_TO_ECEF = `
+  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
+  float normLat = vertex.y * sy + shift_y;
+
+  // WGS84 normalized [0,1] to radians
+  float lonRad = (normLon - 0.5) * 2.0 * PI;
+  float latDeg = normLat * 180.0 - 90.0;
+  float latRad = latDeg * PI / 180.0;
+
+  // ECEF unit sphere (MapLibre Y-UP convention)
+  float cosLat = cos(latRad);
+  vec3 ecef = vec3(sin(lonRad) * cosLat, sin(latRad), cos(lonRad) * cosLat);
+
+  // Clamped Mercator fallback for flat-map transition
+  float clampedLatDeg = clamp(latDeg, -MERCATOR_LAT_LIMIT, MERCATOR_LAT_LIMIT);
+  float clampedLatRad = clampedLatDeg * PI / 180.0;
+  float mercY_raw = log(tan((PI / 2.0 + clampedLatRad) / 2.0));
+  vec2 merc = vec2(normLon, (1.0 - mercY_raw / PI) / 2.0);`
+
+/** Transform vertex from local space to WGS84 normalized coords, then compute ECEF (Mapbox Y-DOWN + radius) */
+const VERTEX_WGS84_TO_ECEF_MAPBOX = `
+  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
+  float normLat = vertex.y * sy + shift_y;
+
+  // WGS84 normalized [0,1] to radians
+  float lonRad = (normLon - 0.5) * 2.0 * PI;
+  float latDeg = normLat * 180.0 - 90.0;
+  float latRad = latDeg * PI / 180.0;
+
+  // Mapbox ECEF: Y-DOWN with explicit radius
+  float cosLat = cos(latRad);
+  vec3 ecef = vec3(
+    GLOBE_RADIUS * cosLat * sin(lonRad),
+    -GLOBE_RADIUS * sin(latRad),
+    GLOBE_RADIUS * cosLat * cos(lonRad)
+  );`
+
+/** Mapbox ECEF projection output for the direct untiled globe path. */
+const PROJECT_MAPBOX_ECEF = `
+  // This path is only used at the fully-globe endpoint. During Mapbox's
+  // globe->mercator zoom morph, the layer switches back to the draped path so
+  // Mapbox can handle the transition with its internal globe/mercator matrices.
+  gl_Position = matrix * (u_globe_to_merc * vec4(ecef, 1.0));
+  gl_Position.z -= ${MAPBOX_ECEF_DEPTH_BIAS.toExponential(6)} * gl_Position.w;`
+
+/** MapLibre ECEF projection output with globe/flat transition blend.
+ * Unlike projectTile(merc), this path starts from WGS84-derived sphere coords,
+ * which preserves polar coverage for untiled EPSG:4326/proj4 data.
+ */
+const PROJECT_MAPLIBRE_ECEF = `
+  vec4 globePos = u_projection_matrix * vec4(ecef, 1.0);
+
+  // Backface clipping
+  float clipZ = 1.0 - (dot(ecef, u_projection_clipping_plane.xyz) + u_projection_clipping_plane.w);
+  globePos.z = clipZ * globePos.w;
+
+  // Mercator fallback for flat-map transition
+  vec4 flatPos = u_projection_fallback_matrix * vec4(merc, 0.0, 1.0);
+
+  // Transition blend (matches MapLibre's interpolateProjection)
+  float t = u_projection_transition;
+  vec4 result;
+  result.xyw = mix(flatPos.xyw, globePos.xyw, t);
+  result.z = mix(0.0, globePos.z, clamp((t - 0.2) / 0.8, 0.0, 1.0));
+  gl_Position = result;`
+
 // ============================================================================
 // Vertex Shader Types
 // ============================================================================
 
-export type VertexShaderInputSpace = 'mercator' | 'wgs84'
-export type VertexShaderProjection = 'maplibre-globe' | 'mapbox-globe'
+export type VertexShaderInputSpace = 'mercator' | 'wgs84' | 'wgs84-direct'
+export type VertexShaderProjection = 'maplibre' | 'mapbox'
 
 export interface VertexShaderOptions {
   inputSpace: VertexShaderInputSpace
@@ -139,58 +211,90 @@ export interface VertexShaderOptions {
 /**
  * Create a vertex shader from composable parts.
  *
- * @param options.inputSpace - 'mercator' (data already in Mercator) or 'wgs84' (needs transform)
- * @param options.projection - 'maplibre-globe' or 'mapbox-globe'
- * @param options.shaderData - Required for maplibre-globe (provides projectTile prelude)
+ * @param options.inputSpace - 'mercator', 'wgs84' (needs Mercator transform), or 'wgs84-direct' (ECEF)
+ * @param options.projection - 'maplibre' or 'mapbox'
+ * @param options.shaderData - Required for maplibre projection (provides projectTile prelude)
  */
 export function createVertexShader(options: VertexShaderOptions): string {
   const { inputSpace, projection, shaderData } = options
+  const isDirectEcef = inputSpace === 'wgs84-direct'
+  const isMapboxDirectEcef = isDirectEcef && projection === 'mapbox'
 
   // Build uniforms section
   let uniforms: string
   let prelude = ''
   let define = ''
 
-  if (projection === 'maplibre-globe') {
+  if (isDirectEcef && projection === 'mapbox') {
+    // Mapbox ECEF: no prelude, use Mapbox uniforms
+    uniforms = UNIFORMS_COMMON + UNIFORMS_MAPBOX_GLOBE
+  } else if (isDirectEcef || projection === 'maplibre') {
+    // MapLibre paths (both projectTile and direct ECEF) use the prelude which
+    // declares PI, projection uniforms, and projectTile(). The ECEF path
+    // references those uniforms directly instead of calling projectTile().
     if (!shaderData) {
-      throw new Error('shaderData required for maplibre-globe projection')
+      throw new Error('shaderData required for MapLibre projection modes')
     }
     prelude = shaderData.vertexShaderPrelude
     define = shaderData.define
-    uniforms = UNIFORMS_COMMON // projectTile handles matrix internally
+    uniforms = UNIFORMS_COMMON
   } else {
-    // mapbox-globe
+    // mapbox non-ECEF
     uniforms = UNIFORMS_COMMON + UNIFORMS_MAPBOX_GLOBE
   }
 
-  // Build constants section (MapLibre prelude already defines PI)
-  const needsPI = projection !== 'maplibre-globe'
-  const needsMercatorLimit = inputSpace === 'wgs84'
-  const needsGlobeRadius = projection === 'mapbox-globe'
-
+  // Build constants section
+  // PI: only needed for Mapbox (no prelude). MapLibre prelude defines PI for all other paths.
+  // MERCATOR_LAT_LIMIT: needed for wgs84 and wgs84-direct (Mercator fallback clamping)
   const constants = [
-    needsPI ? CONST_PI : '',
-    needsMercatorLimit ? CONST_MERCATOR_LAT_LIMIT : '',
-    needsGlobeRadius ? CONST_GLOBE_RADIUS : '',
+    !shaderData ? CONST_PI : '',
+    inputSpace === 'wgs84' || (isDirectEcef && projection !== 'mapbox')
+      ? CONST_MERCATOR_LAT_LIMIT
+      : '',
+    projection === 'mapbox' ? CONST_GLOBE_RADIUS : '',
   ]
     .filter(Boolean)
     .join('\n')
 
   // Build helper functions
+  // FUNC_MERCATOR_Y_TO_LAT only needed for regular Mapbox globe (inverts Mercator Y to lat).
+  // Mapbox ECEF gets latitude directly from WGS84 input, so it doesn't need this helper.
   let helpers = ''
-  if (projection === 'mapbox-globe') {
+  if (projection === 'mapbox' && !isDirectEcef) {
     helpers = FUNC_MERCATOR_Y_TO_LAT
   }
 
   // Build coordinate transform
-  const coordTransform =
-    inputSpace === 'wgs84' ? VERTEX_TO_WGS84_TO_MERCATOR : VERTEX_TO_MERCATOR
+  let coordTransform: string
+  if (isMapboxDirectEcef) {
+    coordTransform = VERTEX_WGS84_TO_ECEF_MAPBOX
+  } else if (isDirectEcef) {
+    coordTransform = VERTEX_WGS84_TO_ECEF
+  } else if (inputSpace === 'wgs84') {
+    coordTransform = VERTEX_TO_WGS84_TO_MERCATOR
+  } else {
+    coordTransform = VERTEX_TO_MERCATOR
+  }
 
   // Build projection output
-  const projectionOutput =
-    projection === 'maplibre-globe'
-      ? PROJECT_MAPLIBRE_GLOBE
-      : PROJECT_MAPBOX_GLOBE
+  let projectionOutput: string
+  if (isMapboxDirectEcef) {
+    projectionOutput = PROJECT_MAPBOX_ECEF
+  } else if (isDirectEcef) {
+    projectionOutput = PROJECT_MAPLIBRE_ECEF
+  } else if (projection === 'maplibre') {
+    projectionOutput = PROJECT_MAPLIBRE_GLOBE
+  } else {
+    projectionOutput = PROJECT_MAPBOX_GLOBE
+  }
+
+  // Set v_wgs84Pos: meaningful for direct ECEF, zero for other paths
+  const wgs84PosAssignment = isDirectEcef
+    ? '  v_wgs84Pos = vec2(normLon, normLat);'
+    : '  v_wgs84Pos = vec2(0.0);'
+  const mercatorPosAssignment = isMapboxDirectEcef
+    ? '  v_mercatorPos = vec2(0.0);'
+    : '  v_mercatorPos = merc;'
 
   // Compose final shader
   return `#version 300 es
@@ -206,7 +310,8 @@ ${SCALE_HANDLING}
 ${coordTransform}
 ${projectionOutput}
   pix_coord = pix_coord_in;
-  v_mercatorPos = merc;
+${mercatorPosAssignment}
+${wgs84PosAssignment}
 }
 `
 }
@@ -252,6 +357,17 @@ const FRAGMENT_SHADER_REPROJECT = `
 
     // X coordinate is linear (longitude)
     sample_coord = vec2(pix_coord.x, texV) * u_texScale + u_texOffset;
+  } else if (u_reproject == 2) {
+    // WGS84 direct lookup: v_wgs84Pos carries normalized WGS84 coords from ECEF vertex shader
+    float lat = v_wgs84Pos.y * 180.0 - 90.0;
+    float latRange = u_latBounds.y - u_latBounds.x;
+    float texV;
+    if (u_latIsAscending == 1) {
+      texV = (lat - u_latBounds.x) / latRange;
+    } else {
+      texV = (u_latBounds.y - lat) / latRange;
+    }
+    sample_coord = vec2(pix_coord.x, texV) * u_texScale + u_texOffset;
   } else {
     // Standard linear texture lookup
     sample_coord = pix_coord * u_texScale + u_texOffset;
@@ -275,7 +391,7 @@ uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
 // EPSG:4326 reprojection uniforms
-uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion
+uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion, 2 = WGS84 direct lookup
 uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
 uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
@@ -284,6 +400,7 @@ uniform sampler2D cmap;
 
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
+in vec2 v_wgs84Pos;
 out vec4 color;
 
 ${FRAG_CONST_PI}
@@ -387,7 +504,7 @@ uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
 // EPSG:4326 reprojection uniforms
-uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion
+uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion, 2 = WGS84 direct lookup
 uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
 uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
@@ -399,6 +516,7 @@ ${extraUniformsDecl}
 
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
+in vec2 v_wgs84Pos;
 out vec4 fragColor;
 
 ${FRAG_CONST_PI}
