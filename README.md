@@ -22,7 +22,7 @@ High resolution datasets require multiscales. There are two main ways to store t
 
 #### Tiled
 
-Classic approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
+Legacy approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
 
 - Limited to EPSG:4326 or EPSG:3857
 
@@ -304,6 +304,22 @@ new ZarrLayer({
 ```
 
 The store must implement the zarrita `Readable` interface with at minimum a `get(key: string)` method.
+
+## CRS auto-detection
+
+The library automatically detects CRS from metadata using two convention systems:
+
+### [zarr-conventions](https://github.com/zarr-conventions/zarr-conventions-spec)
+
+Datasets using the [geo-proj convention](https://github.com/zarr-conventions/geo-proj) are detected via `proj:code` and `proj:wkt2` in group attributes. WKT2 strings are passed directly to proj4 (proj4js can parse WKT natively).
+
+### CF grid_mapping
+
+For datasets following [CF conventions](http://cfconventions.org/), the library detects the CRS from `grid_mapping` attributes. If your data variable has a `grid_mapping` attribute pointing to a projection variable (e.g., `goes_imager_projection`), the proj4 string is built automatically from the CF parameters.
+
+Supported `grid_mapping_name` values: `geostationary`, `lambert_conformal_conic`, `polar_stereographic`, `stereographic`, `transverse_mercator`, `mercator`, `albers_conical_equal_area`, `lambert_azimuthal_equal_area`, `azimuthal_equidistant`, `sinusoidal`, `orthographic`, `lambert_cylindrical_equal_area`, `oblique_mercator`, `vertical_perspective`, `rotated_latitude_longitude`, `latitude_longitude`.
+
+For geostationary projections (e.g., GOES-R ABI), the library detects the `perspective_point_height` and exposes it as `coordinateScale` for converting scanning angle coordinates (radians) to meters.
 
 ## thanks
 
