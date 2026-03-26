@@ -955,8 +955,12 @@ export class ZarrStore {
       if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
         this.crs = normalized as CRS
         this._crsFromMetadata = true
+      } else {
+        console.warn(
+          `[zarr-layer] Detected ${normalized} from metadata but no proj4 definition available. ` +
+            `Set explicitly to enable reprojection: proj4: '<proj4 string for ${normalized}>'`
+        )
       }
-      // Non-standard codes without proj4def need user-provided proj4 string
     }
   }
 
