@@ -707,7 +707,10 @@ export class ZarrLayer {
 
   private isZoomInRange(): boolean {
     if (!this.map?.getZoom) return true
-    const zoom = this.map.getZoom()
+    // In MapLibre globe mode, pole enlargement compensation can push
+    // getZoom() negative. Clamp to 0 so that artifact alone doesn't
+    // hide the layer.
+    const zoom = Math.max(0, this.map.getZoom())
     return zoom >= this.minZoom && zoom <= this.maxZoom
   }
 
