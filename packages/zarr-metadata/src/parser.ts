@@ -22,12 +22,14 @@ import {
   parseZarrConventions,
 } from './multiscale'
 import type {
+  Bounds,
   CRSInfo,
   MetadataStore,
   MultiscaleFormat,
   NdpyramidTiledMultiscale,
   OmeNgffMultiscale,
   ParseOptions,
+  SpatialDimIndices,
   ZarrArrayMetadata,
   ZarrConventionsMultiscale,
   ZarrLevelMetadata,
@@ -183,16 +185,109 @@ export async function parseZarrMetadata(
     base
   )
 
+  // Try to derive bounds from GeoZarr spatial convention attributes
+  // (spatial:bbox or spatial:transform + shape). When present, this avoids
+  // the expensive coordinate array fetch entirely.
+  const spatialBounds = extractSpatialBounds(
+    groupMetadata,
+    base.shape,
+    spatialDimIndices
+  )
+
   return {
     version: detectedVersion,
     format,
     base,
     levels,
     crs: crsInfo,
-    bounds: null, // Must be loaded separately via loadCoordinateBounds()
-    latIsAscending: null, // Must be detected separately
+    bounds: spatialBounds?.bounds ?? null,
+    latIsAscending: spatialBounds?.latIsAscending ?? null,
     tileSize: parseResult.tileSize,
   }
+}
+
+/**
+ * Extract spatial bounds from GeoZarr spatial convention attributes.
+ *
+ * Checks group attributes for:
+ * - `spatial:bbox` ([xMin, yMin, xMax, yMax]) — direct bounds
+ * - `spatial:transform` ([a, b, c, d, e, f] affine) + array shape — computed bounds
+ *
+ * Skips rotated affine transforms (b ≠ 0 or d ≠ 0) where min/max bounds
+ * would be incorrect; axis-aligned transforms cover all real-world GeoZarr datasets.
+ *
+ * @see https://github.com/zarr-conventions/spatial
+ */
+function extractSpatialBounds(
+  metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null,
+  shape: number[],
+  spatialDimIndices: SpatialDimIndices
+): { bounds: Bounds; latIsAscending: boolean | null } | null {
+  if (!metadata) return null
+
+  // Gather group-level attributes
+  let attrs: Record<string, unknown> = {}
+  const v3 = metadata as ZarrV3GroupMetadata
+  if (v3.attributes) {
+    attrs = { ...v3.attributes }
+  }
+  const v2 = metadata as ZarrV2ConsolidatedMetadata
+  if (v2.metadata) {
+    const rootAttrs = v2.metadata['.zattrs'] as
+      | Record<string, unknown>
+      | undefined
+    if (rootAttrs) {
+      attrs = { ...rootAttrs, ...attrs }
+    }
+  }
+
+  // spatial:bbox: [xMin, yMin, xMax, yMax] — direct bounds, no shape needed
+  const bbox = attrs['spatial:bbox']
+  if (Array.isArray(bbox) && bbox.length >= 4) {
+    const vals = bbox.slice(0, 4).map(Number)
+    if (vals.every(Number.isFinite)) {
+      return {
+        bounds: [vals[0], vals[1], vals[2], vals[3]],
+        latIsAscending: null,
+      }
+    }
+  }
+
+  // spatial:transform: [a, b, c, d, e, f]
+  // a = Δx (column spacing), c = x origin (left edge)
+  // e = Δy (row spacing, negative for north-up), f = y origin (top edge)
+  const st = attrs['spatial:transform']
+  if (
+    Array.isArray(st) &&
+    st.length === 6 &&
+    spatialDimIndices.x !== null &&
+    spatialDimIndices.y !== null
+  ) {
+    const vals = st.map(Number)
+    const [a, b, c, d, e, f] = vals
+    // Skip rotated transforms — min/max bounds would be incorrect
+    if (b !== 0 || d !== 0) return null
+    if ([a, c, e, f].every(Number.isFinite)) {
+      const nCols = shape[spatialDimIndices.x]
+      const nRows = shape[spatialDimIndices.y]
+      if (nCols && nRows) {
+        const xEnd = c + a * nCols
+        const yEnd = f + e * nRows
+        return {
+          bounds: [
+            Math.min(c, xEnd),
+            Math.min(f, yEnd),
+            Math.max(c, xEnd),
+            Math.max(f, yEnd),
+          ],
+          // e < 0 means rows go top-to-bottom (north-up), so row 0 is northernmost
+          latIsAscending: e > 0,
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 /**

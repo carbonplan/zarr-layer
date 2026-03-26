@@ -497,5 +497,22 @@ function extractCrsFromProjAttributes(
     }
   }
 
+  // proj:projjson — PROJJSON object with id.authority/id.code
+  // @see https://proj.org/en/latest/specifications/projjson.html
+  const projjson = attrs['proj:projjson']
+  if (projjson && typeof projjson === 'object' && !Array.isArray(projjson)) {
+    const pid = (projjson as Record<string, unknown>)['id']
+    if (pid && typeof pid === 'object' && !Array.isArray(pid)) {
+      const { authority, code } = pid as Record<string, unknown>
+      if (typeof authority === 'string' && code !== undefined) {
+        return {
+          code: `${authority.toUpperCase()}:${code}`,
+          proj4def: null,
+          source: 'explicit',
+        }
+      }
+    }
+  }
+
   return null
 }
