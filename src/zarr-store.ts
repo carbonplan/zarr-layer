@@ -11,110 +11,23 @@ import type {
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
 import {
-  findGridMapping,
-  extractCrsFromGroupAttributes,
-} from '../packages/zarr-metadata/src/crs'
-import type { CRSInfo } from '../packages/zarr-metadata/src/types'
+  parseZarrMetadata,
+  normalizeFillValue,
+  findCoordinatePath,
+  findHighestResolutionLevel,
+} from '../packages/zarr-metadata/src'
+import type {
+  ZarrMultiscaleMetadata,
+  ZarrV2ConsolidatedMetadata,
+  ZarrV3GroupMetadata,
+  ZarrV3ArrayMetadata,
+} from '../packages/zarr-metadata/src/types'
 
 const textDecoder = new TextDecoder()
 
 const decodeJSON = (bytes: Uint8Array | undefined): unknown => {
   if (!bytes) return null
   return JSON.parse(textDecoder.decode(bytes))
-}
-
-interface PyramidMetadata {
-  levels: string[]
-  maxLevelIndex: number
-  tileSize: number
-  crs: CRS
-}
-
-interface MultiscaleDataset {
-  path: string
-  pixels_per_tile?: number
-  crs?: string
-}
-
-interface Multiscale {
-  datasets: MultiscaleDataset[]
-}
-
-// zarr-conventions/multiscales format (untiled multiscales)
-interface UntiledMultiscaleLayoutEntry {
-  asset: string
-  transform?: {
-    scale?: [number, number]
-    translation?: [number, number]
-  }
-  derived_from?: string
-}
-
-interface UntiledMultiscaleMetadata {
-  layout: UntiledMultiscaleLayoutEntry[]
-  resampling_method?: string
-  crs?: 'EPSG:4326' | 'EPSG:3857'
-}
-
-interface ZarrV2ConsolidatedMetadata {
-  metadata: Record<string, unknown>
-  zarr_consolidated_format?: number
-}
-
-interface ZarrV2ArrayMetadata {
-  shape: number[]
-  chunks: number[]
-  fill_value: number | null
-  dtype: string
-}
-
-interface ZarrV2Attributes {
-  _ARRAY_DIMENSIONS?: string[]
-  multiscales?: Multiscale[] | UntiledMultiscaleMetadata
-  scale_factor?: number
-  add_offset?: number
-}
-
-interface ZarrV3GroupMetadata {
-  zarr_format: 3
-  node_type: 'group'
-  attributes?: {
-    multiscales?: Multiscale[] | UntiledMultiscaleMetadata
-  }
-  consolidated_metadata?: {
-    metadata?: Record<string, ZarrV3ArrayMetadata>
-  }
-}
-
-interface ZarrV3ArrayMetadata {
-  zarr_format: 3
-  node_type: 'array'
-  shape: number[]
-  dimension_names?: string[]
-  data_type?: string
-  fill_value: number | null
-  chunk_grid?: {
-    name?: string
-    configuration?: {
-      chunk_shape?: number[]
-    }
-  }
-  chunks?: number[]
-  chunk_key_encoding?: {
-    name: string
-    configuration?: Record<string, unknown>
-  }
-  codecs?: Array<{
-    name: string
-    configuration?: {
-      chunk_shape?: number[]
-    }
-  }>
-  storage_transformers?: Array<{
-    name: string
-    configuration?: Record<string, unknown>
-  }>
-  attributes?: Record<string, unknown>
 }
 
 type AbsolutePath = `/${string}`
@@ -480,22 +393,257 @@ export class ZarrStore {
     this.store = await storeHandle
     this.root = zarr.root(this.store)
 
-    if (this.version === 2) {
-      await this._loadV2()
-    } else if (this.version === 3) {
-      await this._loadV3()
-    } else {
-      try {
-        await this._loadV3()
-      } catch {
-        await this._loadV2()
-      }
-    }
+    // Step 1: Load raw metadata (fetch + cache)
+    const preloadedMetadata = await this._loadRawMetadata()
 
+    // Step 2: Parse via zarr-metadata package
+    const parsed = await parseZarrMetadata(this.store, {
+      variable: this.variable,
+      version: this.version ?? undefined,
+      spatialDimensions: this.spatialDimensions
+        ? { lat: this.spatialDimensions.lat, lon: this.spatialDimensions.lon }
+        : undefined,
+      crs: this._crsOverride ? this.crs : undefined,
+      proj4: this.proj4 ?? undefined,
+      sourceUrl: this.source,
+      preloadedMetadata,
+    })
+
+    // Step 3: Map parsed output to store properties
+    this._applyParsedMetadata(parsed)
+
+    // Step 4: Build full dim indices (all dims, not just spatial)
+    await this._computeDimIndices()
+
+    // Step 5: Load spatial metadata (bounds normalization, CRS inference)
     await this._loadSpatialMetadata()
+
+    // Step 6: Load coordinate arrays for selectors
     await this._loadCoordinates()
 
     return this
+  }
+
+  /**
+   * Load raw metadata from the store, using cache when possible.
+   * Returns the preloaded metadata object to pass to parseZarrMetadata.
+   */
+  private async _loadRawMetadata(): Promise<
+    ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata
+  > {
+    const bypassCache = !!(this.transformRequest || this.customStore)
+
+    // Try V3 first (or forced), then V2
+    if (this.version === 3) {
+      return this._loadRawV3(bypassCache)
+    }
+    if (this.version === 2) {
+      return this._loadRawV2(bypassCache)
+    }
+
+    // Auto-detect: try V3 first, then V2
+    try {
+      return await this._loadRawV3(bypassCache)
+    } catch {
+      return this._loadRawV2(bypassCache)
+    }
+  }
+
+  private async _loadRawV2(
+    bypassCache: boolean
+  ): Promise<ZarrV2ConsolidatedMetadata> {
+    const cacheKey = `v2:${this.source}`
+    let zmetadata = bypassCache
+      ? undefined
+      : (ZarrStore._cache.get(cacheKey) as
+          | ZarrV2ConsolidatedMetadata
+          | undefined)
+
+    if (!zmetadata) {
+      if (this.isConsolidatedStore(this.store)) {
+        const rootZattrsBytes = await this.store.get('/.zattrs')
+        const rootZattrs = rootZattrsBytes ? decodeJSON(rootZattrsBytes) : {}
+        zmetadata = { metadata: { '.zattrs': rootZattrs } }
+      } else {
+        try {
+          zmetadata = (await this._getJSON(
+            '/.zmetadata'
+          )) as ZarrV2ConsolidatedMetadata
+        } catch {
+          try {
+            const zattrs = await this._getJSON('/.zattrs')
+            zmetadata = { metadata: { '.zattrs': zattrs } }
+          } catch {
+            zmetadata = { metadata: { '.zattrs': {} } }
+          }
+        }
+      }
+      if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
+    }
+
+    this.metadata = zmetadata
+    return zmetadata
+  }
+
+  private async _loadRawV3(bypassCache: boolean): Promise<ZarrV3GroupMetadata> {
+    const cacheKey = `v3:${this.source}`
+    let metadata = bypassCache
+      ? undefined
+      : (ZarrStore._cache.get(cacheKey) as ZarrV3GroupMetadata | undefined)
+
+    if (!metadata) {
+      metadata = (await this._getJSON('/zarr.json')) as ZarrV3GroupMetadata
+      if (!bypassCache) {
+        ZarrStore._cache.set(cacheKey, metadata)
+
+        if (metadata.consolidated_metadata?.metadata) {
+          for (const [key, arrayMeta] of Object.entries(
+            metadata.consolidated_metadata.metadata
+          )) {
+            const arrayCacheKey = `v3:${this.source}/${key}`
+            ZarrStore._cache.set(arrayCacheKey, arrayMeta)
+          }
+        }
+      }
+    }
+
+    this.metadata = metadata
+    this.version = 3
+    return metadata
+  }
+
+  /**
+   * Map parseZarrMetadata output to ZarrStore properties.
+   */
+  private _applyParsedMetadata(parsed: ZarrMultiscaleMetadata): void {
+    // Version
+    this.version = parsed.version
+
+    // Format → multiscaleType
+    switch (parsed.format) {
+      case 'ndpyramid-tiled':
+        this.multiscaleType = 'tiled'
+        break
+      case 'single-level':
+        this.multiscaleType = 'none'
+        break
+      default:
+        // zarr-conventions, ome-ngff → untiled
+        this.multiscaleType = 'untiled'
+        break
+    }
+
+    // For OME-NGFF without pixels_per_tile but with multiple levels,
+    // it could be tiled or untiled. The package returns 'ome-ngff' for both.
+    // Check if levels have tileSize (pixels_per_tile was present).
+    if (parsed.format === 'ome-ngff' && parsed.tileSize) {
+      this.multiscaleType = 'tiled'
+    }
+
+    // Single-level datasets still use untiled rendering
+    if (this.multiscaleType === 'none') {
+      this.multiscaleType = 'untiled'
+    }
+
+    // Base level properties
+    this.shape = parsed.base.shape
+    this.chunks = parsed.base.chunks
+    this.dtype = parsed.base.dtype
+    this.fill_value = parsed.base.fillValue
+    this.dimensions = parsed.base.dimensions
+    this.scaleFactor = parsed.base.scaleFactor ?? 1
+    this.addOffset = parsed.base.addOffset ?? 0
+
+    // Levels
+    this.levels = parsed.levels.map((l) => l.path)
+    this.maxLevelIndex = Math.max(0, parsed.levels.length - 1)
+    this.tileSize = parsed.tileSize ?? 128
+
+    // Build untiledLevels from parsed levels
+    if (this.multiscaleType === 'untiled') {
+      this.untiledLevels = parsed.levels.map((level) => {
+        const untiledLevel: UntiledLevel = {
+          asset: level.path,
+          scale: level.resolution,
+          translation: level.translation ?? [0.0, 0.0],
+        }
+
+        if (level.shape.length > 0) {
+          untiledLevel.shape = level.shape
+        }
+        if (level.chunks.length > 0) {
+          untiledLevel.chunks = level.chunks
+        }
+
+        // Float data scaling: float data is already physical, use 1/0
+        const dtype = level.dtype ?? parsed.base.dtype
+        const isFloatData =
+          dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
+
+        if (isFloatData) {
+          untiledLevel.scaleFactor = 1
+          untiledLevel.addOffset = 0
+        } else {
+          if (level.scaleFactor !== undefined) {
+            untiledLevel.scaleFactor = level.scaleFactor
+          }
+          if (level.addOffset !== undefined) {
+            untiledLevel.addOffset = level.addOffset
+          }
+        }
+
+        if (level.dtype !== undefined) {
+          untiledLevel.dtype = level.dtype
+        }
+        if (level.fillValue !== undefined) {
+          untiledLevel.fillValue = level.fillValue
+        }
+
+        return untiledLevel
+      })
+    }
+
+    // Tiled pyramids without explicit CRS default to Web Mercator
+    // (slippy-map tiles are always Mercator-projected)
+    if (!this._crsOverride && this.multiscaleType === 'tiled' && !parsed.crs) {
+      this.crs = 'EPSG:3857'
+      this._crsFromMetadata = true
+    }
+
+    // CRS (respect user override)
+    if (!this._crsOverride && parsed.crs) {
+      const code = parsed.crs.code?.toUpperCase()
+      if (code === 'EPSG:4326' || code === 'EPSG:3857') {
+        this.crs = code as CRS
+        this._crsFromMetadata = true
+      } else if (parsed.crs.proj4def) {
+        // Non-standard CRS with proj4 definition (e.g., from grid_mapping)
+        this.proj4 = parsed.crs.proj4def
+        this.crs = 'custom' as CRS
+        this._crsFromMetadata = true
+      } else if (code) {
+        // Non-standard CRS code without proj4 — warn user
+        if (!this.proj4) {
+          console.warn(
+            `[zarr-layer] Detected ${code} from metadata but no proj4 definition available. ` +
+              `Set explicitly to enable reprojection: proj4: '<proj4 string for ${code}>'`
+          )
+        }
+      }
+      if (parsed.crs.coordinateScale) {
+        this.coordinateScale = parsed.crs.coordinateScale
+      }
+    }
+
+    // Apply spatial bounds from metadata (spatial:bbox or spatial:transform).
+    // When present, _loadSpatialMetadata will skip the coordinate array fetch.
+    if (parsed.bounds && !this.explicitBounds) {
+      const [xMin, yMin, xMax, yMax] = parsed.bounds
+      this.xyLimits = { xMin, yMin, xMax, yMax }
+    }
+    if (parsed.latIsAscending !== null && !this._latIsAscendingUserSet) {
+      this.latIsAscending = parsed.latIsAscending
+    }
   }
 
   private async _loadCoordinates(): Promise<void> {
@@ -600,7 +748,7 @@ export class ZarrStore {
           data_type?: string
         }
         dtype = meta.data_type ?? null
-        fillValue = this.normalizeFillValue(meta.fill_value)
+        fillValue = normalizeFillValue(meta.fill_value)
 
         // Float data typically stores already-physical values (e.g., pyramid levels
         // created by averaging). Integer data stores raw counts needing conversion.
@@ -632,7 +780,7 @@ export class ZarrStore {
           fill_value?: unknown
           dtype?: string
         }
-        fillValue = this.normalizeFillValue(zarray.fill_value)
+        fillValue = normalizeFillValue(zarray.fill_value)
         dtype = zarray.dtype ?? null
 
         // Same float logic as v3: float data is already physical, integer needs scaling
@@ -723,261 +871,6 @@ export class ZarrStore {
     )
   }
 
-  private async _loadV2() {
-    const cacheKey = `v2:${this.source}`
-    // Bypass cache when transformRequest or customStore is provided
-    const bypassCache = this.transformRequest || this.customStore
-    let zmetadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(cacheKey) as
-          | ZarrV2ConsolidatedMetadata
-          | undefined)
-    if (!zmetadata) {
-      if (this.isConsolidatedStore(this.store)) {
-        const rootZattrsBytes = await this.store.get('/.zattrs')
-        const rootZattrs = rootZattrsBytes ? decodeJSON(rootZattrsBytes) : {}
-        zmetadata = { metadata: { '.zattrs': rootZattrs } }
-        if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
-      } else {
-        try {
-          zmetadata = (await this._getJSON(
-            '/.zmetadata'
-          )) as ZarrV2ConsolidatedMetadata
-          if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
-        } catch {
-          const zattrs = await this._getJSON('/.zattrs')
-          zmetadata = { metadata: { '.zattrs': zattrs } }
-        }
-      }
-    }
-
-    this.metadata = { metadata: zmetadata.metadata }
-
-    const rootAttrs = zmetadata.metadata['.zattrs'] as
-      | ZarrV2Attributes
-      | undefined
-    if (rootAttrs?.multiscales) {
-      const pyramid = this._getPyramidMetadata(rootAttrs.multiscales)
-      this.levels = pyramid.levels
-      this.maxLevelIndex = pyramid.maxLevelIndex
-      this.tileSize = pyramid.tileSize
-      if (!this._crsOverride) {
-        this.crs = pyramid.crs
-      }
-    }
-
-    const basePath =
-      this.levels.length > 0
-        ? `${this.levels[0]}/${this.variable}`
-        : this.variable
-    const v2Metadata = this.metadata as ZarrV2ConsolidatedMetadata
-    let zattrs = v2Metadata.metadata[`${basePath}/.zattrs`] as
-      | ZarrV2Attributes
-      | undefined
-    let zarray = v2Metadata.metadata[`${basePath}/.zarray`] as
-      | ZarrV2ArrayMetadata
-      | undefined
-
-    if (!zattrs || !zarray) {
-      ;[zattrs, zarray] = await Promise.all([
-        zattrs
-          ? Promise.resolve(zattrs)
-          : (this._getJSON(`/${basePath}/.zattrs`).catch(
-              () => ({})
-            ) as Promise<ZarrV2Attributes>),
-        zarray
-          ? Promise.resolve(zarray)
-          : (this._getJSON(
-              `/${basePath}/.zarray`
-            ) as Promise<ZarrV2ArrayMetadata>),
-      ])
-      v2Metadata.metadata[`${basePath}/.zattrs`] = zattrs
-      v2Metadata.metadata[`${basePath}/.zarray`] = zarray
-    }
-
-    this.dimensions = zattrs?._ARRAY_DIMENSIONS || []
-    this.shape = zarray?.shape || []
-    this.chunks = zarray?.chunks || []
-    this.fill_value = this.normalizeFillValue(zarray?.fill_value ?? null)
-    this.dtype = zarray?.dtype || null
-    this.scaleFactor = zattrs?.scale_factor ?? 1
-    this.addOffset = zattrs?.add_offset ?? 0
-
-    // Detect CRS from metadata if not already set
-    if (!this.proj4 && !this._crsOverride) {
-      // 1. Try proj:code from group attributes (GeoZarr / zarr-conventions)
-      this._applyCrsFromGroupAttributes(
-        extractCrsFromGroupAttributes(
-          v2Metadata as unknown as Parameters<
-            typeof extractCrsFromGroupAttributes
-          >[0]
-        )
-      )
-      // 2. Fall back to CF grid_mapping from array attributes
-      if (!this.proj4 && zattrs) {
-        this._applyCrsFromGridMapping(
-          findGridMapping(
-            zattrs as unknown as Record<string, unknown>,
-            v2Metadata as unknown as Parameters<typeof findGridMapping>[1]
-          )
-        )
-      }
-    }
-
-    await this._computeDimIndices()
-  }
-
-  private async _loadV3() {
-    const metadataCacheKey = `v3:${this.source}`
-    // Bypass cache when transformRequest or customStore is provided
-    const bypassCache = this.transformRequest || this.customStore
-    let metadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(metadataCacheKey) as
-          | ZarrV3GroupMetadata
-          | undefined)
-    if (!metadata) {
-      metadata = (await this._getJSON('/zarr.json')) as ZarrV3GroupMetadata
-      if (!bypassCache) {
-        ZarrStore._cache.set(metadataCacheKey, metadata)
-
-        if (metadata.consolidated_metadata?.metadata) {
-          for (const [key, arrayMeta] of Object.entries(
-            metadata.consolidated_metadata.metadata
-          )) {
-            const arrayCacheKey = `v3:${this.source}/${key}`
-            ZarrStore._cache.set(arrayCacheKey, arrayMeta)
-          }
-        }
-      }
-    }
-    this.metadata = metadata
-    this.version = 3
-
-    if (metadata.attributes?.multiscales) {
-      const pyramid = this._getPyramidMetadata(metadata.attributes.multiscales)
-      this.levels = pyramid.levels
-      this.maxLevelIndex = pyramid.maxLevelIndex
-      this.tileSize = pyramid.tileSize
-      if (!this._crsOverride) {
-        this.crs = pyramid.crs
-      }
-    }
-
-    const arrayKey =
-      this.levels.length > 0
-        ? `${this.levels[0]}/${this.variable}`
-        : this.variable
-    const arrayCacheKey = `v3:${this.source}/${arrayKey}`
-    let arrayMetadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(arrayCacheKey) as ZarrV3ArrayMetadata | undefined)
-    if (!arrayMetadata) {
-      arrayMetadata = (await this._getJSON(
-        `/${arrayKey}/zarr.json`
-      )) as ZarrV3ArrayMetadata
-      if (!bypassCache) ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
-    }
-    this.arrayMetadata = arrayMetadata
-
-    const attrs = arrayMetadata.attributes as
-      | Record<string, unknown>
-      | undefined
-    // Legacy v3 support: attributes._ARRAY_DIMENSIONS.
-    const legacyDims =
-      Array.isArray(attrs?._ARRAY_DIMENSIONS) && attrs?._ARRAY_DIMENSIONS
-
-    this.dimensions = arrayMetadata.dimension_names || legacyDims || []
-    this.shape = arrayMetadata.shape
-
-    const isSharded = arrayMetadata.codecs?.[0]?.name === 'sharding_indexed'
-    const shardedChunkShape =
-      isSharded && arrayMetadata.codecs?.[0]?.configuration
-        ? (arrayMetadata.codecs[0].configuration as { chunk_shape?: number[] })
-            .chunk_shape
-        : undefined
-    const gridChunkShape = arrayMetadata.chunk_grid?.configuration?.chunk_shape
-    // Some pre-spec pyramids used top-level chunks; keep as a fallback.
-    const legacyChunks = Array.isArray(arrayMetadata.chunks)
-      ? arrayMetadata.chunks
-      : undefined
-    this.chunks =
-      shardedChunkShape || gridChunkShape || legacyChunks || this.shape
-
-    this.fill_value = this.normalizeFillValue(arrayMetadata.fill_value)
-    this.dtype = arrayMetadata.data_type || null
-    this.scaleFactor =
-      typeof attrs?.scale_factor === 'number' ? attrs.scale_factor : 1
-    this.addOffset =
-      typeof attrs?.add_offset === 'number' ? attrs.add_offset : 0
-
-    // Detect CRS from metadata if not already set
-    if (!this.proj4 && !this._crsOverride) {
-      // 1. Try proj:code from group attributes (GeoZarr / zarr-conventions)
-      this._applyCrsFromGroupAttributes(
-        extractCrsFromGroupAttributes(
-          metadata as unknown as Parameters<
-            typeof extractCrsFromGroupAttributes
-          >[0]
-        )
-      )
-      // 2. Fall back to CF grid_mapping from array attributes
-      if (!this.proj4 && attrs) {
-        this._applyCrsFromGridMapping(
-          findGridMapping(attrs as Record<string, unknown>, metadata)
-        )
-      }
-    }
-
-    await this._computeDimIndices()
-  }
-
-  /**
-   * Apply CRS info from group-level attributes (proj:code from GeoZarr/zarr-conventions).
-   * Sets the CRS code if found. Note: proj:code gives us a code like 'EPSG:32632'
-   * but not a proj4 definition — consumers need to resolve the code to a proj4 string
-   * for non-standard CRS (EPSG:4326 and EPSG:3857 are handled natively).
-   */
-  private _applyCrsFromGroupAttributes(crsInfo: CRSInfo | null): void {
-    if (!crsInfo) return
-
-    // If proj:wkt2 provided a proj4def, use it (handles any CRS)
-    if (crsInfo.proj4def) {
-      this.proj4 = crsInfo.proj4def
-      this.crs = (crsInfo.code as CRS) ?? ('custom' as CRS)
-      this._crsFromMetadata = true
-      return
-    }
-
-    // proj:code only — handle standard CRS codes natively
-    if (crsInfo.code) {
-      const normalized = crsInfo.code.toUpperCase()
-      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
-        this.crs = normalized as CRS
-        this._crsFromMetadata = true
-      } else {
-        console.warn(
-          `[zarr-layer] Detected ${normalized} from metadata but no proj4 definition available. ` +
-            `Set explicitly to enable reprojection: proj4: '<proj4 string for ${normalized}>'`
-        )
-      }
-    }
-  }
-
-  /**
-   * Apply CRS info from CF grid_mapping detection.
-   * Sets proj4, crs, and coordinateScale if a grid_mapping was found.
-   */
-  private _applyCrsFromGridMapping(crsInfo: CRSInfo | null): void {
-    if (!crsInfo?.proj4def) return
-    this.proj4 = crsInfo.proj4def
-    this.crs = 'custom' as CRS
-    this._crsFromMetadata = true
-    if (crsInfo.coordinateScale) {
-      this.coordinateScale = crsInfo.coordinateScale
-    }
-  }
-
   private async _computeDimIndices() {
     if (this.dimensions.length === 0) return
 
@@ -1012,90 +905,6 @@ export class ZarrStore {
         index: i,
         array: null,
       }
-    }
-  }
-
-  private normalizeFillValue(value: unknown): number | null {
-    if (value === undefined || value === null) return null
-    if (typeof value === 'string') {
-      const lower = value.toLowerCase()
-      if (lower === 'nan') return Number.NaN
-      const parsed = Number(value)
-      return Number.isNaN(parsed) ? null : parsed
-    }
-    if (typeof value === 'number') {
-      return value
-    }
-    return null
-  }
-
-  /**
-   * Find the highest resolution level using consolidated metadata (no network requests).
-   * Falls back to network requests only if metadata doesn't have shape info.
-   * Users can provide explicit `bounds` to skip this detection entirely.
-   */
-  private async _findBoundsLevel(): Promise<string | undefined> {
-    if (this.levels.length === 0 || !this.root) return undefined
-    if (this.levels.length === 1) return this.levels[0]
-
-    // Try to get shapes from consolidated metadata first (no network requests)
-    const getShapeFromMetadata = (level: string): number[] | null => {
-      const key = `${level}/${this.variable}`
-
-      // V2 metadata
-      const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
-      if (v2Meta?.metadata?.[`${key}/.zarray`]) {
-        const arrayMeta = v2Meta.metadata[`${key}/.zarray`] as {
-          shape?: number[]
-        }
-        return arrayMeta.shape ?? null
-      }
-
-      // V3 metadata
-      const v3Meta = this.metadata as ZarrV3GroupMetadata
-      if (v3Meta?.consolidated_metadata?.metadata?.[key]) {
-        const arrayMeta = v3Meta.consolidated_metadata.metadata[key] as {
-          shape?: number[]
-        }
-        return arrayMeta.shape ?? null
-      }
-
-      return null
-    }
-
-    const firstLevel = this.levels[0]
-    const lastLevel = this.levels[this.levels.length - 1]
-
-    // Try metadata first
-    const firstShape = getShapeFromMetadata(firstLevel)
-    const lastShape = getShapeFromMetadata(lastLevel)
-
-    if (firstShape && lastShape) {
-      const firstSize = firstShape.reduce((a, b) => a * b, 1)
-      const lastSize = lastShape.reduce((a, b) => a * b, 1)
-      return firstSize >= lastSize ? firstLevel : lastLevel
-    }
-
-    // Fallback: network requests if metadata doesn't have shapes
-    const openArray = (loc: zarr.Location<Readable>) => {
-      if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
-      if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
-      return zarr.open(loc, { kind: 'array' })
-    }
-
-    try {
-      const firstArray = await openArray(
-        this.root.resolve(`${firstLevel}/${this.variable}`)
-      )
-      const lastArray = await openArray(
-        this.root.resolve(`${lastLevel}/${this.variable}`)
-      )
-
-      const firstSize = firstArray.shape.reduce((a, b) => a * b, 1)
-      const lastSize = lastArray.shape.reduce((a, b) => a * b, 1)
-      return firstSize >= lastSize ? firstLevel : lastLevel
-    } catch {
-      return firstLevel
     }
   }
 
@@ -1134,7 +943,12 @@ export class ZarrStore {
     }
 
     try {
-      const boundsLevel = await this._findBoundsLevel()
+      // Use package's findHighestResolutionLevel instead of inline _findBoundsLevel
+      const boundsLevel = findHighestResolutionLevel(
+        this.levels,
+        this.variable,
+        this.metadata
+      )
       const levelRoot = boundsLevel ? this.root.resolve(boundsLevel) : this.root
 
       const openArray = (loc: zarr.Location<Readable>) => {
@@ -1146,84 +960,19 @@ export class ZarrStore {
       const lonName = this.spatialDimensions.lon ?? this.dimIndices.lon.name
       const latName = this.spatialDimensions.lat ?? this.dimIndices.lat.name
 
-      // Find the HIGHEST RESOLUTION coordinate array path from consolidated metadata.
-      // This ensures we get the most accurate bounds regardless of level naming conventions.
-      const findCoordPath = (dimName: string): string | null => {
-        if (!this.metadata) return null
-
-        type CoordCandidate = { path: string; size: number }
-        const candidates: CoordCandidate[] = []
-
-        // V2: keys are like "lat/.zarray" or "surface/lat/.zarray"
-        const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
-        if (v2Meta.metadata) {
-          const suffix = `/${dimName}/.zarray`
-          const rootKey = `${dimName}/.zarray`
-          for (const key of Object.keys(v2Meta.metadata)) {
-            if (key === rootKey || key.endsWith(suffix)) {
-              const meta = v2Meta.metadata[key] as { shape?: number[] }
-              const size = meta.shape?.[0] ?? 0
-              candidates.push({
-                path: key.slice(0, -'/.zarray'.length),
-                size,
-              })
-            }
-          }
-        }
-
-        // V3: keys are like "lat" or "surface/lat" with node_type: 'array'
-        const v3Meta = this.metadata as ZarrV3GroupMetadata
-        if (v3Meta.consolidated_metadata?.metadata) {
-          const suffix = `/${dimName}`
-          for (const [key, value] of Object.entries(
-            v3Meta.consolidated_metadata.metadata
-          )) {
-            if (
-              (key === dimName || key.endsWith(suffix)) &&
-              value.node_type === 'array'
-            ) {
-              const size = (value as { shape?: number[] }).shape?.[0] ?? 0
-              candidates.push({ path: key, size })
-            }
-          }
-        }
-
-        // Return the highest resolution (largest size) coordinate array
-        if (candidates.length === 0) return null
-
-        const pickLargest = (list: CoordCandidate[]) => {
-          if (list.length === 0) return null
-          const sorted = [...list].sort((a, b) => b.size - a.size)
-          return sorted[0].path
-        }
-
-        // Prefer coord arrays within the bounds level to avoid cross-variable grids.
-        // Fallback to root-level coords, then the global maximum.
-        if (boundsLevel) {
-          const levelPrefix = `${boundsLevel}/`
-          const levelCandidates = candidates.filter((c) =>
-            c.path.startsWith(levelPrefix)
-          )
-          const levelPick = pickLargest(levelCandidates)
-          if (levelPick) return levelPick
-
-          const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
-          const rootPick = pickLargest(rootCandidates)
-          if (rootPick) return rootPick
-        } else if (this.variable) {
-          const varCandidates = candidates.filter((c) =>
-            c.path.startsWith(`${this.variable}/`)
-          )
-          const varPick = pickLargest(varCandidates)
-          if (varPick) return varPick
-        }
-
-        return pickLargest(candidates)
-      }
-
-      // Find highest resolution coordinate arrays from metadata (handles all multiscale conventions)
-      const xPath = findCoordPath(lonName)
-      const yPath = findCoordPath(latName)
+      // Use package's findCoordinatePath instead of inline closure
+      const xPath = findCoordinatePath(
+        lonName,
+        this.metadata,
+        boundsLevel ?? undefined,
+        this.variable
+      )
+      const yPath = findCoordinatePath(
+        latName,
+        this.metadata,
+        boundsLevel ?? undefined,
+        this.variable
+      )
 
       // Open coord arrays: use metadata path if found, otherwise try levelRoot
       const xarr = await openArray(
@@ -1352,12 +1101,7 @@ export class ZarrStore {
     // Only classify as meters if clearly outside degree range (> 360)
     // This handles both [-180, 180] and [0, 360] degree conventions
     // Applies to untiled multiscales and single-level datasets (multiscaleType === 'none')
-    if (
-      (this.multiscaleType === 'untiled' || this.multiscaleType === 'none') &&
-      !this._crsFromMetadata &&
-      !this._crsOverride &&
-      this.xyLimits
-    ) {
+    if (!this._crsFromMetadata && !this._crsOverride && this.xyLimits) {
       const maxAbsX = Math.max(
         Math.abs(this.xyLimits.xMin),
         Math.abs(this.xyLimits.xMax)
@@ -1365,232 +1109,6 @@ export class ZarrStore {
       if (maxAbsX > 360) {
         this.crs = 'EPSG:3857'
       }
-    }
-  }
-
-  /**
-   * Parse multiscale metadata to determine pyramid structure.
-   *
-   * Supports three multiscale formats:
-   *
-   * 1. **zarr-conventions/multiscales** (layout format):
-   *    Uses `layout` array with transform info. Parsed by `_parseUntiledMultiscale()`.
-   *    Example: `{ layout: [{ asset: "0", transform: { scale: [...] } }, ...] }`
-   *
-   * 2. **OME-NGFF style** (datasets format):
-   *    Uses `datasets` array. If `pixels_per_tile` is present, treated as tiled pyramid.
-   *    Otherwise treated as untiled multi-level.
-   *    Example: `[{ datasets: [{ path: "0", crs: "EPSG:4326" }, ...] }]`
-   *
-   * 3. **Single level**: No multiscale metadata, treated as single untiled image.
-   *
-   * For untiled formats, shapes are extracted from consolidated metadata when available
-   * to avoid per-level network requests.
-   */
-  private _getPyramidMetadata(
-    multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
-  ): PyramidMetadata {
-    if (!multiscales) {
-      // No multiscale metadata - single level untiled dataset
-      this.multiscaleType = 'untiled'
-      return {
-        levels: [],
-        maxLevelIndex: 0,
-        tileSize: 128,
-        crs: this.crs,
-      }
-    }
-
-    // Format 1: zarr-conventions/multiscales (has 'layout' key)
-    // See: https://github.com/zarr-conventions/multiscales
-    if ('layout' in multiscales && Array.isArray(multiscales.layout)) {
-      return this._parseUntiledMultiscale(multiscales)
-    }
-
-    // Format 2: OME-NGFF style (array with 'datasets' key)
-    // See: https://ngff.openmicroscopy.org/latest/
-    if (Array.isArray(multiscales) && multiscales[0]?.datasets?.length) {
-      const datasets = multiscales[0].datasets
-      const levels = datasets.map((dataset) => String(dataset.path))
-      const maxLevelIndex = levels.length - 1
-      const tileSize = datasets[0].pixels_per_tile
-      // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
-      const crs: CRS =
-        (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
-
-      // If pixels_per_tile is present, this is a tiled pyramid (slippy map tiles).
-      // Otherwise, treat as untiled multi-level (each level is a complete image).
-      if (tileSize) {
-        this.multiscaleType = 'tiled'
-        return { levels, maxLevelIndex, tileSize, crs }
-      } else {
-        // Multi-level but not tiled - use UntiledMode
-        // Try to extract shapes from consolidated metadata to avoid per-level fetches
-        const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
-          ?.consolidated_metadata?.metadata
-
-        this.untiledLevels = levels.map((level) => {
-          const untiledLevel: UntiledLevel = {
-            asset: level,
-            scale: [1.0, 1.0] as [number, number],
-            translation: [0.0, 0.0] as [number, number],
-          }
-
-          // Extract shape/chunks/dtype/fillValue/scaleFactor/addOffset from consolidated metadata
-          if (consolidatedMeta) {
-            const arrayKey = `${level}/${this.variable}`
-            const arrayMeta = consolidatedMeta[arrayKey] as
-              | ZarrV3ArrayMetadata
-              | undefined
-            if (arrayMeta?.shape) {
-              untiledLevel.shape = arrayMeta.shape
-              // Extract chunks from chunk_grid or sharding codec
-              const gridChunks =
-                arrayMeta.chunk_grid?.configuration?.chunk_shape
-              const shardChunks = arrayMeta.codecs?.find(
-                (c) => c.name === 'sharding_indexed'
-              )?.configuration?.chunk_shape as number[] | undefined
-              untiledLevel.chunks = shardChunks || gridChunks || arrayMeta.shape
-
-              // Extract dtype and fillValue
-              if (arrayMeta.data_type) {
-                untiledLevel.dtype = arrayMeta.data_type
-              }
-              if (arrayMeta.fill_value !== undefined) {
-                untiledLevel.fillValue = this.normalizeFillValue(
-                  arrayMeta.fill_value
-                )
-              }
-
-              // Float data typically stores already-physical values (e.g., pyramid levels
-              // created by averaging). Integer data stores raw counts needing conversion.
-              // For heterogeneous pyramids like Sentinel-2, lower-res float levels inherit
-              // scale_factor attributes but shouldn't have them re-applied.
-              const isFloatData =
-                arrayMeta.data_type?.includes('float') ||
-                arrayMeta.data_type === 'float32' ||
-                arrayMeta.data_type === 'float64'
-
-              if (isFloatData) {
-                // Float data: assume already physical, use 1/0
-                untiledLevel.scaleFactor = 1
-                untiledLevel.addOffset = 0
-              } else if (arrayMeta.attributes) {
-                // Integer data: apply scale_factor/add_offset if present
-                if (arrayMeta.attributes.scale_factor !== undefined) {
-                  untiledLevel.scaleFactor = arrayMeta.attributes
-                    .scale_factor as number
-                }
-                if (arrayMeta.attributes.add_offset !== undefined) {
-                  untiledLevel.addOffset = arrayMeta.attributes
-                    .add_offset as number
-                }
-              }
-              // If non-float without attributes, leave undefined for dataset-level fallback
-            }
-          }
-
-          return untiledLevel
-        })
-        this.multiscaleType = 'untiled'
-        return { levels, maxLevelIndex, tileSize: 128, crs }
-      }
-    }
-
-    // Unrecognized multiscale format - treat as single level untiled
-    this.multiscaleType = 'untiled'
-    return {
-      levels: [],
-      maxLevelIndex: 0,
-      tileSize: 128,
-      crs: this.crs,
-    }
-  }
-
-  /**
-   * Parse zarr-conventions/multiscales format (layout-based).
-   *
-   * This format uses a `layout` array where each entry specifies:
-   * - `asset`: path to the level (e.g., "0", "1", ...)
-   * - `transform`: optional scale/translation for georeferencing
-   *
-   * Example metadata:
-   * ```json
-   * {
-   *   "layout": [
-   *     { "asset": "0", "transform": { "scale": [1.0, 1.0], "translation": [0, 0] } },
-   *     { "asset": "1", "transform": { "scale": [2.0, 2.0], "translation": [0, 0] } }
-   *   ],
-   *   "crs": "EPSG:4326"
-   * }
-   * ```
-   *
-   * @see https://github.com/zarr-conventions/multiscales
-   */
-  private _parseUntiledMultiscale(
-    metadata: UntiledMultiscaleMetadata
-  ): PyramidMetadata {
-    const layout = metadata.layout
-    if (!layout || layout.length === 0) {
-      this.multiscaleType = 'untiled'
-      return {
-        levels: [],
-        maxLevelIndex: 0,
-        tileSize: 128,
-        crs: this.crs,
-      }
-    }
-
-    // Extract levels from layout
-    const levels = layout.map((entry) => entry.asset)
-    const maxLevelIndex = levels.length - 1
-
-    // Try to extract shapes from consolidated metadata to avoid per-level fetches
-    const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
-      ?.consolidated_metadata?.metadata
-
-    // Build untiledLevels with transform info and shapes from consolidated metadata
-    this.untiledLevels = layout.map((entry) => {
-      const level: UntiledLevel = {
-        asset: entry.asset,
-        scale: entry.transform?.scale ?? [1.0, 1.0],
-        translation: entry.transform?.translation ?? [0.0, 0.0],
-      }
-
-      // Extract shape/chunks from consolidated metadata if available
-      if (consolidatedMeta) {
-        const arrayKey = `${entry.asset}/${this.variable}`
-        const arrayMeta = consolidatedMeta[arrayKey] as
-          | ZarrV3ArrayMetadata
-          | undefined
-        if (arrayMeta?.shape) {
-          level.shape = arrayMeta.shape
-          // Extract chunks from chunk_grid or sharding codec
-          const gridChunks = arrayMeta.chunk_grid?.configuration?.chunk_shape
-          const shardChunks = arrayMeta.codecs?.find(
-            (c) => c.name === 'sharding_indexed'
-          )?.configuration?.chunk_shape as number[] | undefined
-          level.chunks = shardChunks || gridChunks || arrayMeta.shape
-        }
-      }
-
-      return level
-    })
-
-    this.multiscaleType = 'untiled'
-
-    // Check for explicit CRS in metadata, otherwise use configured CRS
-    // (bounds-based inference will happen after coordinate arrays are loaded)
-    const crs: CRS = metadata.crs ?? this.crs
-    if (metadata.crs && !this._crsOverride) {
-      this._crsFromMetadata = true
-    }
-
-    return {
-      levels,
-      maxLevelIndex,
-      tileSize: 128, // Will be overridden by chunk shape
-      crs,
     }
   }
 
