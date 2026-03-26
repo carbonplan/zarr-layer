@@ -114,6 +114,7 @@ function parseZarrConventionsLevel(
     shape: [],
     chunks: [],
     resolution: entry.transform?.scale ?? [1.0, 1.0],
+    translation: entry.transform?.translation,
   }
 
   // Extract absolute spatial positioning fields (per spec)

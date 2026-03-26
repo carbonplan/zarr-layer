@@ -124,6 +124,9 @@ export interface ZarrLevelMetadata {
 
   /** Per-level fill value override (undefined = use base level value) */
   fillValue?: number | null
+
+  /** Translation offset [x, y] from zarr-conventions transform.translation */
+  translation?: [number, number]
 }
 
 /**

@@ -153,7 +153,7 @@ export async function loadCoordinateBounds(
  * Find the best coordinate array path from consolidated metadata.
  * Prefers highest-resolution coordinate arrays.
  */
-function findCoordinatePath(
+export function findCoordinatePath(
   dimName: string,
   metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null | undefined,
   levelPath?: string,
@@ -220,20 +220,30 @@ function findCoordinatePath(
     )
     const levelPick = pickLargest(levelCandidates)
     if (levelPick) return levelPick
-  }
 
-  // Fall back to root-level coordinates
-  const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
-  const rootPick = pickLargest(rootCandidates)
-  if (rootPick) return rootPick
-
-  // Fall back to variable-prefixed coordinates
-  if (variable) {
+    // With a level path, fall back to root then variable
+    const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
+    const rootPick = pickLargest(rootCandidates)
+    if (rootPick) return rootPick
+  } else if (variable) {
+    // Without a level path, prefer variable-scoped coordinates first.
+    // In groups with multiple variables or auxiliary root coordinates,
+    // the variable's own coordinate arrays are more likely correct.
     const varCandidates = candidates.filter((c) =>
       c.path.startsWith(`${variable}/`)
     )
     const varPick = pickLargest(varCandidates)
     if (varPick) return varPick
+
+    // Then try root-level
+    const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
+    const rootPick = pickLargest(rootCandidates)
+    if (rootPick) return rootPick
+  } else {
+    // No level or variable — just try root-level
+    const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
+    const rootPick = pickLargest(rootCandidates)
+    if (rootPick) return rootPick
   }
 
   return pickLargest(candidates)

@@ -49,6 +49,7 @@ export { SPATIAL_DIM_NAMES, SPATIAL_DIMENSION_ALIASES } from './constants'
 // Coordinate loading utilities
 export {
   type CoordinateBoundsResult,
+  findCoordinatePath,
   findHighestResolutionLevel,
   type LoadCoordinateBoundsOptions,
   loadCoordinateBounds,
@@ -97,7 +98,11 @@ export {
   parseZarrConventions,
 } from './multiscale'
 // Main parser
-export { createZarritaRoot, parseZarrMetadata } from './parser'
+export {
+  createZarritaRoot,
+  normalizeFillValue,
+  parseZarrMetadata,
+} from './parser'
 
 // Type exports
 export type {
