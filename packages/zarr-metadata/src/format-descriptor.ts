@@ -31,7 +31,7 @@ export interface FormatDescriptor {
 
   /**
    * CRS information.
-   * code: 'EPSG:4326', 'EPSG:3857', or custom identifier
+   * code: 'EPSG:4326', 'EPSG:3857', or 'custom'
    * def: proj4 definition string for custom CRS
    */
   crs: {
@@ -123,7 +123,9 @@ export function createFormatDescriptor(
 ): FormatDescriptor {
   const format = metadata.format
   const crsInfo = metadata.crs
-  const crsCode = crsInfo?.code ?? (options?.proj4def ? 'custom' : 'EPSG:4326')
+  const crsCode =
+    crsInfo?.code ??
+    (crsInfo?.proj4def || options?.proj4def ? 'custom' : 'EPSG:4326')
 
   // Determine tile convention
   const tileConvention = determineTileConvention(format, crsCode)
@@ -231,11 +233,12 @@ export function isTiledDescriptor(descriptor: FormatDescriptor): boolean {
 
 /**
  * Type guard to check if descriptor requires proj4 reprojection.
+ * Standard CRS (EPSG:4326, EPSG:3857) are handled natively and don't need proj4.
  */
 export function requiresProj4Reprojection(
   descriptor: FormatDescriptor
 ): boolean {
-  return !!descriptor.crs.def
+  return !!descriptor.crs.def && !isStandardCrs(descriptor)
 }
 
 /**

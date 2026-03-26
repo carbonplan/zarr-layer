@@ -1306,7 +1306,8 @@ export class ZarrStore {
       // use different units than the proj4 definition expects.
       // E.g., GOES geostationary stores scanning angles in radians,
       // but proj4 +proj=geos expects meters.
-      if (this.coordinateScale && this.xyLimits) {
+      // Only scale auto-detected bounds — explicit bounds are assumed correct.
+      if (needsBounds && this.coordinateScale && this.xyLimits) {
         const s = this.coordinateScale
         this.xyLimits = {
           xMin: this.xyLimits.xMin * s,

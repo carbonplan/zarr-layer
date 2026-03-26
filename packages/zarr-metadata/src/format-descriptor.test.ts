@@ -115,6 +115,19 @@ describe('createFormatDescriptor', () => {
     expect(descriptor.crs.def).toBe(proj4def)
   })
 
+  it('uses custom code when CRS has proj4def but no code (CF grid_mapping)', () => {
+    const proj4def = '+proj=geos +h=35786023 +lon_0=-75 +sweep=x'
+    const metadata = createMockMetadata({
+      crs: { code: null, proj4def, source: 'grid_mapping' },
+    })
+
+    const descriptor = createFormatDescriptor(metadata)
+
+    // Should be 'custom', not 'EPSG:4326'
+    expect(descriptor.crs.code).toBe('custom')
+    expect(descriptor.crs.def).toBe(proj4def)
+  })
+
   it('preserves explicit CRS code when proj4def also provided', () => {
     const proj4def = '+proj=stere +lat_0=-90 +lon_0=0'
     const metadata = createMockMetadata({
@@ -194,7 +207,7 @@ describe('type guards', () => {
     expect(isTiledDescriptor(untiled)).toBe(false)
   })
 
-  it('requiresProj4Reprojection returns true when proj4 def present', () => {
+  it('requiresProj4Reprojection returns true when proj4 def present for custom CRS', () => {
     const descriptor = createExplicitFormatDescriptor({
       format: 'single-level',
       crs: { code: 'EPSG:3031', def: '+proj=stere +lat_0=-90' },
@@ -203,7 +216,21 @@ describe('type guards', () => {
     expect(requiresProj4Reprojection(descriptor)).toBe(true)
   })
 
-  it('requiresProj4Reprojection returns false for standard CRS', () => {
+  it('requiresProj4Reprojection returns false for standard CRS even with def', () => {
+    const wgs84 = createExplicitFormatDescriptor({
+      format: 'single-level',
+      crs: { code: 'EPSG:4326', def: '+proj=longlat +datum=WGS84 +no_defs' },
+    })
+    const mercator = createExplicitFormatDescriptor({
+      format: 'single-level',
+      crs: { code: 'EPSG:3857', def: '+proj=merc +a=6378137' },
+    })
+
+    expect(requiresProj4Reprojection(wgs84)).toBe(false)
+    expect(requiresProj4Reprojection(mercator)).toBe(false)
+  })
+
+  it('requiresProj4Reprojection returns false when no def', () => {
     const descriptor = createExplicitFormatDescriptor({
       format: 'single-level',
       crs: { code: 'EPSG:4326' },
