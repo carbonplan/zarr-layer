@@ -137,8 +137,6 @@ const DatasetBrowser = () => {
                               color: 'secondary',
                               fontSize: 0,
                               mt: '2px',
-                              fontFamily: 'mono',
-                              letterSpacing: 'mono',
                             }}
                           >
                             {config.sourceInfo}
