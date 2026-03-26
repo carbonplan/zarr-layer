@@ -223,7 +223,7 @@ new ZarrLayer({
 
 ## custom projections
 
-For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays). If you set `crs` to a non-`EPSG:4326`/`EPSG:3857` value without `proj4`, the renderer will warn and fall back to inferred CRS.
+The library auto-detects CRS from [zarr-conventions](#zarr-conventions) (`proj:code`, `proj:wkt2`) and [CF grid_mapping](#cf-grid_mapping) attributes (see [CRS auto-detection](#crs-auto-detection)). For datasets without CRS metadata, provide a `proj4` definition string manually. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
 
 ```ts
 new ZarrLayer({
@@ -234,11 +234,11 @@ new ZarrLayer({
   },
   proj4:
     '+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +x_0=0 +y_0=0 +R=6371229 +units=m +no_defs',
-  bounds: [-2697520, -1587306, 2697480, 1586694], // recommended: edge bounds [xMin, yMin, xMax, yMax] in source CRS units
+  bounds: [-2697520, -1587306, 2697480, 1586694], // edge bounds [xMin, yMin, xMax, yMax] in source CRS units
 })
 ```
 
-The data will be reprojected to Web Mercator for display using GPU-accelerated mesh reprojection powered by [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster). Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+The data will be reprojected for display using GPU-accelerated mesh reprojection. Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
 
 ## queries
 
