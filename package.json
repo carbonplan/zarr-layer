@@ -1,6 +1,6 @@
 {
   "name": "@carbonplan/zarr-layer",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "MapLibre/Mapbox custom layer for rendering Zarr datasets. Inspired by zarr-cesium, zarr-gl, and @carbonplan/maps.",
   "license": "MIT",
   "type": "module",
