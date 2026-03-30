@@ -65,8 +65,7 @@ const usgsdem: Dataset<DEMState> = {
     49.09379633476274,
   ],
   latIsAscending: false,
-  sourceInfo:
-    'USGS 10m DEM with derived hillshade, aspect, and slope. EPSG:4326, multiscale pyramid.',
+  sourceInfo: 'Derived hillshade, aspect, and slope for 10m DEM.',
   colormap: 'warm',
   zarrVersion: 3,
   info: 'USGS 10m DEM (EPSG:4326)',
