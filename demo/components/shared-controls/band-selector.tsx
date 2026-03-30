@@ -24,7 +24,7 @@ export function BandSelector<T extends string>({
   return (
     <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
       <Column start={1} width={1}>
-        <Box sx={subheadingSx}>{label}</Box>
+        <Box sx={{ ...subheadingSx, my: [1, 1, 1, 2] }}>{label}</Box>
       </Column>
       <Column start={2} width={3}>
         <Filter
