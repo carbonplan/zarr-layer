@@ -1,4 +1,4 @@
 export { Slider, type SliderProps } from './slider'
 export { RangeSlider, type RangeSliderProps } from './range-slider'
 export { BandSelector, type BandSelectorProps } from './band-selector'
-export { subheadingSx } from './styles'
+export { sectionHeadingSx, subheadingSx } from './styles'
