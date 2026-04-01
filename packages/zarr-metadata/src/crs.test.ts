@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  createExplicitCrs,
   extractCrsFromGridMapping,
   extractCrsFromGroupAttributes,
-  extractCrsFromOmeNgff,
-  extractCrsFromZarrConventions,
   findGridMapping,
 } from './crs'
 import {
@@ -21,55 +18,6 @@ import {
   v2WithProjCode,
   v3GroupMetadata,
 } from './test-fixtures'
-
-describe('extractCrsFromZarrConventions', () => {
-  it('extracts CRS from multiscales.crs', () => {
-    const result = extractCrsFromZarrConventions({ crs: 'EPSG:4326' })
-
-    expect(result).not.toBeNull()
-    expect(result?.code).toBe('EPSG:4326')
-    expect(result?.source).toBe('explicit')
-  })
-
-  it('normalizes CRS code to uppercase', () => {
-    const result = extractCrsFromZarrConventions({ crs: 'epsg:3857' })
-
-    expect(result?.code).toBe('EPSG:3857')
-  })
-
-  it('returns null when CRS is not present', () => {
-    const result = extractCrsFromZarrConventions({})
-
-    expect(result).toBeNull()
-  })
-
-  it('passes through non-standard CRS codes', () => {
-    const result = extractCrsFromZarrConventions({ crs: 'EPSG:32632' })
-
-    expect(result?.code).toBe('EPSG:32632')
-  })
-})
-
-describe('extractCrsFromOmeNgff', () => {
-  it('extracts CRS from first dataset', () => {
-    const result = extractCrsFromOmeNgff([{ crs: 'EPSG:4326' }])
-
-    expect(result).not.toBeNull()
-    expect(result?.code).toBe('EPSG:4326')
-  })
-
-  it('returns null for empty datasets', () => {
-    const result = extractCrsFromOmeNgff([])
-
-    expect(result).toBeNull()
-  })
-
-  it('returns null when CRS is not present', () => {
-    const result = extractCrsFromOmeNgff([{}])
-
-    expect(result).toBeNull()
-  })
-})
 
 describe('extractCrsFromGridMapping', () => {
   it('returns null for latitude_longitude without ellipsoid params', () => {
@@ -352,28 +300,5 @@ describe('findGridMapping', () => {
     const result = findGridMapping({ grid_mapping: 'crs' }, null)
 
     expect(result).toBeNull()
-  })
-})
-
-describe('createExplicitCrs', () => {
-  it('creates CRSInfo from user-provided CRS', () => {
-    const result = createExplicitCrs('EPSG:4326')
-
-    expect(result.code).toBe('EPSG:4326')
-    expect(result.proj4def).toBeNull()
-    expect(result.source).toBe('explicit')
-  })
-
-  it('normalizes CRS code to uppercase', () => {
-    const result = createExplicitCrs('epsg:3857')
-
-    expect(result.code).toBe('EPSG:3857')
-  })
-
-  it('includes proj4def when provided', () => {
-    const proj4 = '+proj=longlat +datum=WGS84 +no_defs'
-    const result = createExplicitCrs('EPSG:4326', proj4)
-
-    expect(result.proj4def).toBe(proj4)
   })
 })

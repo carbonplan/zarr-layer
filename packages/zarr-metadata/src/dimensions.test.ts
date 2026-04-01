@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildDimensionInfo,
   getSpatialDimensionKey,
   identifySpatialDimensions,
   isSpatialDimension,
@@ -99,33 +98,6 @@ describe('identifySpatialDimensions', () => {
 
     expect(result.y).toBeNull()
     expect(result.x).toBeNull()
-  })
-})
-
-describe('buildDimensionInfo', () => {
-  it('builds dimension info from names and shape', () => {
-    const result = buildDimensionInfo(['time', 'lat', 'lon'], [365, 180, 360])
-
-    expect(result).toEqual([
-      { name: 'time', index: 0, size: 365 },
-      { name: 'lat', index: 1, size: 180 },
-      { name: 'lon', index: 2, size: 360 },
-    ])
-  })
-
-  it('handles empty arrays', () => {
-    const result = buildDimensionInfo([], [])
-
-    expect(result).toEqual([])
-  })
-
-  it('handles mismatched lengths gracefully', () => {
-    const result = buildDimensionInfo(['x', 'y'], [100])
-
-    expect(result).toEqual([
-      { name: 'x', index: 0, size: 100 },
-      { name: 'y', index: 1, size: 0 },
-    ])
   })
 })
 
