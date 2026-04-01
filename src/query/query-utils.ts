@@ -405,36 +405,83 @@ export function computePixelBoundsFromGeometry(
   return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
 }
 
-/** Number of intermediate points to insert per polygon edge for densification */
-const DENSIFY_SEGMENTS = 10
+import { DEFAULT_QUERY_DENSIFY_MAX_ERROR } from '../constants'
+
+/** Max pixel-space error before an edge is subdivided */
+const DENSIFY_MAX_ERROR = DEFAULT_QUERY_DENSIFY_MAX_ERROR
+/** Max recursion depth for adaptive subdivision */
+const DENSIFY_MAX_DEPTH = 10
 
 /**
- * Densify a ring by inserting intermediate points along each edge.
- * Interpolates in the source coordinate system (lon/lat) and transforms each point.
+ * Densify a ring by adaptively subdividing edges until the pixel-space error
+ * is below DENSIFY_MAX_ERROR. For each edge, the midpoint is interpolated in
+ * source coordinates (lon/lat), transformed to pixel space, and compared to
+ * the straight-line midpoint in pixel space. If the deviation exceeds the
+ * threshold, the edge is recursively split.
+ *
+ * This matches the adaptive mesh reprojection precision (0.125px) so query
+ * polygon boundaries align with rendered pixel boundaries.
  */
 function densifyAndTransformRing(
   ring: number[][],
   transformVertex: (lon: number, lat: number) => [number, number]
 ): number[][] {
   const result: number[][] = []
+
+  function subdivide(
+    lon0: number,
+    lat0: number,
+    px0: [number, number],
+    lon1: number,
+    lat1: number,
+    px1: [number, number],
+    depth: number
+  ) {
+    if (depth >= DENSIFY_MAX_DEPTH) return
+
+    // Midpoint in source space
+    const lonM = (lon0 + lon1) * 0.5
+    const latM = (lat0 + lat1) * 0.5
+    const pxM = transformVertex(lonM, latM)
+    if (!isFinite(pxM[0]) || !isFinite(pxM[1])) return
+
+    // Straight-line midpoint in pixel space
+    const expectedX = (px0[0] + px1[0]) * 0.5
+    const expectedY = (px0[1] + px1[1]) * 0.5
+
+    // Error: distance from true projected midpoint to straight-line midpoint
+    const dx = pxM[0] - expectedX
+    const dy = pxM[1] - expectedY
+    const error = dx * dx + dy * dy // compare squared to avoid sqrt
+
+    if (error > DENSIFY_MAX_ERROR * DENSIFY_MAX_ERROR) {
+      subdivide(lon0, lat0, px0, lonM, latM, pxM, depth + 1)
+      result.push(pxM as number[])
+      subdivide(lonM, latM, pxM, lon1, lat1, px1, depth + 1)
+    }
+  }
+
   for (let i = 0; i < ring.length - 1; i++) {
     const [lon0, lat0] = ring[i]
     const [lon1, lat1] = ring[i + 1]
-    // Add start point
-    result.push(transformVertex(lon0, lat0) as number[])
-    // Add intermediate points
-    for (let s = 1; s < DENSIFY_SEGMENTS; s++) {
-      const t = s / DENSIFY_SEGMENTS
-      const lon = lon0 + t * (lon1 - lon0)
-      const lat = lat0 + t * (lat1 - lat0)
-      const pt = transformVertex(lon, lat)
-      if (isFinite(pt[0]) && isFinite(pt[1])) {
-        result.push(pt as number[])
-      }
+    const px0 = transformVertex(lon0, lat0)
+    const px1 = transformVertex(lon1, lat1)
+
+    if (isFinite(px0[0]) && isFinite(px0[1])) {
+      result.push(px0 as number[])
+    }
+    if (
+      isFinite(px0[0]) &&
+      isFinite(px0[1]) &&
+      isFinite(px1[0]) &&
+      isFinite(px1[1])
+    ) {
+      subdivide(lon0, lat0, px0, lon1, lat1, px1, 0)
     }
   }
-  // Close ring
-  if (result.length > 0) {
+
+  // Close ring (only if first vertex was valid)
+  if (result.length > 0 && isFinite(result[0][0]) && isFinite(result[0][1])) {
     result.push([result[0][0], result[0][1]])
   }
   return result
@@ -604,6 +651,9 @@ function lonLatToPixel(
  * Returns a Map from integer Y to sorted array of X-intersection values.
  * For each row, pixels between pairs of intersections (0-1, 2-3, ...) are inside.
  *
+ * Uses center-based sampling (row + 0.5) matching standard rasterization tools
+ * (GDAL/rasterio default). A pixel is included if its center is inside the polygon.
+ *
  * This replaces per-pixel pointInPolygon, changing complexity from O(W*H*V) to O(H*E + H*E*logE).
  */
 export function buildScanlineTable(
@@ -613,7 +663,6 @@ export function buildScanlineTable(
 ): Map<number, number[]> {
   const table = new Map<number, number[]>()
 
-  // Collect all edges from the geometry
   const processRing = (ring: number[][]) => {
     for (let i = 0; i < ring.length - 1; i++) {
       const x0 = ring[i][0]
@@ -621,28 +670,17 @@ export function buildScanlineTable(
       const x1 = ring[i + 1][0]
       const y1 = ring[i + 1][1]
 
-      // Skip horizontal edges
       if (y0 === y1) continue
 
       const edgeYMin = Math.min(y0, y1)
       const edgeYMax = Math.max(y0, y1)
-
-      // Clamp to scan range. Use pixel edges (row, row+1) not centers (row+0.5)
-      // so that any pixel whose rect overlaps the polygon is included.
-      const scanYMin = Math.max(yStart, Math.ceil(edgeYMin) - 1)
-      const scanYMax = Math.min(yEnd - 1, Math.floor(edgeYMax))
-
+      // Only visit rows whose center (row + 0.5) falls within the edge's Y range
+      const scanYMin = Math.max(yStart, Math.floor(edgeYMin + 0.5))
+      const scanYMax = Math.min(yEnd - 1, Math.ceil(edgeYMax - 0.5) - 1)
       const slope = (x1 - x0) / (y1 - y0)
 
       for (let row = scanYMin; row <= scanYMax; row++) {
-        // Intersect at the pixel edge closest to the polygon interior.
-        // For a row spanning [row, row+1], clamp scanY to the edge's Y range.
-        const scanY = Math.max(
-          edgeYMin + 1e-10,
-          Math.min(edgeYMax - 1e-10, row + 0.5)
-        )
-        if (scanY <= edgeYMin || scanY >= edgeYMax) continue
-
+        const scanY = row + 0.5
         const xIntersect = x0 + (scanY - y0) * slope
         let arr = table.get(row)
         if (!arr) {
@@ -655,15 +693,10 @@ export function buildScanlineTable(
   }
 
   if (geometry.type === 'Polygon') {
-    for (const ring of geometry.coordinates) {
-      processRing(ring)
-    }
+    for (const ring of geometry.coordinates) processRing(ring)
   } else if (geometry.type === 'MultiPolygon') {
-    for (const polygon of geometry.coordinates) {
-      for (const ring of polygon) {
-        processRing(ring)
-      }
-    }
+    for (const polygon of geometry.coordinates)
+      for (const ring of polygon) processRing(ring)
   }
 
   // Sort intersections for each row

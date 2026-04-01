@@ -570,10 +570,10 @@ export function queryRegionUntiled(
     const crossings = scanlines.get(y)
     if (!crossings || crossings.length < 2) continue
 
-    // Walk crossing pairs: include any pixel whose rect overlaps the polygon.
+    // Walk crossing pairs: include pixels whose center (x+0.5) is inside the interval.
     for (let i = 0; i < crossings.length - 1; i += 2) {
-      const xFrom = Math.max(xStart, Math.floor(crossings[i]))
-      const xTo = Math.min(xEnd, Math.ceil(crossings[i + 1]))
+      const xFrom = Math.max(xStart, Math.ceil(crossings[i] - 0.5))
+      const xTo = Math.min(xEnd, Math.floor(crossings[i + 1] - 0.5) + 1)
 
       for (let x = xFrom; x < xTo; x++) {
         processPixel(x, y)

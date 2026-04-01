@@ -6,6 +6,9 @@ export const MERCATOR_LAT_LIMIT = 85.05112878
 /** Default maximum error threshold for adaptive mesh refinement (in pixels) */
 export const DEFAULT_MESH_MAX_ERROR = 0.125
 
+/** Default maximum error for query polygon edge densification (in pixels) */
+export const DEFAULT_QUERY_DENSIFY_MAX_ERROR = DEFAULT_MESH_MAX_ERROR
+
 /** Minimum subdivisions for region geometry tessellation (globe projection) */
 export const MIN_SUBDIVISIONS = 2
 
