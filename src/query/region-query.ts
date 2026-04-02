@@ -6,7 +6,7 @@
  * Matches carbonplan/maps structure and behavior.
  */
 
-import type { MercatorBounds, XYLimits } from '../map-utils'
+import type { MercatorBounds, TileTuple, XYLimits } from '../map-utils'
 import { parseLevelZoom, tileToKey } from '../map-utils'
 import type { ZarrStore } from '../zarr-store'
 import type { Bounds, CRS, Selector } from '../types'
@@ -20,10 +20,10 @@ import type {
 } from './types'
 import {
   getTilesForPolygon,
-  pixelIntersectsGeometryTiled,
   tilePixelToLatLon,
   pixelToLatLon,
   transformGeometryToPixelSpace,
+  transformGeometryToTilePixelSpace,
   buildScanlineTable,
   CachedTransformer,
 } from './query-utils'
@@ -94,6 +94,81 @@ function transformValue(
   }
 
   return result
+}
+
+/**
+ * Process a single pixel in tiled mode: extract values from chunks and emit results.
+ */
+function processPixelTiled(
+  pixelX: number,
+  pixelY: number,
+  tileTuple: [number, number, number],
+  chunksForTile: number[][],
+  chunkDataMap: Map<string, Float32Array>,
+  selector: Selector,
+  dimensions: string[],
+  coordinates: Record<string, (number | string)[]>,
+  shape: number[],
+  chunks: number[],
+  transforms: QueryTransformOptions | undefined,
+  includeSpatialCoordinates: boolean,
+  tileSize: number,
+  crs: CRS,
+  xyLimits: XYLimits,
+  yCoords: number[],
+  xCoords: number[],
+  results: QueryDataValues,
+  useNestedResults: boolean
+) {
+  const pixelValues: { keys: (string | number)[]; value: number }[] = []
+
+  for (const chunkIndices of chunksForTile) {
+    const chunkKey = chunkIndices.join(',')
+    const chunkData = chunkDataMap.get(chunkKey)
+    if (!chunkData) continue
+
+    const valuesToSet = getPointValues(
+      chunkData,
+      pixelX,
+      pixelY,
+      selector,
+      dimensions,
+      coordinates,
+      shape,
+      chunks,
+      chunkIndices
+    )
+
+    for (const { keys, value } of valuesToSet) {
+      const transformed = transformValue(value, transforms)
+      if (transformed !== null) {
+        pixelValues.push({ keys, value: transformed })
+      }
+    }
+  }
+
+  if (pixelValues.length === 0) return
+
+  if (includeSpatialCoordinates) {
+    const geo = tilePixelToLatLon(
+      tileTuple,
+      pixelX + 0.5,
+      pixelY + 0.5,
+      tileSize,
+      crs,
+      xyLimits
+    )
+    yCoords.push(geo.lat)
+    xCoords.push(geo.lon)
+  }
+
+  for (const { keys, value } of pixelValues) {
+    if (keys.length > 0) {
+      setObjectValues(results, keys, value)
+    } else if (Array.isArray(results)) {
+      results.push(value)
+    }
+  }
 }
 
 /**
@@ -246,11 +321,21 @@ export async function queryRegionTiled(
     })
   )
 
-  // Iterate over tiles and pixels to extract values
+  // Iterate over tiles, using scanline rasterization per tile
   for (const tileTuple of tiles) {
     const tileKey = tileToKey(tileTuple)
     const chunkDataMap = tileChunkData.get(tileKey)
     if (!chunkDataMap || chunkDataMap.size === 0) continue
+
+    // Transform geometry into this tile's pixel space once
+    const tileGeometry = transformGeometryToTilePixelSpace(
+      geometry,
+      tileTuple,
+      tileSize,
+      crs,
+      xyLimits
+    )
+    if (!tileGeometry) continue
 
     // Get all chunk indices for this tile
     const [, x, y] = tileTuple
@@ -264,73 +349,70 @@ export async function queryRegionTiled(
       y
     )
 
+    // Point geometry: process the single pixel directly
+    if (tileGeometry.type === 'Point') {
+      const px = Math.min(Math.floor(tileGeometry.coordinates[0]), tileSize - 1)
+      const py = Math.min(Math.floor(tileGeometry.coordinates[1]), tileSize - 1)
+      if (px >= 0 && py >= 0) {
+        processPixelTiled(
+          px,
+          py,
+          tileTuple,
+          chunksForTile,
+          chunkDataMap,
+          selector,
+          dimensions,
+          coordinates,
+          shape,
+          chunks,
+          transforms,
+          includeSpatialCoordinates,
+          tileSize,
+          crs,
+          xyLimits,
+          yCoords,
+          xCoords,
+          results,
+          useNestedResults
+        )
+      }
+      continue
+    }
+
+    // Build scanline table for this tile's pixel range
+    const scanlines = buildScanlineTable(tileGeometry, 0, tileSize)
+
     for (let pixelY = 0; pixelY < tileSize; pixelY++) {
       checkAborted(signal)
-      for (let pixelX = 0; pixelX < tileSize; pixelX++) {
-        if (
-          !pixelIntersectsGeometryTiled(
+      const crossings = scanlines.get(pixelY)
+      if (!crossings || crossings.length < 2) continue
+
+      for (let i = 0; i < crossings.length - 1; i += 2) {
+        const xFrom = Math.max(0, Math.ceil(crossings[i] - 0.5))
+        const xTo = Math.min(tileSize, Math.floor(crossings[i + 1] - 0.5) + 1)
+
+        for (let pixelX = xFrom; pixelX < xTo; pixelX++) {
+          processPixelTiled(
+            pixelX,
+            pixelY,
             tileTuple,
-            pixelX,
-            pixelY,
-            tileSize,
-            crs,
-            xyLimits,
-            geometry
-          )
-        ) {
-          continue
-        }
-
-        // Collect all values for this pixel first
-        const pixelValues: { keys: (string | number)[]; value: number }[] = []
-
-        for (const chunkIndices of chunksForTile) {
-          const chunkKey = chunkIndices.join(',')
-          const chunkData = chunkDataMap.get(chunkKey)
-          if (!chunkData) continue
-
-          const valuesToSet = getPointValues(
-            chunkData,
-            pixelX,
-            pixelY,
+            chunksForTile,
+            chunkDataMap,
             selector,
             dimensions,
             coordinates,
             shape,
             chunks,
-            chunkIndices
-          )
-
-          for (const { keys, value } of valuesToSet) {
-            const transformed = transformValue(value, transforms)
-            if (transformed !== null) {
-              pixelValues.push({ keys, value: transformed })
-            }
-          }
-        }
-
-        // Only add coordinates and values if we have valid data
-        if (pixelValues.length === 0) continue
-
-        if (includeSpatialCoordinates) {
-          const geo = tilePixelToLatLon(
-            tileTuple,
-            pixelX + 0.5,
-            pixelY + 0.5,
+            transforms,
+            includeSpatialCoordinates,
             tileSize,
             crs,
-            xyLimits
+            xyLimits,
+            yCoords,
+            xCoords,
+            results,
+            useNestedResults
           )
-          yCoords.push(geo.lat)
-          xCoords.push(geo.lon)
-        }
-
-        for (const { keys, value } of pixelValues) {
-          if (keys.length > 0) {
-            setObjectValues(results, keys, value)
-          } else if (Array.isArray(results)) {
-            results.push(value)
-          }
         }
       }
     }
@@ -522,9 +604,9 @@ export function queryRegionUntiled(
 
   // Point geometry: process the single pixel directly
   if (pixelGeometry.type === 'Point') {
-    const px = Math.floor(pixelGeometry.coordinates[0])
-    const py = Math.floor(pixelGeometry.coordinates[1])
-    if (px >= 0 && px < width && py >= 0 && py < height) {
+    const px = Math.min(Math.floor(pixelGeometry.coordinates[0]), width - 1)
+    const py = Math.min(Math.floor(pixelGeometry.coordinates[1]), height - 1)
+    if (px >= 0 && py >= 0) {
       processPixel(px, py)
     }
     return buildResult()
@@ -561,7 +643,7 @@ export function queryRegionUntiled(
 
   // Build scanline intersection table: for each row Y, sorted X-crossings of polygon edges.
   // Pixels between consecutive pairs of crossings are inside the polygon.
-  // This replaces per-pixel pointInGeoJSON, eliminating the O(V) cost per pixel.
+  // Scanline table eliminates the O(V) per-pixel cost of point-in-polygon tests.
   const scanlines = buildScanlineTable(pixelGeometry, yStart, yEnd)
 
   // Iterate rows using the scanline table

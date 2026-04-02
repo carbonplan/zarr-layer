@@ -405,7 +405,10 @@ export function computePixelBoundsFromGeometry(
   return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
 }
 
-import { DEFAULT_QUERY_DENSIFY_MAX_ERROR } from '../constants'
+import {
+  DEFAULT_QUERY_DENSIFY_MAX_ERROR,
+  MERCATOR_LAT_LIMIT,
+} from '../constants'
 
 /** Max recursion depth for adaptive subdivision */
 const DENSIFY_MAX_DEPTH = 10
@@ -495,7 +498,7 @@ function densifyAndTransformRing(
  * Densifies edges to preserve curvature under nonlinear projections.
  *
  * Returns a geometry with the same GeoJSON ring structure but in pixel coordinates,
- * suitable for use with pointInGeoJSON / pointInPolygon.
+ * suitable for use with scanline rasterization.
  */
 export function transformGeometryToPixelSpace(
   geometry: QueryGeometry,
@@ -592,6 +595,79 @@ export function transformGeometryToPixelSpace(
 }
 
 /**
+ * Transform a query geometry from WGS84 lon/lat into tile-pixel coordinates.
+ * For EPSG:3857 the lat→Y mapping is nonlinear, so edges are densified.
+ * For EPSG:4326 the mapping is linear and vertices are transformed directly.
+ */
+export function transformGeometryToTilePixelSpace(
+  geometry: QueryGeometry,
+  tile: TileTuple,
+  tileSize: number,
+  crs: CRS,
+  xyLimits: XYLimits
+): QueryGeometry | null {
+  const transformVertex = (lon: number, lat: number): [number, number] => {
+    // Clamp latitude to Mercator limits to avoid infinities at the poles
+    const clampedLat =
+      crs !== 'EPSG:4326'
+        ? Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, lat))
+        : lat
+    const { fracX, fracY } = geoToTileFraction(
+      lon,
+      clampedLat,
+      tile,
+      crs,
+      xyLimits
+    )
+    return [fracX * tileSize, fracY * tileSize]
+  }
+
+  if (geometry.type === 'Point') {
+    const [lon, lat] = geometry.coordinates
+    const pt = transformVertex(lon, lat)
+    if (!isFinite(pt[0]) || !isFinite(pt[1])) return null
+    return { type: 'Point', coordinates: [pt[0], pt[1]] }
+  }
+
+  // EPSG:3857 is nonlinear in Y; EPSG:4326 is linear
+  const needsDensification = crs !== 'EPSG:4326'
+
+  const transformRing = (ring: number[][]): number[][] => {
+    if (needsDensification) {
+      return densifyAndTransformRing(ring, transformVertex)
+    }
+    const result: number[][] = []
+    for (const [lon, lat] of ring) {
+      const pt = transformVertex(lon, lat)
+      if (isFinite(pt[0]) && isFinite(pt[1])) {
+        result.push(pt as number[])
+      }
+    }
+    if (
+      result.length > 1 &&
+      (result[0][0] !== result[result.length - 1][0] ||
+        result[0][1] !== result[result.length - 1][1])
+    ) {
+      result.push([result[0][0], result[0][1]])
+    }
+    return result
+  }
+
+  if (geometry.type === 'Polygon') {
+    const coords = geometry.coordinates.map(transformRing)
+    if (coords[0].length < 4) return null
+    return { type: 'Polygon', coordinates: coords }
+  }
+
+  const coords = geometry.coordinates.map((polygon) =>
+    polygon.map(transformRing)
+  )
+  const valid = coords.filter((poly) => poly[0].length >= 4)
+  if (valid.length === 0) return null
+  return { type: 'MultiPolygon', coordinates: valid }
+}
+
+/**
  * Convert a single lon/lat point to pixel coordinates.
  * Handles proj4, EPSG:4326, and EPSG:3857.
  */
@@ -648,23 +724,17 @@ function lonLatToPixel(
 }
 
 /**
- * Scanline fill: precompute sorted X-intersections for each row in the pixel-space polygon.
+ * Build a scanline table for a single polygon (outer ring + holes).
  * Returns a Map from integer Y to sorted array of X-intersection values.
- * For each row, pixels between pairs of intersections (0-1, 2-3, ...) are inside.
- *
- * Uses center-based sampling (row + 0.5) matching standard rasterization tools
- * (GDAL/rasterio default). A pixel is included if its center is inside the polygon.
- *
- * This replaces per-pixel pointInPolygon, changing complexity from O(W*H*V) to O(H*E + H*E*logE).
  */
-export function buildScanlineTable(
-  geometry: QueryGeometry,
+function buildScanlineTableForRings(
+  rings: number[][][],
   yStart: number,
   yEnd: number
 ): Map<number, number[]> {
   const table = new Map<number, number[]>()
 
-  const processRing = (ring: number[][]) => {
+  for (const ring of rings) {
     for (let i = 0; i < ring.length - 1; i++) {
       const x0 = ring[i][0]
       const y0 = ring[i][1]
@@ -675,7 +745,6 @@ export function buildScanlineTable(
 
       const edgeYMin = Math.min(y0, y1)
       const edgeYMax = Math.max(y0, y1)
-      // Only visit rows whose center (row + 0.5) falls within the edge's Y range
       const scanYMin = Math.max(yStart, Math.floor(edgeYMin + 0.5))
       const scanYMax = Math.min(yEnd - 1, Math.ceil(edgeYMax - 0.5) - 1)
       const slope = (x1 - x0) / (y1 - y0)
@@ -693,14 +762,6 @@ export function buildScanlineTable(
     }
   }
 
-  if (geometry.type === 'Polygon') {
-    for (const ring of geometry.coordinates) processRing(ring)
-  } else if (geometry.type === 'MultiPolygon') {
-    for (const polygon of geometry.coordinates)
-      for (const ring of polygon) processRing(ring)
-  }
-
-  // Sort intersections for each row
   for (const [, arr] of table) {
     arr.sort((a, b) => a - b)
   }
@@ -709,216 +770,82 @@ export function buildScanlineTable(
 }
 
 /**
- * Ray-casting point-in-polygon test.
- * Tests if a point is inside a single polygon ring.
+ * Union two sets of scanline crossing pairs.
+ * Each input is a sorted array where consecutive pairs (0-1, 2-3, ...) define filled intervals.
+ * Returns a new sorted crossing array whose pairs represent the union of both interval sets.
  */
-export function pointInPolygon(
-  point: [number, number],
-  polygon: number[][]
-): boolean {
-  let inside = false
-  const [x, y] = point
+function unionScanlineIntervals(a: number[], b: number[]): number[] {
+  // Convert crossing pairs to [start, end] intervals
+  const intervals: [number, number][] = []
+  for (let i = 0; i < a.length - 1; i += 2) intervals.push([a[i], a[i + 1]])
+  for (let i = 0; i < b.length - 1; i += 2) intervals.push([b[i], b[i + 1]])
 
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i][0]
-    const yi = polygon[i][1]
-    const xj = polygon[j][0]
-    const yj = polygon[j][1]
+  // Sort by start
+  intervals.sort((x, y) => x[0] - y[0])
 
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
-      inside = !inside
+  // Merge overlapping intervals
+  const result: number[] = []
+  let [curStart, curEnd] = intervals[0]
+  for (let i = 1; i < intervals.length; i++) {
+    if (intervals[i][0] <= curEnd) {
+      curEnd = Math.max(curEnd, intervals[i][1])
+    } else {
+      result.push(curStart, curEnd)
+      curStart = intervals[i][0]
+      curEnd = intervals[i][1]
     }
   }
-
-  return inside
+  result.push(curStart, curEnd)
+  return result
 }
 
 /**
- * Tests if a point is inside a GeoJSON geometry (Polygon or MultiPolygon).
- * Correctly handles holes in polygons.
+ * Scanline fill: precompute sorted X-intersections for each row in the pixel-space polygon.
+ * Returns a Map from integer Y to sorted array of X-intersection values.
+ * For each row, pixels between pairs of intersections (0-1, 2-3, ...) are inside.
+ *
+ * Uses center-based sampling (row + 0.5) matching standard rasterization tools
+ * (GDAL/rasterio default). A pixel is included if its center is inside the polygon.
+ *
+ * For MultiPolygon, each polygon member is rasterized independently and intervals
+ * are merged with union semantics, so overlapping members are included (not cancelled
+ * by even-odd parity across members).
+ *
+ * Complexity: O(H*E + H*E*logE) vs O(W*H*V) for per-pixel point-in-polygon.
  */
-export function pointInGeoJSON(
-  point: [number, number],
-  geometry: QueryGeometry
-): boolean {
-  if (geometry.type === 'Point') {
-    return (
-      point[0] === geometry.coordinates[0] &&
-      point[1] === geometry.coordinates[1]
-    )
-  }
-
+export function buildScanlineTable(
+  geometry: QueryGeometry,
+  yStart: number,
+  yEnd: number
+): Map<number, number[]> {
   if (geometry.type === 'Polygon') {
-    // Test outer ring
-    if (!pointInPolygon(point, geometry.coordinates[0])) return false
-    // Test holes (if inside any hole, point is outside polygon)
-    for (let i = 1; i < geometry.coordinates.length; i++) {
-      if (pointInPolygon(point, geometry.coordinates[i])) return false
-    }
-    return true
+    return buildScanlineTableForRings(geometry.coordinates, yStart, yEnd)
   }
 
-  // MultiPolygon - check each polygon
-  for (const polygon of geometry.coordinates) {
-    if (pointInPolygon(point, polygon[0])) {
-      let inHole = false
-      for (let i = 1; i < polygon.length; i++) {
-        if (pointInPolygon(point, polygon[i])) {
-          inHole = true
-          break
-        }
-      }
-      if (!inHole) return true
-    }
-  }
-
-  return false
-}
-
-/**
- * Test if two line segments intersect using cross-product method.
- * Avoids allocations by inlining the math.
- */
-function segmentsIntersect(
-  a1: [number, number],
-  a2: [number, number],
-  b1: [number, number],
-  b2: [number, number]
-): boolean {
-  const d1x = a2[0] - a1[0]
-  const d1y = a2[1] - a1[1]
-  const d2x = b2[0] - b1[0]
-  const d2y = b2[1] - b1[1]
-  const denom = d1x * d2y - d1y * d2x
-  if (denom === 0) return false
-
-  const dx = b1[0] - a1[0]
-  const dy = b1[1] - a1[1]
-  const s = (dx * d2y - dy * d2x) / denom
-  const t = (dx * d1y - dy * d1x) / denom
-  return s >= 0 && s <= 1 && t >= 0 && t <= 1
-}
-
-/**
- * Lightweight polygon-rectangle intersection test.
- * Returns true if any rectangle corner is inside geometry,
- * any geometry vertex is inside rectangle, or if any edges intersect.
- */
-function rectIntersectsGeometry(
-  rect: [number, number][],
-  geometry: QueryGeometry
-): boolean {
-  // Inline min/max to avoid temporary arrays from Math.min(...rect.map(...))
-  const rectMinX = Math.min(rect[0][0], rect[1][0], rect[2][0], rect[3][0])
-  const rectMaxX = Math.max(rect[0][0], rect[1][0], rect[2][0], rect[3][0])
-  const rectMinY = Math.min(rect[0][1], rect[1][1], rect[2][1], rect[3][1])
-  const rectMaxY = Math.max(rect[0][1], rect[1][1], rect[2][1], rect[3][1])
-
-  // Any rect corner inside geometry (supports point or polygon)
-  for (const corner of rect) {
-    if (pointInGeoJSON(corner, geometry)) return true
-  }
-
-  // Point geometry inside rectangle
   if (geometry.type === 'Point') {
-    const gx = geometry.coordinates[0]
-    const gy = geometry.coordinates[1]
-    if (gx >= rectMinX && gx <= rectMaxX && gy >= rectMinY && gy <= rectMaxY) {
-      return true
-    }
-    return false
+    return new Map()
   }
 
-  // Any polygon vertex inside rect
-  const rings =
-    geometry.type === 'Polygon'
-      ? geometry.coordinates
-      : geometry.coordinates.flatMap((poly) => poly)
-  for (const ring of rings) {
-    for (const coord of ring) {
-      if (
-        coord[0] >= rectMinX &&
-        coord[0] <= rectMaxX &&
-        coord[1] >= rectMinY &&
-        coord[1] <= rectMaxY
-      ) {
-        return true
+  // MultiPolygon: rasterize each polygon independently, then merge intervals
+  const perPolygon = geometry.coordinates.map((polygon) =>
+    buildScanlineTableForRings(polygon, yStart, yEnd)
+  )
+  if (perPolygon.length === 1) return perPolygon[0]
+
+  // Merge: collect all rows, union their interval sets
+  const merged = new Map<number, number[]>()
+  for (const table of perPolygon) {
+    for (const [row, crossings] of table) {
+      // Convert crossing pairs to intervals, then merge with existing
+      const existing = merged.get(row)
+      if (!existing) {
+        merged.set(row, crossings)
+      } else {
+        merged.set(row, unionScanlineIntervals(existing, crossings))
       }
     }
   }
-
-  // Edge intersection: rectangle edges vs polygon edges (outer rings only)
-  const rectEdges: [[number, number], [number, number]][] = [
-    [rect[0], rect[1]],
-    [rect[1], rect[2]],
-    [rect[2], rect[3]],
-    [rect[3], rect[0]],
-  ]
-
-  // Build edge segments without intermediate array allocations
-  const outerRings: number[][][] =
-    geometry.type === 'Polygon'
-      ? [geometry.coordinates[0]]
-      : geometry.coordinates.map((poly) => poly[0])
-
-  for (const edge of rectEdges) {
-    for (const ring of outerRings) {
-      for (let i = 0; i < ring.length - 1; i++) {
-        const b1 = ring[i] as [number, number]
-        const b2 = ring[i + 1] as [number, number]
-        if (segmentsIntersect(edge[0], edge[1], b1, b2)) {
-          return true
-        }
-      }
-    }
-  }
-
-  return false
-}
-
-/**
- * Rectangle (pixel) corners in lon/lat for tiled mode.
- */
-function pixelRectLonLat(
-  tile: TileTuple,
-  pixelX: number,
-  pixelY: number,
-  tileSize: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): [number, number][] {
-  const corners: [number, number][] = []
-  const offsets = [
-    [0, 0],
-    [1, 0],
-    [1, 1],
-    [0, 1],
-  ]
-  for (const [dx, dy] of offsets) {
-    const p = tilePixelToLatLon(
-      tile,
-      pixelX + dx,
-      pixelY + dy,
-      tileSize,
-      crs,
-      xyLimits
-    )
-    corners.push([p.lon, p.lat])
-  }
-  return corners
-}
-
-export function pixelIntersectsGeometryTiled(
-  tile: TileTuple,
-  pixelX: number,
-  pixelY: number,
-  tileSize: number,
-  crs: CRS,
-  xyLimits: XYLimits,
-  geometry: QueryGeometry
-): boolean {
-  const rect = pixelRectLonLat(tile, pixelX, pixelY, tileSize, crs, xyLimits)
-  return rectIntersectsGeometry(rect, geometry)
+  return merged
 }
 
 /**
