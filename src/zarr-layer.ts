@@ -687,7 +687,7 @@ export class ZarrLayer {
       // Skip spatial dimensions - don't load coordinate arrays for these
       if (!SPATIAL_DIM_NAMES.has(dimName.toLowerCase())) {
         try {
-          this.dimensionValues[dimName] = await loadDimensionValues(
+          await loadDimensionValues(
             this.dimensionValues,
             multiscaleLevel,
             this.dimIndices[dimName],

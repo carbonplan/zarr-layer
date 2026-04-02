@@ -97,22 +97,26 @@ export function identifyDimensionIndices(
   return indices
 }
 
+// Sentinel stored in dimensionValues to mark a level+dim 404, so we don't
+// retry on every call. Cleared automatically when the caller resets the cache.
+const COORD_MISS = Object.freeze([]) as unknown as number[]
+
 /**
  * Loads the coordinate values for a specific dimension.
  *
  * Behavior:
  * - Uses cached values if available (does not reload unless the caller resets the cache).
- * - Resolves the correct multiscale level if `levelInfo` is provided.
+ * - When `levelInfo` is provided, tries the level-specific path first. On
+ *   `NodeNotFoundError` it falls back to the root path automatically and
+ *   remembers the miss so subsequent calls skip the 404.
  * - Converts Zarr buffers into plain JavaScript number arrays.
  * - Converts bigint values to number.
- * - If a slice `[start, end]` is supplied, only a sub-range is returned.
  *
  * @param dimensionValues  Cache of already-loaded coordinate arrays.
  * @param levelInfo        Optional multiscale subpath.
  * @param dimIndices      Dimension index info. See {@link DimIndicesProps}.
  * @param root            Root Zarr group location.
  * @param zarrVersion     Zarr version (2 or 3).
- * @param slice           Optional index range `[start, end]` to slice the loaded values.
  *
  * @returns The loaded coordinate array for the dimension.
  */
@@ -121,11 +125,49 @@ export async function loadDimensionValues(
   levelInfo: string | null,
   dimIndices: DimIndicesProps[string],
   root: zarr.Location<zarr.FetchStore>,
-  zarrVersion: 2 | 3 | null,
-  slice?: [number, number]
+  zarrVersion: 2 | 3 | null
 ): Promise<Float64Array | number[] | string[]> {
-  if (dimensionValues[dimIndices.name]) return dimensionValues[dimIndices.name]
-  const targetRoot = levelInfo ? root.resolve(levelInfo) : root
+  // Try level-specific path first (skip if previously 404'd)
+  if (levelInfo) {
+    const levelKey = `${levelInfo}:${dimIndices.name}`
+    if (dimensionValues[levelKey] !== COORD_MISS) {
+      try {
+        return await loadCoordArray(
+          dimensionValues,
+          levelKey,
+          root.resolve(levelInfo),
+          dimIndices,
+          zarrVersion
+        )
+      } catch (err) {
+        if (err instanceof zarr.NodeNotFoundError) {
+          dimensionValues[levelKey] = COORD_MISS
+        } else {
+          throw err
+        }
+      }
+    }
+  }
+
+  // Fall back to root
+  return await loadCoordArray(
+    dimensionValues,
+    dimIndices.name,
+    root,
+    dimIndices,
+    zarrVersion
+  )
+}
+
+async function loadCoordArray(
+  dimensionValues: Record<string, Float64Array | number[] | string[]>,
+  cacheKey: string,
+  targetRoot: zarr.Location<zarr.FetchStore>,
+  dimIndices: DimIndicesProps[string],
+  zarrVersion: 2 | 3 | null
+): Promise<Float64Array | number[] | string[]> {
+  if (dimensionValues[cacheKey]) return dimensionValues[cacheKey]
+
   let coordArr
   if (dimIndices.array) {
     coordArr = dimIndices.array
@@ -140,9 +182,7 @@ export async function loadDimensionValues(
   // Handle string arrays (zarrita returns Array<string> for vlen-utf8)
   if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
     const stringArray = data as string[]
-    if (slice) {
-      return stringArray.slice(slice[0], slice[1])
-    }
+    dimensionValues[cacheKey] = stringArray
     return stringArray
   }
 
@@ -151,9 +191,7 @@ export async function loadDimensionValues(
     data as ArrayLike<number | bigint>,
     (v: number | bigint) => (typeof v === 'bigint' ? Number(v) : v)
   )
-  if (slice) {
-    return coordArray.slice(slice[0], slice[1])
-  }
+  dimensionValues[cacheKey] = coordArray
   return coordArray
 }
 

@@ -2441,15 +2441,19 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
+    const levelPath =
+      this.isMultiscale && this.currentLevelIndex >= 0
+        ? this.levels[this.currentLevelIndex]?.asset ?? null
+        : null
+
     try {
       const coords = await loadDimensionValues(
         this.dimensionValues,
-        null,
+        levelPath,
         dimInfo,
         this.zarrStore.root,
         this.zarrStore.version
       )
-      this.dimensionValues[dimName] = coords
 
       if (typeof value === 'number' || typeof value === 'string') {
         const coordIdx = (coords as (number | string)[]).indexOf(value)
