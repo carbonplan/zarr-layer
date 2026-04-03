@@ -326,9 +326,10 @@ export function computePixelBoundsFromGeometry(
 
     // Clamp to valid range
     // Use floor + 1 to ensure integer maxX/maxY values include that pixel
-    const xStart = Math.max(0, Math.floor(minX))
+    // Clamp start to last pixel so points on the max edge map to the last pixel
+    const xStart = Math.min(Math.max(0, Math.floor(minX)), width - 1)
     const xEnd = Math.min(width, Math.max(Math.floor(maxX) + 1, xStart + 1))
-    const yStart = Math.max(0, Math.floor(minY))
+    const yStart = Math.min(Math.max(0, Math.floor(minY)), height - 1)
     const yEnd = Math.min(height, Math.max(Math.floor(maxY) + 1, yStart + 1))
 
     if (xEnd <= xStart || yEnd <= yStart) return null
@@ -379,9 +380,9 @@ export function computePixelBoundsFromGeometry(
     const minX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
     const maxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
 
-    xStart = Math.max(0, Math.floor(minX))
+    xStart = Math.min(Math.max(0, Math.floor(minX)), width - 1)
     xEnd = Math.min(width, Math.max(Math.ceil(maxX), xStart + 1))
-    yStart = Math.max(0, Math.floor(yFracMin * height))
+    yStart = Math.min(Math.max(0, Math.floor(yFracMin * height)), height - 1)
     yEnd = Math.min(height, Math.max(Math.ceil(yFracMax * height), yStart + 1))
   } else {
     const overlapY0 = Math.max(bounds.y0, Math.min(polyY0, polyY1))
@@ -394,9 +395,9 @@ export function computePixelBoundsFromGeometry(
     const minY = ((overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
     const maxY = ((overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
 
-    xStart = Math.max(0, Math.floor(minX))
+    xStart = Math.min(Math.max(0, Math.floor(minX)), width - 1)
     xEnd = Math.min(width, Math.max(Math.ceil(maxX), xStart + 1))
-    yStart = Math.max(0, Math.floor(minY))
+    yStart = Math.min(Math.max(0, Math.floor(minY)), height - 1)
     yEnd = Math.min(height, Math.max(Math.ceil(maxY), yStart + 1))
   }
 
