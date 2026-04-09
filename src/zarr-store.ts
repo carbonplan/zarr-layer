@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import BatchedFetchStore from './batched-fetch-store'
 import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
   Bounds,
@@ -262,10 +263,9 @@ class TransformingFetchStore implements AsyncReadable<RequestInit> {
   }
 }
 
-type ConsolidatedStore = zarr.Listable<zarr.FetchStore>
+type ConsolidatedStore = zarr.Listable<BatchedFetchStore>
 type ZarrStoreType =
-  | zarr.FetchStore
-  | TransformingFetchStore
+  | BatchedFetchStore
   | ConsolidatedStore
   | Readable<unknown>
   | AsyncReadable<unknown>
@@ -310,18 +310,22 @@ interface StoreDescription {
 
 /**
  * Factory function to create a store with optional request transformation.
- * When transformRequest is provided, returns a TransformingFetchStore that
- * calls the transform function for each request with the fully resolved URL.
- * This enables per-path authentication like presigned S3 URLs.
+ * Wraps the underlying store with BatchedFetchStore for:
+ * - Shard index caching (LRU 256 entries): suffix-length requests for the same
+ *   shard file are served from cache, so RGB band opens share one index fetch
+ *   per shard instead of fetching it three times. Equivalent to GDAL PR #14021.
+ * - Range request batching (32 KB gap threshold): concurrent getRange calls
+ *   within one event-loop tick are merged into fewer HTTP requests. Equivalent
+ *   to GDAL's ReadMultiRange batching.
  */
 const createFetchStore = (
   url: string,
   transformRequest?: TransformRequest
-): zarr.FetchStore | TransformingFetchStore => {
-  if (!transformRequest) {
-    return new zarr.FetchStore(url)
-  }
-  return new TransformingFetchStore(url, transformRequest)
+): BatchedFetchStore => {
+  const base = transformRequest
+    ? new TransformingFetchStore(url, transformRequest)
+    : new zarr.FetchStore(url)
+  return new BatchedFetchStore(base)
 }
 
 export class ZarrStore {
@@ -458,7 +462,7 @@ export class ZarrStore {
       // Use cached store for standard requests
       storeHandle = ZarrStore._storeCache.get(storeCacheKey)
       if (!storeHandle) {
-        const baseStore = new zarr.FetchStore(this.source)
+        const baseStore = createFetchStore(this.source)
         if (this.version === 3) {
           storeHandle = Promise.resolve(baseStore)
         } else {
@@ -698,7 +702,7 @@ export class ZarrStore {
       throw new Error(`Expected absolute Zarr path. Received '${path}'.`)
     }
 
-    const bytes = await this.store.get(path)
+    const bytes = await this.store.get(path as `/${string}`)
     const parsed = decodeJSON(bytes)
     if (parsed === null) {
       throw new Error(`Missing metadata at path '${path}'.`)
@@ -1259,7 +1263,6 @@ export class ZarrStore {
       }
     }
   }
-
   /**
    * Parse multiscale metadata to determine pyramid structure.
    *
