@@ -305,6 +305,47 @@ new ZarrLayer({
 
 The store must implement the zarrita `Readable` interface with at minimum a `get(key: string)` method.
 
+## codecs
+
+The library uses [zarrita](https://github.com/manzt/zarrita.js) for Zarr data access. zarrita includes built-in codecs for `bytes`, `zlib`, `gzip`, `blosc`, `lz4`, `zstd`, `transpose`, `crc32c`, and `bitround`. You can add more if needed!
+
+### adding custom codecs
+
+Virtualized NetCDF data may use `numcodecs.*`-prefixed codec names (e.g., `numcodecs.zlib`, `numcodecs.shuffle`) that zarrita doesn't recognize by default. Use `codecRegistry` to register them before creating layers:
+
+```ts
+import { codecRegistry } from '@carbonplan/zarr-layer'
+
+// Alias numcodecs.zlib → zarrita's built-in zlib
+const zlibFactory = codecRegistry.get('zlib')
+if (zlibFactory) codecRegistry.set('numcodecs.zlib', zlibFactory)
+
+// numcodecs.shuffle — byte un-shuffle by element size
+codecRegistry.set('numcodecs.shuffle', async () => ({
+  fromConfig(config: { elementsize?: number }) {
+    const elementsize = config?.elementsize ?? 1
+    return {
+      kind: 'bytes_to_bytes',
+      decode(bytes: Uint8Array): Uint8Array {
+        if (elementsize <= 1) return bytes
+        const n = bytes.length
+        const count = Math.floor(n / elementsize)
+        const out = new Uint8Array(n)
+        for (let i = 0; i < count; i++) {
+          for (let j = 0; j < elementsize; j++) {
+            out[i * elementsize + j] = bytes[j * count + i]
+          }
+        }
+        for (let i = count * elementsize; i < n; i++) {
+          out[i] = bytes[i]
+        }
+        return out
+      },
+    }
+  },
+}))
+```
+
 ## thanks
 
 This experiment is only possible following in the footsteps of other work in this space. [zarr-gl](https://github.com/carderne/zarr-gl) showed that custom layers are a viable rendering option and [zarr-cesium](https://github.com/NOC-OI/zarr-cesium) showed how flexible web rendering can be. We borrow code and concepts from both. This library also leans on our prior work on [@carbonplan/maps](https://github.com/carbonplan/maps) for many of its patterns. Custom projection support uses [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster) for adaptive mesh generation. LLMs of several makes aided in the coding and debugging of this library.

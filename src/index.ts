@@ -12,3 +12,6 @@ export type {
 
 // Query interface exports
 export type { QueryResult, QueryDataValues, QueryGeometry } from './query/types'
+
+// Codec registry — re-export for registering custom codecs
+export { registry as codecRegistry } from 'zarrita'
