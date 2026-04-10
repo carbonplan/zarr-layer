@@ -17,6 +17,46 @@ function formatProj4Error(proj4def: string, err: unknown): string {
 }
 
 /**
+ * Shared frozen sentinel returned by guarded transformers on failure.
+ * Frozen so a buggy caller mutating the result fails loudly instead of
+ * poisoning every subsequent call through the same closure.
+ */
+const SAFE_NAN: [number, number] = Object.freeze([NaN, NaN]) as [number, number]
+
+/**
+ * Wraps a proj4 pair-based transform (`(pair) => pair`) in a guard that:
+ *   - Returns NaN for non-finite inputs (proj4 can loop or throw on them).
+ *   - Catches exceptions from malformed defs that only fail on certain inputs.
+ *   - Returns NaN if proj4 produces a non-finite result.
+ *   - Warns once per transformer on the first exception so silent failures
+ *     still leave a breadcrumb in the console.
+ */
+function guardPairTransform(
+  fn: (pair: [number, number]) => [number, number],
+  label: string
+): (a: number, b: number) => [number, number] {
+  let warned = false
+  return (a, b) => {
+    if (!isFinite(a) || !isFinite(b)) return SAFE_NAN
+    try {
+      const result = fn([a, b])
+      if (!isFinite(result[0]) || !isFinite(result[1])) return SAFE_NAN
+      return result
+    } catch (err) {
+      if (!warned) {
+        warned = true
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(
+          `[zarr-layer] proj4 ${label} threw on (${a}, ${b}): ${msg}. ` +
+            `Further errors from this transformer will be silenced.`
+        )
+      }
+      return SAFE_NAN
+    }
+  }
+}
+
+/**
  * A transformer for converting coordinates between source CRS and Web Mercator.
  */
 export interface ProjectionTransformer {
@@ -42,28 +82,16 @@ export function createTransformer(
     throw new Error(formatProj4Error(proj4def, err))
   }
 
-  const safeNaN: [number, number] = [NaN, NaN]
+  const shortDef = proj4def.slice(0, 40)
   return {
-    forward: (x: number, y: number) => {
-      if (!isFinite(x) || !isFinite(y)) return safeNaN
-      try {
-        const result = converter.forward([x, y]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN
-        return result
-      } catch {
-        return safeNaN
-      }
-    },
-    inverse: (x: number, y: number) => {
-      if (!isFinite(x) || !isFinite(y)) return safeNaN
-      try {
-        const result = converter.inverse([x, y]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN
-        return result
-      } catch {
-        return safeNaN
-      }
-    },
+    forward: guardPairTransform(
+      (pair) => converter.forward(pair) as [number, number],
+      `forward ${shortDef}→EPSG:3857`
+    ),
+    inverse: guardPairTransform(
+      (pair) => converter.inverse(pair) as [number, number],
+      `inverse EPSG:3857→${shortDef}`
+    ),
     bounds,
   }
 }
@@ -95,28 +123,16 @@ export function createTransformerTo4326(
     throw new Error(formatProj4Error(proj4def, err))
   }
 
-  const safeNaN4326: [number, number] = [NaN, NaN]
+  const shortDef = proj4def.slice(0, 40)
   return {
-    forward: (x: number, y: number) => {
-      if (!isFinite(x) || !isFinite(y)) return safeNaN4326
-      try {
-        const result = converter.forward([x, y]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN4326
-        return result
-      } catch {
-        return safeNaN4326
-      }
-    },
-    inverse: (lon: number, lat: number) => {
-      if (!isFinite(lon) || !isFinite(lat)) return safeNaN4326
-      try {
-        const result = converter.inverse([lon, lat]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaN4326
-        return result
-      } catch {
-        return safeNaN4326
-      }
-    },
+    forward: guardPairTransform(
+      (pair) => converter.forward(pair) as [number, number],
+      `forward ${shortDef}→EPSG:4326`
+    ),
+    inverse: guardPairTransform(
+      (pair) => converter.inverse(pair) as [number, number],
+      `inverse EPSG:4326→${shortDef}`
+    ),
     bounds,
   }
 }
@@ -229,28 +245,16 @@ export function createWGS84ToSourceTransformer(proj4def: string): {
     throw new Error(formatProj4Error(proj4def, err))
   }
 
-  const safeNaNSrc: [number, number] = [NaN, NaN]
+  const shortDef = proj4def.slice(0, 40)
   return {
-    forward: (lon: number, lat: number) => {
-      if (!isFinite(lon) || !isFinite(lat)) return safeNaNSrc
-      try {
-        const result = converter.forward([lon, lat]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaNSrc
-        return result
-      } catch {
-        return safeNaNSrc
-      }
-    },
-    inverse: (x: number, y: number) => {
-      if (!isFinite(x) || !isFinite(y)) return safeNaNSrc
-      try {
-        const result = converter.inverse([x, y]) as [number, number]
-        if (!isFinite(result[0]) || !isFinite(result[1])) return safeNaNSrc
-        return result
-      } catch {
-        return safeNaNSrc
-      }
-    },
+    forward: guardPairTransform(
+      (pair) => converter.forward(pair) as [number, number],
+      `forward EPSG:4326→${shortDef}`
+    ),
+    inverse: guardPairTransform(
+      (pair) => converter.inverse(pair) as [number, number],
+      `inverse ${shortDef}→EPSG:4326`
+    ),
   }
 }
 
