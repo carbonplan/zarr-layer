@@ -22,7 +22,7 @@ export type DatasetConfig = {
   bounds?: [number, number, number, number]
   proj4?: string
   /** Optional custom zarrita-compatible store (e.g., IcechunkStore) */
-  store?: Promise<zarr.Readable<unknown>>
+  store?: Promise<zarr.Readable>
 }
 
 export type ControlsProps<State> = {

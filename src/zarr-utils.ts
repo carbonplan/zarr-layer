@@ -6,6 +6,7 @@
  */
 
 import * as zarr from 'zarrita'
+import type { Readable } from '@zarrita/storage'
 import {
   type SelectorSpec,
   type SelectorValue,
@@ -120,7 +121,7 @@ export async function loadDimensionValues(
   dimensionValues: Record<string, Float64Array | number[] | string[]>,
   levelInfo: string | null,
   dimIndices: DimIndicesProps[string],
-  root: zarr.Location<zarr.FetchStore>,
+  root: zarr.Location<Readable>,
   zarrVersion: 2 | 3 | null,
   slice?: [number, number]
 ): Promise<Float64Array | number[] | string[]> {

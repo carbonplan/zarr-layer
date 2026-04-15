@@ -174,7 +174,7 @@ export class ZarrLayer {
   private throttleMs: number
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
-  private customStore: Readable<unknown> | undefined
+  private customStore: Readable | undefined
   private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
   private usingDirectMapboxGlobePath: boolean = false

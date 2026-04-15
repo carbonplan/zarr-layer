@@ -91,7 +91,7 @@ export interface ZarrLayerOptions {
    * new ZarrLayer({ id: 'my-layer', store, variable: 'temperature', ... })
    * ```
    */
-  store?: zarr.Readable<unknown>
+  store?: zarr.Readable
   selector?: Selector
   colormap: ColormapArray
   clim: [number, number]

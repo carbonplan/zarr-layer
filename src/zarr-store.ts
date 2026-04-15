@@ -11,13 +11,6 @@ import type {
 import type { XYLimits } from './map-utils'
 import { identifyDimensionIndices } from './zarr-utils'
 
-const textDecoder = new TextDecoder()
-
-const decodeJSON = (bytes: Uint8Array | undefined): unknown => {
-  if (!bytes) return null
-  return JSON.parse(textDecoder.decode(bytes))
-}
-
 interface PyramidMetadata {
   levels: string[]
   maxLevelIndex: number
@@ -51,224 +44,11 @@ interface UntiledMultiscaleMetadata {
   crs?: 'EPSG:4326' | 'EPSG:3857'
 }
 
-interface ZarrV2ConsolidatedMetadata {
-  metadata: Record<string, unknown>
-  zarr_consolidated_format?: number
-}
-
-interface ZarrV2ArrayMetadata {
-  shape: number[]
-  chunks: number[]
-  fill_value: number | null
-  dtype: string
-}
-
-interface ZarrV2Attributes {
-  _ARRAY_DIMENSIONS?: string[]
-  multiscales?: Multiscale[] | UntiledMultiscaleMetadata
-  scale_factor?: number
-  add_offset?: number
-}
-
-interface ZarrV3GroupMetadata {
-  zarr_format: 3
-  node_type: 'group'
-  attributes?: {
-    multiscales?: Multiscale[] | UntiledMultiscaleMetadata
-  }
-  consolidated_metadata?: {
-    metadata?: Record<string, ZarrV3ArrayMetadata>
-  }
-}
-
-interface ZarrV3ArrayMetadata {
-  zarr_format: 3
-  node_type: 'array'
-  shape: number[]
-  dimension_names?: string[]
-  data_type?: string
-  fill_value: number | null
-  chunk_grid?: {
-    name?: string
-    configuration?: {
-      chunk_shape?: number[]
-    }
-  }
-  chunks?: number[]
-  chunk_key_encoding?: {
-    name: string
-    configuration?: Record<string, unknown>
-  }
-  codecs?: Array<{
-    name: string
-    configuration?: {
-      chunk_shape?: number[]
-    }
-  }>
-  storage_transformers?: Array<{
-    name: string
-    configuration?: Record<string, unknown>
-  }>
-  attributes?: Record<string, unknown>
-}
-
-type AbsolutePath = `/${string}`
-type RangeQuery = { offset: number; length: number } | { suffixLength: number }
-
-/**
- * Merge RequestInit objects, properly combining headers instead of replacing.
- * Request overrides take precedence over store overrides.
- */
-const mergeInit = (
-  storeOverrides: RequestInit,
-  requestOverrides?: RequestInit
-): RequestInit => {
-  if (!requestOverrides) return storeOverrides
-  return {
-    ...storeOverrides,
-    ...requestOverrides,
-    headers: {
-      ...(storeOverrides.headers as Record<string, string>),
-      ...(requestOverrides.headers as Record<string, string>),
-    },
-  }
-}
-
-/**
- * Handle fetch response, returning bytes or undefined for 404/403.
- * 403 is treated as "not found" for S3/CloudFront compatibility: these
- * services return 403 (not 404) for missing or inaccessible paths.
- */
-const handleResponse = async (
-  response: Response
-): Promise<Uint8Array | undefined> => {
-  if (response.status === 404 || response.status === 403) return undefined
-  if (response.status === 200 || response.status === 206) {
-    return new Uint8Array(await response.arrayBuffer())
-  }
-  throw new Error(
-    `Unexpected response status ${response.status} ${response.statusText}`
-  )
-}
-
-/**
- * Fetch a byte range from a URL.
- */
-const fetchRange = (
-  url: string | URL,
-  offset: number,
-  length: number,
-  opts: RequestInit = {}
-): Promise<Response> => {
-  return fetch(url, {
-    ...opts,
-    headers: {
-      ...(opts.headers as Record<string, string>),
-      Range: `bytes=${offset}-${offset + length - 1}`,
-    },
-  })
-}
-
-/**
- * Custom store that calls transformRequest for each request with the fully resolved URL.
- * This enables per-path authentication like presigned S3 URLs.
- */
-class TransformingFetchStore implements AsyncReadable<RequestInit> {
-  private baseUrl: URL
-  private transformRequest: TransformRequest
-
-  constructor(url: string, transformRequest: TransformRequest) {
-    this.baseUrl = new URL(url)
-    if (!this.baseUrl.pathname.endsWith('/')) {
-      this.baseUrl.pathname += '/'
-    }
-    this.transformRequest = transformRequest
-  }
-
-  private resolveUrl(key: AbsolutePath): string {
-    const resolved = new URL(key.slice(1), this.baseUrl)
-    resolved.search = this.baseUrl.search
-    return resolved.href
-  }
-
-  async get(
-    key: AbsolutePath,
-    opts?: RequestInit
-  ): Promise<Uint8Array | undefined> {
-    const resolvedUrl = this.resolveUrl(key)
-    const { url: transformedUrl, ...overrides } = await this.transformRequest(
-      resolvedUrl,
-      { method: 'GET' }
-    )
-
-    const merged = mergeInit(overrides, opts)
-    const response = await fetch(transformedUrl, merged)
-    return handleResponse(response)
-  }
-
-  async getRange(
-    key: AbsolutePath,
-    range: RangeQuery,
-    opts?: RequestInit
-  ): Promise<Uint8Array | undefined> {
-    const resolvedUrl = this.resolveUrl(key)
-
-    let response: Response
-
-    if ('suffixLength' in range) {
-      // For suffix queries, we need separate signed URLs for HEAD and GET
-      const { url: headUrl, ...headOverrides } = await this.transformRequest(
-        resolvedUrl,
-        { method: 'HEAD' }
-      )
-      const headMerged = mergeInit(headOverrides, opts)
-      const headResponse = await fetch(headUrl, {
-        ...headMerged,
-        method: 'HEAD',
-      })
-      if (!headResponse.ok) {
-        return handleResponse(headResponse)
-      }
-      const contentLength = headResponse.headers.get('Content-Length')
-      const length = Number(contentLength)
-
-      // Now get the actual range with a GET-signed URL
-      const { url: getUrl, ...getOverrides } = await this.transformRequest(
-        resolvedUrl,
-        { method: 'GET' }
-      )
-      const getMerged = mergeInit(getOverrides, opts)
-      response = await fetchRange(
-        getUrl,
-        length - range.suffixLength,
-        range.suffixLength,
-        getMerged
-      )
-    } else {
-      const { url: transformedUrl, ...overrides } = await this.transformRequest(
-        resolvedUrl,
-        { method: 'GET' }
-      )
-      const merged = mergeInit(overrides, opts)
-      response = await fetchRange(
-        transformedUrl,
-        range.offset,
-        range.length,
-        merged
-      )
-    }
-
-    return handleResponse(response)
-  }
-}
-
-type ConsolidatedStore = zarr.Listable<zarr.FetchStore>
 type ZarrStoreType =
   | zarr.FetchStore
-  | TransformingFetchStore
-  | ConsolidatedStore
-  | Readable<unknown>
-  | AsyncReadable<unknown>
+  | zarr.Listable<zarr.FetchStore>
+  | Readable
+  | AsyncReadable
 
 interface ZarrStoreOptions {
   /** URL to Zarr store. Required unless customStore is provided. */
@@ -283,11 +63,10 @@ interface ZarrStoreOptions {
   proj4?: string
   transformRequest?: TransformRequest
   /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
-  customStore?: Readable<unknown> | AsyncReadable<unknown>
+  customStore?: Readable | AsyncReadable
 }
 
 interface StoreDescription {
-  metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null
   dimensions: string[]
   shape: number[]
   chunks: number[]
@@ -310,25 +89,50 @@ interface StoreDescription {
 
 /**
  * Factory function to create a store with optional request transformation.
- * When transformRequest is provided, returns a TransformingFetchStore that
- * calls the transform function for each request with the fully resolved URL.
+ * When transformRequest is provided, uses FetchStore's native fetch handler
+ * to intercept each request with the fully resolved URL.
  * This enables per-path authentication like presigned S3 URLs.
  */
 const createFetchStore = (
   url: string,
   transformRequest?: TransformRequest
-): zarr.FetchStore | TransformingFetchStore => {
+): zarr.FetchStore => {
   if (!transformRequest) {
     return new zarr.FetchStore(url)
   }
-  return new TransformingFetchStore(url, transformRequest)
+  return new zarr.FetchStore(url, {
+    async fetch(request: Request): Promise<Response> {
+      const method = request.method as 'GET' | 'HEAD'
+      const { url: transformedUrl, ...overrides } = await transformRequest(
+        request.url,
+        { method }
+      )
+      const mergedHeaders = new Headers(request.headers)
+      if (overrides.headers) {
+        for (const [k, v] of Object.entries(
+          overrides.headers as Record<string, string>
+        )) {
+          mergedHeaders.set(k, v)
+        }
+      }
+      const response = await fetch(
+        new Request(transformedUrl, {
+          ...overrides,
+          method: request.method,
+          headers: mergedHeaders,
+        })
+      )
+      // Remap 403 to 404 for S3/CloudFront compatibility: these services
+      // return 403 (not 404) for missing or inaccessible paths.
+      if (response.status === 403) {
+        return new Response(null, { status: 404 })
+      }
+      return response
+    },
+  })
 }
 
 export class ZarrStore {
-  private static _cache = new Map<
-    string,
-    ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | ZarrV3ArrayMetadata
-  >()
   private static _storeCache = new Map<string, Promise<ZarrStoreType>>()
 
   source: string
@@ -338,10 +142,8 @@ export class ZarrStore {
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
   private transformRequest?: TransformRequest
-  private customStore?: Readable<unknown> | AsyncReadable<unknown>
+  private customStore?: Readable | AsyncReadable
 
-  metadata: ZarrV2ConsolidatedMetadata | ZarrV3GroupMetadata | null = null
-  arrayMetadata: ZarrV3ArrayMetadata | null = null
   dimensions: string[] = []
   shape: number[] = []
   chunks: number[] = []
@@ -435,7 +237,6 @@ export class ZarrStore {
 
   private async _initialize(): Promise<this> {
     const storeCacheKey = `${this.source}:${this.version ?? 'auto'}`
-    let storeHandle: Promise<ZarrStoreType> | undefined
 
     if (this.customStore) {
       // Validate that custom store implements required Readable interface
@@ -445,45 +246,37 @@ export class ZarrStore {
         )
       }
       // Use custom store directly (e.g., IcechunkStore)
-      storeHandle = Promise.resolve(this.customStore as ZarrStoreType)
-    } else if (this.transformRequest) {
-      // Bypass cache when transformRequest is provided (unique credentials per layer)
-      const baseStore = createFetchStore(this.source, this.transformRequest)
-      if (this.version === 3) {
-        storeHandle = Promise.resolve(baseStore)
-      } else {
-        storeHandle = zarr.tryWithConsolidated(baseStore).catch(() => baseStore)
-      }
+      this.store = this.customStore as ZarrStoreType
     } else {
-      // Use cached store for standard requests
-      storeHandle = ZarrStore._storeCache.get(storeCacheKey)
-      if (!storeHandle) {
-        const baseStore = new zarr.FetchStore(this.source)
-        if (this.version === 3) {
-          storeHandle = Promise.resolve(baseStore)
-        } else {
-          storeHandle = zarr
-            .tryWithConsolidated(baseStore)
-            .catch(() => baseStore)
+      const bypassCache = !!this.transformRequest
+      let storePromise = bypassCache
+        ? undefined
+        : ZarrStore._storeCache.get(storeCacheKey)
+
+      if (!storePromise) {
+        const baseStore = createFetchStore(this.source, this.transformRequest)
+        storePromise = (async (): Promise<ZarrStoreType> => {
+          let s: ZarrStoreType = baseStore
+          if (this.version !== 3) {
+            s = await zarr
+              .withMaybeConsolidatedMetadata(baseStore)
+              .catch(() => baseStore)
+          }
+          // Range coalescing: groups concurrent HTTP range requests into fewer
+          // round-trips, reducing latency when fetching many tiles in parallel.
+          s = zarr.withRangeCoalescing(s)
+          return s
+        })()
+        if (!bypassCache) {
+          ZarrStore._storeCache.set(storeCacheKey, storePromise)
         }
-        ZarrStore._storeCache.set(storeCacheKey, storeHandle)
       }
+
+      this.store = await storePromise
     }
 
-    this.store = await storeHandle
     this.root = zarr.root(this.store)
-
-    if (this.version === 2) {
-      await this._loadV2()
-    } else if (this.version === 3) {
-      await this._loadV3()
-    } else {
-      try {
-        await this._loadV3()
-      } catch {
-        await this._loadV2()
-      }
-    }
+    await this._loadMetadata()
 
     await this._loadSpatialMetadata()
     await this._loadCoordinates()
@@ -518,7 +311,6 @@ export class ZarrStore {
 
   describe(): StoreDescription {
     return {
-      metadata: this.metadata,
       dimensions: this.dimensions,
       shape: this.shape,
       chunks: this.chunks,
@@ -563,7 +355,8 @@ export class ZarrStore {
 
   /**
    * Get metadata (shape, chunks, scale/offset/fill) for a specific untiled level.
-   * Used by UntiledMode to determine chunk boundaries and data transforms.
+   * Uses zarrita's array properties — no manual JSON fetching needed.
+   * On consolidated stores, metadata is served from cache (no network).
    */
   async getUntiledLevelMetadata(levelAsset: string): Promise<{
     shape: number[]
@@ -574,81 +367,28 @@ export class ZarrStore {
     dtype: string | null
   }> {
     const array = await this.getLevelArray(levelAsset)
-    const arrayKey = `${levelAsset}/${this.variable}`
+    const attrs = array.attrs as Record<string, unknown>
+    const dtype = (array.dtype as string) || null
+    const fillValue = this.normalizeFillValue(array.fillValue)
 
-    // Try to get metadata from zarr.json for v3, or .zattrs for v2
-    // Return undefined for scaleFactor/addOffset when not specified,
-    // allowing caller to fall back to dataset-level values
+    // Float data typically stores already-physical values (e.g., pyramid levels
+    // created by averaging). Integer data stores raw counts needing conversion.
+    const isFloatData =
+      dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
+
     let scaleFactor: number | undefined = undefined
     let addOffset: number | undefined = undefined
-    let fillValue: number | null = null
-    let dtype: string | null = null
 
-    try {
-      if (this.version === 3) {
-        const meta = (await this._getJSON(`/${arrayKey}/zarr.json`)) as {
-          attributes?: Record<string, unknown>
-          fill_value?: unknown
-          data_type?: string
-        }
-        dtype = meta.data_type ?? null
-        fillValue = this.normalizeFillValue(meta.fill_value)
-
-        // Float data typically stores already-physical values (e.g., pyramid levels
-        // created by averaging). Integer data stores raw counts needing conversion.
-        // For heterogeneous pyramids like Sentinel-2, lower-res float levels inherit
-        // scale_factor attributes but shouldn't have them re-applied.
-        const isFloatData =
-          dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
-
-        if (isFloatData) {
-          // Float data: assume already physical, use 1/0
-          scaleFactor = 1
-          addOffset = 0
-        } else {
-          // Integer data: apply scale_factor/add_offset if present
-          const attrs = meta.attributes
-          if (attrs?.scale_factor !== undefined) {
-            scaleFactor = attrs.scale_factor as number
-          }
-          if (attrs?.add_offset !== undefined) {
-            addOffset = attrs.add_offset as number
-          }
-        }
-      } else {
-        // Zarr v2 path
-        const zattrs = (await this._getJSON(`/${arrayKey}/.zattrs`).catch(
-          () => ({})
-        )) as { scale_factor?: number; add_offset?: number }
-        const zarray = (await this._getJSON(`/${arrayKey}/.zarray`)) as {
-          fill_value?: unknown
-          dtype?: string
-        }
-        fillValue = this.normalizeFillValue(zarray.fill_value)
-        dtype = zarray.dtype ?? null
-
-        // Same float logic as v3: float data is already physical, integer needs scaling
-        const isFloatData =
-          dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
-
-        if (isFloatData) {
-          scaleFactor = 1
-          addOffset = 0
-        } else {
-          // Only set if attributes actually exist - leave undefined for fallback
-          if (zattrs.scale_factor !== undefined) {
-            scaleFactor = zattrs.scale_factor
-          }
-          if (zattrs.add_offset !== undefined) {
-            addOffset = zattrs.add_offset
-          }
-        }
+    if (isFloatData) {
+      scaleFactor = 1
+      addOffset = 0
+    } else {
+      if (attrs?.scale_factor !== undefined) {
+        scaleFactor = attrs.scale_factor as number
       }
-    } catch (err) {
-      console.warn(
-        `[ZarrStore] Failed to load per-level metadata for ${arrayKey}:`,
-        err
-      )
+      if (attrs?.add_offset !== undefined) {
+        addOffset = attrs.add_offset as number
+      }
     }
 
     return {
@@ -690,66 +430,38 @@ export class ZarrStore {
     return handle
   }
 
-  private async _getJSON(path: string): Promise<unknown> {
-    if (!this.store) {
-      throw new Error('Zarr store accessed before initialization completed')
-    }
-    if (!path.startsWith('/')) {
-      throw new Error(`Expected absolute Zarr path. Received '${path}'.`)
-    }
-
-    const bytes = await this.store.get(path)
-    const parsed = decodeJSON(bytes)
-    if (parsed === null) {
-      throw new Error(`Missing metadata at path '${path}'.`)
-    }
-    return parsed
-  }
-
   private isConsolidatedStore(
     store: ZarrStoreType | null
-  ): store is ConsolidatedStore {
+  ): store is zarr.Listable<zarr.FetchStore> {
     return (
       store !== null &&
-      typeof (store as ConsolidatedStore).contents === 'function'
+      typeof (store as zarr.Listable<zarr.FetchStore>).contents === 'function'
     )
   }
 
-  private async _loadV2() {
-    const cacheKey = `v2:${this.source}`
-    // Bypass cache when transformRequest or customStore is provided
-    const bypassCache = this.transformRequest || this.customStore
-    let zmetadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(cacheKey) as
-          | ZarrV2ConsolidatedMetadata
-          | undefined)
-    if (!zmetadata) {
-      if (this.isConsolidatedStore(this.store)) {
-        const rootZattrsBytes = await this.store.get('/.zattrs')
-        const rootZattrs = rootZattrsBytes ? decodeJSON(rootZattrsBytes) : {}
-        zmetadata = { metadata: { '.zattrs': rootZattrs } }
-        if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
-      } else {
-        try {
-          zmetadata = (await this._getJSON(
-            '/.zmetadata'
-          )) as ZarrV2ConsolidatedMetadata
-          if (!bypassCache) ZarrStore._cache.set(cacheKey, zmetadata)
-        } catch {
-          const zattrs = await this._getJSON('/.zattrs')
-          zmetadata = { metadata: { '.zattrs': zattrs } }
-        }
-      }
-    }
+  /**
+   * Unified metadata loading using zarrita's built-in APIs.
+   * zarrita auto-detects Zarr v2/v3 format and provides parsed metadata
+   * via group.attrs and array.shape/chunks/dtype/fillValue/dimensionNames/attrs.
+   */
+  private async _loadMetadata(): Promise<void> {
+    if (!this.root) throw new Error('Zarr store not initialized')
 
-    this.metadata = { metadata: zmetadata.metadata }
+    const openFunc =
+      this.version === 2
+        ? zarr.open.v2
+        : this.version === 3
+        ? zarr.open.v3
+        : zarr.open
 
-    const rootAttrs = zmetadata.metadata['.zattrs'] as
-      | ZarrV2Attributes
-      | undefined
+    // Open root group to get multiscales metadata from attrs
+    const group = await openFunc(this.root, { kind: 'group' })
+    const rootAttrs = group.attrs as Record<string, unknown>
+
     if (rootAttrs?.multiscales) {
-      const pyramid = this._getPyramidMetadata(rootAttrs.multiscales)
+      const pyramid = this._getPyramidMetadata(
+        rootAttrs.multiscales as Multiscale[] | UntiledMultiscaleMetadata
+      )
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
       this.tileSize = pyramid.tileSize
@@ -758,129 +470,26 @@ export class ZarrStore {
       }
     }
 
+    // Open target array to get shape, chunks, dtype, fill_value, dimensions
     const basePath =
       this.levels.length > 0
         ? `${this.levels[0]}/${this.variable}`
         : this.variable
-    const v2Metadata = this.metadata as ZarrV2ConsolidatedMetadata
-    let zattrs = v2Metadata.metadata[`${basePath}/.zattrs`] as
-      | ZarrV2Attributes
-      | undefined
-    let zarray = v2Metadata.metadata[`${basePath}/.zarray`] as
-      | ZarrV2ArrayMetadata
-      | undefined
+    const array = await this._getArray(basePath)
+    const arrayAttrs = array.attrs as Record<string, unknown>
 
-    if (!zattrs || !zarray) {
-      ;[zattrs, zarray] = await Promise.all([
-        zattrs
-          ? Promise.resolve(zattrs)
-          : (this._getJSON(`/${basePath}/.zattrs`).catch(
-              () => ({})
-            ) as Promise<ZarrV2Attributes>),
-        zarray
-          ? Promise.resolve(zarray)
-          : (this._getJSON(
-              `/${basePath}/.zarray`
-            ) as Promise<ZarrV2ArrayMetadata>),
-      ])
-      v2Metadata.metadata[`${basePath}/.zattrs`] = zattrs
-      v2Metadata.metadata[`${basePath}/.zarray`] = zarray
-    }
-
-    this.dimensions = zattrs?._ARRAY_DIMENSIONS || []
-    this.shape = zarray?.shape || []
-    this.chunks = zarray?.chunks || []
-    this.fill_value = this.normalizeFillValue(zarray?.fill_value ?? null)
-    this.dtype = zarray?.dtype || null
-    this.scaleFactor = zattrs?.scale_factor ?? 1
-    this.addOffset = zattrs?.add_offset ?? 0
-
-    await this._computeDimIndices()
-  }
-
-  private async _loadV3() {
-    const metadataCacheKey = `v3:${this.source}`
-    // Bypass cache when transformRequest or customStore is provided
-    const bypassCache = this.transformRequest || this.customStore
-    let metadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(metadataCacheKey) as
-          | ZarrV3GroupMetadata
-          | undefined)
-    if (!metadata) {
-      metadata = (await this._getJSON('/zarr.json')) as ZarrV3GroupMetadata
-      if (!bypassCache) {
-        ZarrStore._cache.set(metadataCacheKey, metadata)
-
-        if (metadata.consolidated_metadata?.metadata) {
-          for (const [key, arrayMeta] of Object.entries(
-            metadata.consolidated_metadata.metadata
-          )) {
-            const arrayCacheKey = `v3:${this.source}/${key}`
-            ZarrStore._cache.set(arrayCacheKey, arrayMeta)
-          }
-        }
-      }
-    }
-    this.metadata = metadata
-    this.version = 3
-
-    if (metadata.attributes?.multiscales) {
-      const pyramid = this._getPyramidMetadata(metadata.attributes.multiscales)
-      this.levels = pyramid.levels
-      this.maxLevelIndex = pyramid.maxLevelIndex
-      this.tileSize = pyramid.tileSize
-      if (!this._crsOverride) {
-        this.crs = pyramid.crs
-      }
-    }
-
-    const arrayKey =
-      this.levels.length > 0
-        ? `${this.levels[0]}/${this.variable}`
-        : this.variable
-    const arrayCacheKey = `v3:${this.source}/${arrayKey}`
-    let arrayMetadata = bypassCache
-      ? undefined
-      : (ZarrStore._cache.get(arrayCacheKey) as ZarrV3ArrayMetadata | undefined)
-    if (!arrayMetadata) {
-      arrayMetadata = (await this._getJSON(
-        `/${arrayKey}/zarr.json`
-      )) as ZarrV3ArrayMetadata
-      if (!bypassCache) ZarrStore._cache.set(arrayCacheKey, arrayMetadata)
-    }
-    this.arrayMetadata = arrayMetadata
-
-    const attrs = arrayMetadata.attributes as
-      | Record<string, unknown>
-      | undefined
-    // Legacy v3 support: attributes._ARRAY_DIMENSIONS.
-    const legacyDims =
-      Array.isArray(attrs?._ARRAY_DIMENSIONS) && attrs?._ARRAY_DIMENSIONS
-
-    this.dimensions = arrayMetadata.dimension_names || legacyDims || []
-    this.shape = arrayMetadata.shape
-
-    const isSharded = arrayMetadata.codecs?.[0]?.name === 'sharding_indexed'
-    const shardedChunkShape =
-      isSharded && arrayMetadata.codecs?.[0]?.configuration
-        ? (arrayMetadata.codecs[0].configuration as { chunk_shape?: number[] })
-            .chunk_shape
-        : undefined
-    const gridChunkShape = arrayMetadata.chunk_grid?.configuration?.chunk_shape
-    // Some pre-spec pyramids used top-level chunks; keep as a fallback.
-    const legacyChunks = Array.isArray(arrayMetadata.chunks)
-      ? arrayMetadata.chunks
-      : undefined
-    this.chunks =
-      shardedChunkShape || gridChunkShape || legacyChunks || this.shape
-
-    this.fill_value = this.normalizeFillValue(arrayMetadata.fill_value)
-    this.dtype = arrayMetadata.data_type || null
+    // dimensionNames is native in v3; for v2 zarrita reads _ARRAY_DIMENSIONS
+    this.dimensions =
+      array.dimensionNames || (arrayAttrs?._ARRAY_DIMENSIONS as string[]) || []
+    this.shape = array.shape
+    // zarrita's array.chunks already handles sharding (inner chunk shape)
+    this.chunks = array.chunks
+    this.fill_value = this.normalizeFillValue(array.fillValue)
+    this.dtype = (array.dtype as string) || null
     this.scaleFactor =
-      typeof attrs?.scale_factor === 'number' ? attrs.scale_factor : 1
+      typeof arrayAttrs?.scale_factor === 'number' ? arrayAttrs.scale_factor : 1
     this.addOffset =
-      typeof attrs?.add_offset === 'number' ? attrs.add_offset : 0
+      typeof arrayAttrs?.add_offset === 'number' ? arrayAttrs.add_offset : 0
 
     await this._computeDimIndices()
   }
@@ -937,66 +546,22 @@ export class ZarrStore {
   }
 
   /**
-   * Find the highest resolution level using consolidated metadata (no network requests).
-   * Falls back to network requests only if metadata doesn't have shape info.
+   * Find the highest resolution level by comparing array shapes.
+   * On consolidated stores, zarr.open serves metadata from cache (no network).
    * Users can provide explicit `bounds` to skip this detection entirely.
    */
   private async _findBoundsLevel(): Promise<string | undefined> {
     if (this.levels.length === 0 || !this.root) return undefined
     if (this.levels.length === 1) return this.levels[0]
 
-    // Try to get shapes from consolidated metadata first (no network requests)
-    const getShapeFromMetadata = (level: string): number[] | null => {
-      const key = `${level}/${this.variable}`
-
-      // V2 metadata
-      const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
-      if (v2Meta?.metadata?.[`${key}/.zarray`]) {
-        const arrayMeta = v2Meta.metadata[`${key}/.zarray`] as {
-          shape?: number[]
-        }
-        return arrayMeta.shape ?? null
-      }
-
-      // V3 metadata
-      const v3Meta = this.metadata as ZarrV3GroupMetadata
-      if (v3Meta?.consolidated_metadata?.metadata?.[key]) {
-        const arrayMeta = v3Meta.consolidated_metadata.metadata[key] as {
-          shape?: number[]
-        }
-        return arrayMeta.shape ?? null
-      }
-
-      return null
-    }
-
     const firstLevel = this.levels[0]
     const lastLevel = this.levels[this.levels.length - 1]
 
-    // Try metadata first
-    const firstShape = getShapeFromMetadata(firstLevel)
-    const lastShape = getShapeFromMetadata(lastLevel)
-
-    if (firstShape && lastShape) {
-      const firstSize = firstShape.reduce((a, b) => a * b, 1)
-      const lastSize = lastShape.reduce((a, b) => a * b, 1)
-      return firstSize >= lastSize ? firstLevel : lastLevel
-    }
-
-    // Fallback: network requests if metadata doesn't have shapes
-    const openArray = (loc: zarr.Location<Readable>) => {
-      if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
-      if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
-      return zarr.open(loc, { kind: 'array' })
-    }
-
     try {
-      const firstArray = await openArray(
-        this.root.resolve(`${firstLevel}/${this.variable}`)
-      )
-      const lastArray = await openArray(
-        this.root.resolve(`${lastLevel}/${this.variable}`)
-      )
+      const [firstArray, lastArray] = await Promise.all([
+        this._getArray(`${firstLevel}/${this.variable}`),
+        this._getArray(`${lastLevel}/${this.variable}`),
+      ])
 
       const firstSize = firstArray.shape.reduce((a, b) => a * b, 1)
       const lastSize = lastArray.shape.reduce((a, b) => a * b, 1)
@@ -1042,103 +607,74 @@ export class ZarrStore {
 
     try {
       const boundsLevel = await this._findBoundsLevel()
-      const levelRoot = boundsLevel ? this.root.resolve(boundsLevel) : this.root
-
-      const openArray = (loc: zarr.Location<Readable>) => {
-        if (this.version === 2) return zarr.open.v2(loc, { kind: 'array' })
-        if (this.version === 3) return zarr.open.v3(loc, { kind: 'array' })
-        return zarr.open(loc, { kind: 'array' })
-      }
 
       const lonName = this.spatialDimensions.lon ?? this.dimIndices.lon.name
       const latName = this.spatialDimensions.lat ?? this.dimIndices.lat.name
 
-      // Find the HIGHEST RESOLUTION coordinate array path from consolidated metadata.
-      // This ensures we get the most accurate bounds regardless of level naming conventions.
-      const findCoordPath = (dimName: string): string | null => {
-        if (!this.metadata) return null
+      // Find the best coordinate array path from consolidated store listings.
+      // On consolidated stores, uses store.contents() to enumerate all arrays;
+      // on non-consolidated stores, returns null (triggers default fallback).
+      const findCoordPath = async (dimName: string): Promise<string | null> => {
+        const store = this.store
+        if (!this.isConsolidatedStore(store)) return null
 
-        type CoordCandidate = { path: string; size: number }
-        const candidates: CoordCandidate[] = []
+        const entries = store.contents()
+        // Find all array entries whose path ends with the dimension name
+        const matchingPaths = entries
+          .filter(
+            (e) =>
+              e.kind === 'array' &&
+              (e.path === `/${dimName}` || e.path.endsWith(`/${dimName}`))
+          )
+          .map((e) => e.path.slice(1)) // Remove leading '/'
 
-        // V2: keys are like "lat/.zarray" or "surface/lat/.zarray"
-        const v2Meta = this.metadata as ZarrV2ConsolidatedMetadata
-        if (v2Meta.metadata) {
-          const suffix = `/${dimName}/.zarray`
-          const rootKey = `${dimName}/.zarray`
-          for (const key of Object.keys(v2Meta.metadata)) {
-            if (key === rootKey || key.endsWith(suffix)) {
-              const meta = v2Meta.metadata[key] as { shape?: number[] }
-              const size = meta.shape?.[0] ?? 0
-              candidates.push({
-                path: key.slice(0, -'/.zarray'.length),
-                size,
-              })
+        if (matchingPaths.length === 0) return null
+        if (matchingPaths.length === 1) return matchingPaths[0]
+
+        // Multiple matches: open each to find highest resolution (largest shape[0])
+        const withSizes = await Promise.all(
+          matchingPaths.map(async (path) => {
+            try {
+              const arr = await this._getArray(path)
+              return { path, size: arr.shape[0] }
+            } catch {
+              return { path, size: 0 }
             }
-          }
-        }
+          })
+        )
 
-        // V3: keys are like "lat" or "surface/lat" with node_type: 'array'
-        const v3Meta = this.metadata as ZarrV3GroupMetadata
-        if (v3Meta.consolidated_metadata?.metadata) {
-          const suffix = `/${dimName}`
-          for (const [key, value] of Object.entries(
-            v3Meta.consolidated_metadata.metadata
-          )) {
-            if (
-              (key === dimName || key.endsWith(suffix)) &&
-              value.node_type === 'array'
-            ) {
-              const size = (value as { shape?: number[] }).shape?.[0] ?? 0
-              candidates.push({ path: key, size })
-            }
-          }
-        }
-
-        // Return the highest resolution (largest size) coordinate array
-        if (candidates.length === 0) return null
-
-        const pickLargest = (list: CoordCandidate[]) => {
-          if (list.length === 0) return null
-          const sorted = [...list].sort((a, b) => b.size - a.size)
-          return sorted[0].path
-        }
-
-        // Prefer coord arrays within the bounds level to avoid cross-variable grids.
-        // Fallback to root-level coords, then the global maximum.
+        // Prefer coord arrays within the bounds level, then root-level, then largest
         if (boundsLevel) {
           const levelPrefix = `${boundsLevel}/`
-          const levelCandidates = candidates.filter((c) =>
-            c.path.startsWith(levelPrefix)
-          )
-          const levelPick = pickLargest(levelCandidates)
-          if (levelPick) return levelPick
+          const levelPick = withSizes
+            .filter((c) => c.path.startsWith(levelPrefix))
+            .sort((a, b) => b.size - a.size)[0]
+          if (levelPick) return levelPick.path
 
-          const rootCandidates = candidates.filter((c) => !c.path.includes('/'))
-          const rootPick = pickLargest(rootCandidates)
-          if (rootPick) return rootPick
+          const rootPick = withSizes
+            .filter((c) => !c.path.includes('/'))
+            .sort((a, b) => b.size - a.size)[0]
+          if (rootPick) return rootPick.path
         } else if (this.variable) {
-          const varCandidates = candidates.filter((c) =>
-            c.path.startsWith(`${this.variable}/`)
-          )
-          const varPick = pickLargest(varCandidates)
-          if (varPick) return varPick
+          const varPick = withSizes
+            .filter((c) => c.path.startsWith(`${this.variable}/`))
+            .sort((a, b) => b.size - a.size)[0]
+          if (varPick) return varPick.path
         }
 
-        return pickLargest(candidates)
+        return withSizes.sort((a, b) => b.size - a.size)[0]?.path ?? null
       }
 
-      // Find highest resolution coordinate arrays from metadata (handles all multiscale conventions)
-      const xPath = findCoordPath(lonName)
-      const yPath = findCoordPath(latName)
+      // Find highest resolution coordinate arrays from store listings
+      const [xPath, yPath] = await Promise.all([
+        findCoordPath(lonName),
+        findCoordPath(latName),
+      ])
 
-      // Open coord arrays: use metadata path if found, otherwise try levelRoot
-      const xarr = await openArray(
-        xPath ? this.root!.resolve(xPath) : levelRoot.resolve(lonName)
-      )
-      const yarr = await openArray(
-        yPath ? this.root!.resolve(yPath) : levelRoot.resolve(latName)
-      )
+      // Open coord arrays: use metadata path if found, otherwise try level/dimName
+      const defaultPrefix = boundsLevel ? `${boundsLevel}/` : ''
+      const xarr = await this._getArray(xPath ?? `${defaultPrefix}${lonName}`)
+      const yarr = await this._getArray(yPath ?? `${defaultPrefix}${latName}`)
 
       const xLen = xarr.shape[0]
       const yLen = yarr.shape[0]
@@ -1317,73 +853,11 @@ export class ZarrStore {
         return { levels, maxLevelIndex, tileSize, crs }
       } else {
         // Multi-level but not tiled - use UntiledMode
-        // Try to extract shapes from consolidated metadata to avoid per-level fetches
-        const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
-          ?.consolidated_metadata?.metadata
-
-        this.untiledLevels = levels.map((level) => {
-          const untiledLevel: UntiledLevel = {
-            asset: level,
-            scale: [1.0, 1.0] as [number, number],
-            translation: [0.0, 0.0] as [number, number],
-          }
-
-          // Extract shape/chunks/dtype/fillValue/scaleFactor/addOffset from consolidated metadata
-          if (consolidatedMeta) {
-            const arrayKey = `${level}/${this.variable}`
-            const arrayMeta = consolidatedMeta[arrayKey] as
-              | ZarrV3ArrayMetadata
-              | undefined
-            if (arrayMeta?.shape) {
-              untiledLevel.shape = arrayMeta.shape
-              // Extract chunks from chunk_grid or sharding codec
-              const gridChunks =
-                arrayMeta.chunk_grid?.configuration?.chunk_shape
-              const shardChunks = arrayMeta.codecs?.find(
-                (c) => c.name === 'sharding_indexed'
-              )?.configuration?.chunk_shape as number[] | undefined
-              untiledLevel.chunks = shardChunks || gridChunks || arrayMeta.shape
-
-              // Extract dtype and fillValue
-              if (arrayMeta.data_type) {
-                untiledLevel.dtype = arrayMeta.data_type
-              }
-              if (arrayMeta.fill_value !== undefined) {
-                untiledLevel.fillValue = this.normalizeFillValue(
-                  arrayMeta.fill_value
-                )
-              }
-
-              // Float data typically stores already-physical values (e.g., pyramid levels
-              // created by averaging). Integer data stores raw counts needing conversion.
-              // For heterogeneous pyramids like Sentinel-2, lower-res float levels inherit
-              // scale_factor attributes but shouldn't have them re-applied.
-              const isFloatData =
-                arrayMeta.data_type?.includes('float') ||
-                arrayMeta.data_type === 'float32' ||
-                arrayMeta.data_type === 'float64'
-
-              if (isFloatData) {
-                // Float data: assume already physical, use 1/0
-                untiledLevel.scaleFactor = 1
-                untiledLevel.addOffset = 0
-              } else if (arrayMeta.attributes) {
-                // Integer data: apply scale_factor/add_offset if present
-                if (arrayMeta.attributes.scale_factor !== undefined) {
-                  untiledLevel.scaleFactor = arrayMeta.attributes
-                    .scale_factor as number
-                }
-                if (arrayMeta.attributes.add_offset !== undefined) {
-                  untiledLevel.addOffset = arrayMeta.attributes
-                    .add_offset as number
-                }
-              }
-              // If non-float without attributes, leave undefined for dataset-level fallback
-            }
-          }
-
-          return untiledLevel
-        })
+        this.untiledLevels = levels.map((level) => ({
+          asset: level,
+          scale: [1.0, 1.0] as [number, number],
+          translation: [0.0, 0.0] as [number, number],
+        }))
         this.multiscaleType = 'untiled'
         return { levels, maxLevelIndex, tileSize: 128, crs }
       }
@@ -1437,37 +911,12 @@ export class ZarrStore {
     const levels = layout.map((entry) => entry.asset)
     const maxLevelIndex = levels.length - 1
 
-    // Try to extract shapes from consolidated metadata to avoid per-level fetches
-    const consolidatedMeta = (this.metadata as ZarrV3GroupMetadata)
-      ?.consolidated_metadata?.metadata
-
-    // Build untiledLevels with transform info and shapes from consolidated metadata
-    this.untiledLevels = layout.map((entry) => {
-      const level: UntiledLevel = {
-        asset: entry.asset,
-        scale: entry.transform?.scale ?? [1.0, 1.0],
-        translation: entry.transform?.translation ?? [0.0, 0.0],
-      }
-
-      // Extract shape/chunks from consolidated metadata if available
-      if (consolidatedMeta) {
-        const arrayKey = `${entry.asset}/${this.variable}`
-        const arrayMeta = consolidatedMeta[arrayKey] as
-          | ZarrV3ArrayMetadata
-          | undefined
-        if (arrayMeta?.shape) {
-          level.shape = arrayMeta.shape
-          // Extract chunks from chunk_grid or sharding codec
-          const gridChunks = arrayMeta.chunk_grid?.configuration?.chunk_shape
-          const shardChunks = arrayMeta.codecs?.find(
-            (c) => c.name === 'sharding_indexed'
-          )?.configuration?.chunk_shape as number[] | undefined
-          level.chunks = shardChunks || gridChunks || arrayMeta.shape
-        }
-      }
-
-      return level
-    })
+    // Build untiledLevels with transform info (shapes loaded lazily via getUntiledLevelMetadata)
+    this.untiledLevels = layout.map((entry) => ({
+      asset: entry.asset,
+      scale: entry.transform?.scale ?? [1.0, 1.0],
+      translation: entry.transform?.translation ?? [0.0, 0.0],
+    }))
 
     this.multiscaleType = 'untiled'
 
@@ -1487,7 +936,6 @@ export class ZarrStore {
   }
 
   static clearCache() {
-    ZarrStore._cache.clear()
     ZarrStore._storeCache.clear()
   }
 }
