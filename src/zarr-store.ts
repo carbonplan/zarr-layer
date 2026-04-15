@@ -430,12 +430,12 @@ export class ZarrStore {
     return handle
   }
 
-  private isConsolidatedStore(
-    store: ZarrStoreType | null
-  ): store is zarr.Listable<zarr.FetchStore> {
+  private isConsolidatedStore(store: ZarrStoreType | null): store is {
+    contents(): { path: `/${string}`; kind: 'array' | 'group' }[]
+  } {
     return (
       store !== null &&
-      typeof (store as zarr.Listable<zarr.FetchStore>).contents === 'function'
+      typeof (store as { contents?: unknown }).contents === 'function'
     )
   }
 
