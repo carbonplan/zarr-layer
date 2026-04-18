@@ -256,18 +256,18 @@ export class ZarrStore {
 
       if (!storePromise) {
         const baseStore = createFetchStore(this.source, this.transformRequest)
-        storePromise = (async (): Promise<ZarrStoreType> => {
-          let s: ZarrStoreType = baseStore
-          if (this.version !== 3) {
-            s = await zarr
-              .withMaybeConsolidatedMetadata(baseStore)
-              .catch(() => baseStore)
-          }
-          // Range coalescing: groups concurrent HTTP range requests into fewer
-          // round-trips, reducing latency when fetching many tiles in parallel.
-          s = zarr.withRangeCoalescing(s)
-          return s
-        })()
+        // Range coalescing groups concurrent HTTP range requests into fewer
+        // round-trips, reducing latency when fetching many tiles in parallel.
+        // v3 consolidated metadata support is experimental; skip wrapping for
+        // v3-only stores to preserve prior behavior.
+        storePromise = zarr.extendStore(
+          baseStore,
+          (store) =>
+            this.version === 3
+              ? store
+              : zarr.withMaybeConsolidatedMetadata(store).catch(() => store),
+          (store) => zarr.withRangeCoalescing(store)
+        ) as Promise<ZarrStoreType>
         if (!bypassCache) {
           ZarrStore._storeCache.set(storeCacheKey, storePromise)
         }
