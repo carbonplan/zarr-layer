@@ -256,16 +256,25 @@ export class ZarrStore {
 
       if (!storePromise) {
         const baseStore = createFetchStore(this.source, this.transformRequest)
+        // When the version is known, tell the consolidated-metadata wrapper
+        // to only try that format — avoids a wasted .zmetadata fetch on v3
+        // stores (and vice versa). Falls back to auto-detect when unknown.
+        // v3 consolidated metadata support is experimental; the outer
+        // `.catch` keeps us on the raw store if the wrapper trips.
+        const consolidatedOpts: zarr.ConsolidatedMetadataOptions | undefined =
+          this.version === 2
+            ? { format: 'v2' }
+            : this.version === 3
+            ? { format: 'v3' }
+            : undefined
         // Range coalescing groups concurrent HTTP range requests into fewer
         // round-trips, reducing latency when fetching many tiles in parallel.
-        // v3 consolidated metadata support is experimental; skip wrapping for
-        // v3-only stores to preserve prior behavior.
         storePromise = zarr.extendStore(
           baseStore,
           (store) =>
-            this.version === 3
-              ? store
-              : zarr.withMaybeConsolidatedMetadata(store).catch(() => store),
+            zarr
+              .withMaybeConsolidatedMetadata(store, consolidatedOpts)
+              .catch(() => store),
           (store) => zarr.withRangeCoalescing(store)
         ) as Promise<ZarrStoreType>
         if (!bypassCache) {
