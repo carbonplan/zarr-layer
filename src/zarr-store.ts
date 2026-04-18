@@ -103,10 +103,9 @@ const createFetchStore = (
   }
   return new zarr.FetchStore(url, {
     async fetch(request: Request): Promise<Response> {
-      const method = request.method as 'GET' | 'HEAD'
       const { url: transformedUrl, ...overrides } = await transformRequest(
         request.url,
-        { method }
+        { method: request.method as 'GET' | 'HEAD' }
       )
       const mergedHeaders = new Headers(request.headers)
       if (overrides.headers) {
@@ -116,10 +115,12 @@ const createFetchStore = (
           mergedHeaders.set(k, v)
         }
       }
+      // Use `request` as the base init so signal/body/credentials/etc. carry
+      // over (Request's own properties aren't spread-friendly), then overlay
+      // transformRequest overrides with merged headers last.
       const response = await fetch(
-        new Request(transformedUrl, {
+        new Request(new Request(transformedUrl, request), {
           ...overrides,
-          method: request.method,
           headers: mergedHeaders,
         })
       )
