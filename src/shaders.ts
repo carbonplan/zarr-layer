@@ -198,7 +198,7 @@ const PROJECT_MAPLIBRE_ECEF = `
 export type VertexShaderInputSpace = 'mercator' | 'wgs84' | 'wgs84-direct'
 export type VertexShaderProjection = 'maplibre' | 'mapbox'
 
-export interface VertexShaderOptions {
+interface VertexShaderOptions {
   inputSpace: VertexShaderInputSpace
   projection: VertexShaderProjection
   shaderData?: ShaderData

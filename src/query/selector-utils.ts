@@ -5,84 +5,8 @@
  * Follows patterns from carbonplan/maps.
  */
 
-import type { Selector, SelectorSpec } from '../types'
+import type { Selector } from '../types'
 import type { PointValueEntry, QueryDataValues } from './types'
-
-/**
- * Checks if a selector contains any array values.
- * Array values mean results should be nested.
- */
-export function hasArraySelector(selector: Selector): boolean {
-  for (const key of Object.keys(selector)) {
-    const value = selector[key]
-    if (Array.isArray(value)) return true
-    if (
-      typeof value === 'object' &&
-      value !== null &&
-      'selected' in value &&
-      Array.isArray((value as SelectorSpec).selected)
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-/**
- * Normalizes a selector value to an array of indices or values.
- */
-export function normalizeSelectorValue(
-  value: number | number[] | string | string[] | SelectorSpec | undefined,
-  coordinates?: (string | number)[]
-): (number | string)[] {
-  if (value === undefined) return []
-
-  // Handle SelectorSpec format
-  if (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    'selected' in value
-  ) {
-    const selected = (value as SelectorSpec).selected
-    const type = (value as SelectorSpec).type
-    const values = Array.isArray(selected) ? selected : [selected]
-
-    if (type === 'index') {
-      return values as (number | string)[]
-    }
-    // Value-based lookup
-    if (coordinates) {
-      return values.map((v) => {
-        const idx = coordinates.indexOf(v as string | number)
-        return idx >= 0 ? idx : (v as number | string)
-      })
-    }
-    return values as (number | string)[]
-  }
-
-  // Handle simple array or single value
-  if (Array.isArray(value)) {
-    return value
-  }
-
-  return [value]
-}
-
-/**
- * Gets the index for a selector value in coordinates.
- */
-export function getSelectorIndex(
-  value: number | string,
-  coordinates: (string | number)[]
-): number {
-  if (typeof value === 'number' && !coordinates.includes(value)) {
-    // Assume it's already an index
-    return value
-  }
-  const idx = coordinates.indexOf(value)
-  return idx >= 0 ? idx : 0
-}
 
 /**
  * Gets point values for all selector dimension combinations.

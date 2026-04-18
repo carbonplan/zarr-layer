@@ -37,7 +37,7 @@ const resolveOpenFunc = (zarrVersion: 2 | 3 | null): typeof zarr.open => {
  * sanitizeGlslName('123abc') // returns '_123abc'
  * sanitizeGlslName('band-1') // returns 'band_1'
  */
-export function sanitizeGlslName(name: string): string {
+function sanitizeGlslName(name: string): string {
   // Replace any non-alphanumeric character (except underscore) with underscore
   let sanitized = name.replace(/[^a-zA-Z0-9_]/g, '_')
 

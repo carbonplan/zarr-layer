@@ -54,7 +54,7 @@ export function createTransformer(
 /**
  * A transformer for converting coordinates between source CRS and EPSG:4326 (WGS84).
  */
-export interface Wgs84Transformer {
+interface Wgs84Transformer {
   /** Transform from source CRS to EPSG:4326 [lon, lat] */
   forward: (x: number, y: number) => [number, number]
   /** Transform from EPSG:4326 to source CRS [x, y] */

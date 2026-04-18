@@ -12,8 +12,6 @@ import {
   lonToMercatorNorm,
   mercatorNormToLat,
   mercatorNormToLon,
-  lonToTile,
-  latToTileMercator,
   type TileTuple,
   type XYLimits,
   type MercatorBounds,
@@ -126,7 +124,7 @@ export function pixelToLatLon(
 /**
  * Converts latitude to tile Y coordinate at a given zoom level (Equirectangular/EPSG:4326).
  */
-export function latToTileEquirect(
+function latToTileEquirect(
   lat: number,
   zoom: number,
   xyLimits: XYLimits
@@ -141,7 +139,7 @@ export function latToTileEquirect(
 /**
  * Converts longitude to tile X coordinate at a given zoom level (Equirectangular/EPSG:4326).
  */
-export function lonToTileEquirect(
+function lonToTileEquirect(
   lon: number,
   zoom: number,
   xyLimits: XYLimits
@@ -154,30 +152,10 @@ export function lonToTileEquirect(
 }
 
 /**
- * Gets the tile coordinates for a geographic point.
- */
-export function geoToTile(
-  lng: number,
-  lat: number,
-  zoom: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): TileTuple {
-  if (crs === 'EPSG:4326') {
-    return [
-      zoom,
-      lonToTileEquirect(lng, zoom, xyLimits),
-      latToTileEquirect(lat, zoom, xyLimits),
-    ]
-  }
-  return [zoom, lonToTile(lng, zoom), latToTileMercator(lat, zoom)]
-}
-
-/**
  * Computes fractional position within a tile for a geographic point.
  * Returns values in [0, 1] representing position within the tile.
  */
-export function geoToTileFraction(
+function geoToTileFraction(
   lng: number,
   lat: number,
   tile: TileTuple,
@@ -246,7 +224,7 @@ export function tilePixelToLatLon(
 /**
  * Computes bounding box from GeoJSON geometry.
  */
-export function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
+function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
   let west = Infinity
   let east = -Infinity
   let south = Infinity
@@ -1037,7 +1015,7 @@ function canonicalizeLonRange(rings: number[][][]): number[][][] {
  *
  * Output rings are always closed.
  */
-export function normalizePolygonRings(rings: number[][][]): number[][][] {
+function normalizePolygonRings(rings: number[][][]): number[][][] {
   if (rings.length === 0) return rings
 
   // Check if any vertex in any ring is outside [-180, 180] (explicit crossing)
@@ -1107,7 +1085,7 @@ function normalizeRingLongitudes(ring: number[][]): number[][] {
  * Input rings must already be processed by normalizePolygonRings.
  * Uses wrap-normalization (not clamping) for crossings.
  */
-export function computeWrappedBboxFromNormalized(
+function computeWrappedBboxFromNormalized(
   normalizedRings: number[][][]
 ): WrappedBoundingBox {
   let rawMin = Infinity
@@ -1156,7 +1134,7 @@ export function computeWrappedBboxFromNormalized(
  *
  * Returns a closed ring (possibly empty or degenerate).
  */
-export function clipRingToHalfPlane(
+function clipRingToHalfPlane(
   ring: number[][],
   clipLon: number,
   keepBelow: boolean
@@ -1212,9 +1190,10 @@ export function clipRingToHalfPlane(
  * Returns west (lon <= 180) and east (lon > 180, shifted -360) ring sets.
  * Degenerate rings (< 3 unique vertices) are dropped.
  */
-export function clipNormalizedPolygonAtAntimeridian(
-  normalizedRings: number[][][]
-): { west: number[][][]; east: number[][][] } {
+function clipNormalizedPolygonAtAntimeridian(normalizedRings: number[][][]): {
+  west: number[][][]
+  east: number[][][]
+} {
   // Check if any vertex lon > 180; if not, no crossing
   let crosses = false
   for (const ring of normalizedRings) {
@@ -1251,9 +1230,7 @@ export function clipNormalizedPolygonAtAntimeridian(
  * then shifts each member by a single ±360 offset (preserving internal continuity).
  * Applies eastward canonicalization if the shared range extends below -180.
  */
-export function alignMultiPolygonMembers(
-  members: number[][][][]
-): number[][][][] {
+function alignMultiPolygonMembers(members: number[][][][]): number[][][][] {
   if (members.length <= 1) return members
 
   // Collect all outer ring lons, wrap-normalized to [-180, 180]
@@ -1477,27 +1454,4 @@ export function wrappedBboxToPixelSpans(
   if (eastStrip) result.east = eastStrip
 
   return result
-}
-
-/**
- * Check if a geometry contains explicit out-of-range coordinates (|lon| > 180).
- *
- * This does NOT determine whether the geometry actually crosses the antimeridian —
- * coords like [200, 210] are out-of-range but canonicalize to a non-crossing
- * [-160, -150]. Use preprocessQueryGeometry().bbox.crossesAntimeridian for that.
- */
-export function hasOutOfRangeCoordinates(geometry: QueryGeometry): boolean {
-  if (geometry.type === 'Point') {
-    const [lon] = geometry.coordinates
-    return lon > 180 || lon < -180
-  }
-
-  const checkRing = (ring: number[][]): boolean =>
-    ring.some(([lon]) => lon > 180 || lon < -180)
-
-  if (geometry.type === 'Polygon') {
-    return geometry.coordinates.some(checkRing)
-  }
-
-  return geometry.coordinates.some((poly) => poly.some(checkRing))
 }

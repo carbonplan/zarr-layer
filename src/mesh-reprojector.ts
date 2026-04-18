@@ -46,14 +46,14 @@ interface ReprojectorConfig {
   transformer: ProjectionTransformer
 }
 
-export interface AdaptiveMeshResult {
+interface AdaptiveMeshResult {
   positions: Float32Array // Normalized 4326 coords [-1,1] for shader
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
   wgs84Bounds: Wgs84Bounds
 }
 
-export interface HybridMeshOptions {
+interface HybridMeshOptions {
   geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
   width: number
   height: number

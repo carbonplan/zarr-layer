@@ -96,29 +96,6 @@ export function createRequestCanceller(): RequestCanceller {
 }
 
 /**
- * Get a new AbortController for a new request, incrementing the version.
- */
-export function getNewController(canceller: RequestCanceller): {
-  controller: AbortController
-  version: number
-} {
-  const version = ++canceller.currentVersion
-  const controller = new AbortController()
-  canceller.controllers.set(version, controller)
-  return { controller, version }
-}
-
-/**
- * Remove a controller from tracking (typically after request completes).
- */
-export function removeController(
-  canceller: RequestCanceller,
-  version: number
-): void {
-  canceller.controllers.delete(version)
-}
-
-/**
  * Cancel all requests older than the completed version.
  */
 export function cancelOlderRequests(
@@ -189,20 +166,4 @@ export function emitLoadingState(manager: LoadingManager): void {
     error: null,
   }
   manager.callback(state)
-}
-
-export function setMetadataLoading(
-  manager: LoadingManager,
-  loading: boolean
-): void {
-  manager.metadataLoading = loading
-  emitLoadingState(manager)
-}
-
-export function setChunksLoading(
-  manager: LoadingManager,
-  loading: boolean
-): void {
-  manager.chunksLoading = loading
-  emitLoadingState(manager)
 }

@@ -35,7 +35,7 @@ export function setupBandTextureUniforms(
 }
 
 /** Options for band texture binding */
-export interface BindBandTexturesOptions {
+interface BindBandTexturesOptions {
   /** Band data arrays by name */
   bandData: Map<string, Float32Array>
   /** Band textures by name */
@@ -157,7 +157,7 @@ export function bindGeometryBuffers(
 }
 
 /** Options for uploading a data texture */
-export interface UploadTextureOptions {
+interface UploadTextureOptions {
   texture: WebGLTexture
   data: Float32Array
   width: number
@@ -167,7 +167,7 @@ export interface UploadTextureOptions {
 }
 
 /** Result of texture upload with updated state */
-export interface UploadTextureResult {
+interface UploadTextureResult {
   configured: boolean
   uploaded: boolean
 }

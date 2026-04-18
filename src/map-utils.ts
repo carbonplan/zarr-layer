@@ -14,7 +14,7 @@ import type { MapLike } from './types'
 
 export type TileTuple = [number, number, number]
 
-export interface NormalizedExtent {
+interface NormalizedExtent {
   xMin: number
   xMax: number
   yMin: number
@@ -76,14 +76,14 @@ export interface Wgs84Bounds {
 /**
  * Converts longitude to tile X coordinate at a given zoom level.
  */
-export function lonToTile(lon: number, zoom: number): number {
+function lonToTile(lon: number, zoom: number): number {
   return Math.floor(lonToMercatorNorm(lon) * Math.pow(2, zoom))
 }
 
 /**
  * Converts latitude to tile Y coordinate at a given zoom level (Mercator).
  */
-export function latToTileMercator(lat: number, zoom: number): number {
+function latToTileMercator(lat: number, zoom: number): number {
   const clamped = Math.max(
     -MERCATOR_LAT_LIMIT,
     Math.min(MERCATOR_LAT_LIMIT, lat)
@@ -207,14 +207,6 @@ export function tileToKey(tile: TileTuple): string {
 }
 
 /**
- * Parses a tile key back into a TileTuple [z, x, y].
- */
-export function keyToTile(key: string): TileTuple {
-  const parts = key.split(',').map(Number)
-  return [parts[0], parts[1], parts[2]] as TileTuple
-}
-
-/**
  * Computes scale and shift parameters for positioning a tile in mercator coordinates.
  * Used in vertex shader to position tiles correctly on the map.
  *
@@ -320,30 +312,11 @@ export function mercatorNormToLon(mercX: number): number {
   return mercX * 360 - 180
 }
 
-export interface GeoBounds {
+interface GeoBounds {
   west: number
   east: number
   south: number
   north: number
-}
-
-export function mercatorTileToGeoBounds(
-  z: number,
-  x: number,
-  y: number
-): GeoBounds {
-  const tilesPerSide = Math.pow(2, z)
-  const mercX0 = x / tilesPerSide
-  const mercX1 = (x + 1) / tilesPerSide
-  const mercY0 = y / tilesPerSide
-  const mercY1 = (y + 1) / tilesPerSide
-
-  return {
-    west: mercatorNormToLon(mercX0),
-    east: mercatorNormToLon(mercX1),
-    north: mercatorNormToLat(mercY0),
-    south: mercatorNormToLat(mercY1),
-  }
 }
 
 export interface XYLimits {
@@ -351,38 +324,6 @@ export interface XYLimits {
   xMax: number
   yMin: number
   yMax: number
-}
-
-export function getOverlapping4326Tiles(
-  geoBounds: GeoBounds,
-  xyLimits: XYLimits,
-  pyramidLevel: number
-): TileTuple[] {
-  const tilesPerSide = Math.pow(2, pyramidLevel)
-  const { xMin, xMax, yMin, yMax } = normalizeGlobalExtent(xyLimits)
-  const xSpan = xMax - xMin
-  const ySpan = yMax - yMin
-
-  const lonToTileFloat = (lon: number) => ((lon - xMin) / xSpan) * tilesPerSide
-  const latToTileFloat = (lat: number) => {
-    const clamped = Math.max(Math.min(lat, yMax), yMin)
-    return ((yMax - clamped) / ySpan) * tilesPerSide
-  }
-
-  const xTileMin = Math.floor(lonToTileFloat(geoBounds.west))
-  const xTileMax = Math.floor(lonToTileFloat(geoBounds.east))
-  const yTileMin = Math.floor(latToTileFloat(geoBounds.north))
-  const yTileMax = Math.floor(latToTileFloat(geoBounds.south))
-
-  const tiles: TileTuple[] = []
-  for (let tx = xTileMin; tx <= xTileMax; tx++) {
-    const wrappedX = ((tx % tilesPerSide) + tilesPerSide) % tilesPerSide
-    for (let ty = yTileMin; ty <= yTileMax; ty++) {
-      const clampedY = Math.max(0, Math.min(tilesPerSide - 1, ty))
-      tiles.push([pyramidLevel, wrappedX, clampedY])
-    }
-  }
-  return tiles
 }
 
 export function get4326TileGeoBounds(
