@@ -9,7 +9,8 @@ import type {
   TransformRequest,
 } from './types'
 import type { XYLimits } from './map-utils'
-import { identifyDimensionIndices } from './zarr-utils'
+import { DEFAULT_TILE_SIZE } from './constants'
+import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
 
 interface PyramidMetadata {
   levels: string[]
@@ -151,7 +152,7 @@ export class ZarrStore {
   dtype: string | null = null
   levels: string[] = []
   maxLevelIndex: number = 0
-  tileSize: number = 128
+  tileSize: number = DEFAULT_TILE_SIZE
   crs: CRS = 'EPSG:4326'
   multiscaleType: 'tiled' | 'untiled' | 'none' = 'none'
   untiledLevels: UntiledLevel[] = []
@@ -373,8 +374,7 @@ export class ZarrStore {
 
     // Float data typically stores already-physical values (e.g., pyramid levels
     // created by averaging). Integer data stores raw counts needing conversion.
-    const isFloatData =
-      dtype?.includes('float') || dtype === 'float32' || dtype === 'float64'
+    const isFloatData = !!dtype?.includes('float')
 
     let scaleFactor: number | undefined = undefined
     let addOffset: number | undefined = undefined
@@ -412,15 +412,8 @@ export class ZarrStore {
 
     if (!handle) {
       const location = this.root.resolve(key)
-      const openArray = (loc: zarr.Location<Readable>) => {
-        if (this.version === 2) {
-          return zarr.open.v2(loc, { kind: 'array' })
-        } else if (this.version === 3) {
-          return zarr.open.v3(loc, { kind: 'array' })
-        }
-        return zarr.open(loc, { kind: 'array' })
-      }
-      handle = openArray(location).catch((err: Error) => {
+      const openFunc = resolveOpenFunc(this.version)
+      handle = openFunc(location, { kind: 'array' }).catch((err: Error) => {
         this._arrayHandles.delete(key)
         throw err
       })
@@ -447,14 +440,8 @@ export class ZarrStore {
   private async _loadMetadata(): Promise<void> {
     if (!this.root) throw new Error('Zarr store not initialized')
 
-    const openFunc =
-      this.version === 2
-        ? zarr.open.v2
-        : this.version === 3
-        ? zarr.open.v3
-        : zarr.open
-
     // Open root group to get multiscales metadata from attrs
+    const openFunc = resolveOpenFunc(this.version)
     const group = await openFunc(this.root, { kind: 'group' })
     const rootAttrs = group.attrs as Record<string, unknown>
 
@@ -478,9 +465,9 @@ export class ZarrStore {
     const array = await this._getArray(basePath)
     const arrayAttrs = array.attrs as Record<string, unknown>
 
-    // dimensionNames is native in v3; for v2 zarrita reads _ARRAY_DIMENSIONS
-    this.dimensions =
-      array.dimensionNames || (arrayAttrs?._ARRAY_DIMENSIONS as string[]) || []
+    // zarrita's dimensionNames returns the unified answer for v2
+    // (_ARRAY_DIMENSIONS) and v3 (dimension_names).
+    this.dimensions = array.dimensionNames ?? []
     this.shape = array.shape
     // zarrita's array.chunks already handles sharding (inner chunk shape)
     this.chunks = array.chunks
@@ -643,26 +630,30 @@ export class ZarrStore {
           })
         )
 
+        type Candidate = { path: string; size: number }
+        const largest = (
+          predicate: (c: Candidate) => boolean
+        ): Candidate | undefined =>
+          withSizes.reduce<Candidate | undefined>(
+            (best, c) =>
+              predicate(c) && (!best || c.size > best.size) ? c : best,
+            undefined
+          )
+
         // Prefer coord arrays within the bounds level, then root-level, then largest
         if (boundsLevel) {
           const levelPrefix = `${boundsLevel}/`
-          const levelPick = withSizes
-            .filter((c) => c.path.startsWith(levelPrefix))
-            .sort((a, b) => b.size - a.size)[0]
+          const levelPick = largest((c) => c.path.startsWith(levelPrefix))
           if (levelPick) return levelPick.path
 
-          const rootPick = withSizes
-            .filter((c) => !c.path.includes('/'))
-            .sort((a, b) => b.size - a.size)[0]
+          const rootPick = largest((c) => !c.path.includes('/'))
           if (rootPick) return rootPick.path
         } else if (this.variable) {
-          const varPick = withSizes
-            .filter((c) => c.path.startsWith(`${this.variable}/`))
-            .sort((a, b) => b.size - a.size)[0]
+          const varPick = largest((c) => c.path.startsWith(`${this.variable}/`))
           if (varPick) return varPick.path
         }
 
-        return withSizes.sort((a, b) => b.size - a.size)[0]?.path ?? null
+        return largest(() => true)?.path ?? null
       }
 
       // Find highest resolution coordinate arrays from store listings
@@ -818,21 +809,23 @@ export class ZarrStore {
   private _getPyramidMetadata(
     multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
   ): PyramidMetadata {
-    if (!multiscales) {
-      // No multiscale metadata - single level untiled dataset
+    // Default for missing or unrecognized multiscale metadata: single-level untiled
+    const singleLevelUntiled = (): PyramidMetadata => {
       this.multiscaleType = 'untiled'
       return {
         levels: [],
         maxLevelIndex: 0,
-        tileSize: 128,
+        tileSize: DEFAULT_TILE_SIZE,
         crs: this.crs,
       }
     }
 
+    if (!multiscales) return singleLevelUntiled()
+
     // Format 1: zarr-conventions/multiscales (has 'layout' key)
     // See: https://github.com/zarr-conventions/multiscales
     if ('layout' in multiscales && Array.isArray(multiscales.layout)) {
-      return this._parseUntiledMultiscale(multiscales)
+      return this._parseUntiledMultiscale(multiscales, singleLevelUntiled)
     }
 
     // Format 2: OME-NGFF style (array with 'datasets' key)
@@ -851,26 +844,18 @@ export class ZarrStore {
       if (tileSize) {
         this.multiscaleType = 'tiled'
         return { levels, maxLevelIndex, tileSize, crs }
-      } else {
-        // Multi-level but not tiled - use UntiledMode
-        this.untiledLevels = levels.map((level) => ({
-          asset: level,
-          scale: [1.0, 1.0] as [number, number],
-          translation: [0.0, 0.0] as [number, number],
-        }))
-        this.multiscaleType = 'untiled'
-        return { levels, maxLevelIndex, tileSize: 128, crs }
       }
+      // Multi-level but not tiled - use UntiledMode
+      this.untiledLevels = levels.map((level) => ({
+        asset: level,
+        scale: [1.0, 1.0] as [number, number],
+        translation: [0.0, 0.0] as [number, number],
+      }))
+      this.multiscaleType = 'untiled'
+      return { levels, maxLevelIndex, tileSize: DEFAULT_TILE_SIZE, crs }
     }
 
-    // Unrecognized multiscale format - treat as single level untiled
-    this.multiscaleType = 'untiled'
-    return {
-      levels: [],
-      maxLevelIndex: 0,
-      tileSize: 128,
-      crs: this.crs,
-    }
+    return singleLevelUntiled()
   }
 
   /**
@@ -894,18 +879,11 @@ export class ZarrStore {
    * @see https://github.com/zarr-conventions/multiscales
    */
   private _parseUntiledMultiscale(
-    metadata: UntiledMultiscaleMetadata
+    metadata: UntiledMultiscaleMetadata,
+    singleLevelUntiled: () => PyramidMetadata
   ): PyramidMetadata {
     const layout = metadata.layout
-    if (!layout || layout.length === 0) {
-      this.multiscaleType = 'untiled'
-      return {
-        levels: [],
-        maxLevelIndex: 0,
-        tileSize: 128,
-        crs: this.crs,
-      }
-    }
+    if (!layout || layout.length === 0) return singleLevelUntiled()
 
     // Extract levels from layout
     const levels = layout.map((entry) => entry.asset)
@@ -930,7 +908,7 @@ export class ZarrStore {
     return {
       levels,
       maxLevelIndex,
-      tileSize: 128, // Will be overridden by chunk shape
+      tileSize: DEFAULT_TILE_SIZE, // Will be overridden by chunk shape
       crs,
     }
   }

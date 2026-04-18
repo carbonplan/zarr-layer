@@ -22,7 +22,9 @@ type CoordinateArray = zarr.Array<zarr.DataType> & {
 }
 type CoordinatesMap = Record<string, CoordinateArray>
 
-const resolveOpenFunc = (zarrVersion: 2 | 3 | null): typeof zarr.open => {
+export const resolveOpenFunc = (
+  zarrVersion: 2 | 3 | null
+): typeof zarr.open => {
   if (zarrVersion === 2) return zarr.open.v2 as typeof zarr.open
   if (zarrVersion === 3) return zarr.open.v3 as typeof zarr.open
   return zarr.open
