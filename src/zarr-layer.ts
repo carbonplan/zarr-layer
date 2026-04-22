@@ -11,6 +11,7 @@ import {
   getBands,
   toSelectorProps,
   normalizeSelector,
+  hashSelector,
 } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
 import { maplibreFragmentShaderSource, type ShaderData } from './shaders'
@@ -332,7 +333,7 @@ export class ZarrLayer {
     this.latIsAscending = latIsAscending ?? null
     this.selector = selector
     this.normalizedSelector = normalizeSelector(selector)
-    this.selectorHash = this.computeSelectorHash(this.normalizedSelector)
+    this.selectorHash = hashSelector(this.normalizedSelector)
     this.renderingMode = renderingMode
     this.invalidate = () => {}
     this.colormap = new ColormapState(colormap)
@@ -460,7 +461,7 @@ export class ZarrLayer {
 
   async setSelector(selector: Selector) {
     const normalized = normalizeSelector(selector)
-    const nextHash = this.computeSelectorHash(normalized)
+    const nextHash = hashSelector(normalized)
     if (nextHash === this.selectorHash) {
       return
     }
@@ -553,24 +554,6 @@ export class ZarrLayer {
     if (!this.initError) {
       this.invalidate()
     }
-  }
-
-  private computeSelectorHash(selector: NormalizedSelector): string {
-    const sortKeys = (value: unknown): unknown => {
-      if (Array.isArray(value) || value === null) return value
-      if (typeof value !== 'object') return value
-
-      const obj = value as Record<string, unknown>
-      const sorted: Record<string, unknown> = {}
-      Object.keys(obj)
-        .sort()
-        .forEach((k) => {
-          sorted[k] = sortKeys(obj[k])
-        })
-      return sorted
-    }
-
-    return JSON.stringify(sortKeys(selector))
   }
 
   private async initializeMode() {

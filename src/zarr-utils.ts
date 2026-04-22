@@ -232,6 +232,26 @@ export function normalizeSelector(selector: Selector): NormalizedSelector {
 }
 
 /**
+ * Canonical hash for a normalized selector. Sorts keys recursively so two
+ * selectors with identical semantics but different key insertion order
+ * produce the same hash — required for cache-hit comparisons across
+ * render-side and query-side selectors.
+ */
+export function hashSelector(selector: NormalizedSelector): string {
+  const sortKeys = (value: unknown): unknown => {
+    if (Array.isArray(value) || value === null) return value
+    if (typeof value !== 'object') return value
+    const obj = value as Record<string, unknown>
+    const sorted: Record<string, unknown> = {}
+    for (const k of Object.keys(obj).sort()) {
+      sorted[k] = sortKeys(obj[k])
+    }
+    return sorted
+  }
+  return JSON.stringify(sortKeys(selector))
+}
+
+/**
  * Resolves a selector value for a dimension, handling the common pattern of
  * looking up by dimension key, dimension name, or the name stored in dimIndices.
  *

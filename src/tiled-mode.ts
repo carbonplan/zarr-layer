@@ -92,7 +92,7 @@ function toFullBounds(
     y1: bounds.y1,
   }
 }
-import { getBands, normalizeSelector } from './zarr-utils'
+import { getBands, hashSelector, normalizeSelector } from './zarr-utils'
 import { createSubdividedQuad } from './webgl-utils'
 import {
   DEFAULT_TILE_SIZE,
@@ -207,7 +207,7 @@ export class TiledMode implements ZarrMode {
       }
     }
 
-    const currentHash = JSON.stringify(this.selector)
+    const currentHash = hashSelector(this.selector)
     const tilesToFetch: TileTuple[] = []
 
     for (const tileTuple of this.visibleTiles) {
@@ -387,7 +387,7 @@ export class TiledMode implements ZarrMode {
     this.tileCache?.updateBandNames(bandNames)
 
     if (this.tileCache && this.visibleTiles.length > 0) {
-      const currentHash = JSON.stringify(this.selector)
+      const currentHash = hashSelector(this.selector)
       // Unified cache handles both data and texture state
       await this.tileCache.reextractTileSlices(
         this.visibleTiles,
@@ -586,8 +586,8 @@ export class TiledMode implements ZarrMode {
   ): Map<string, Map<string, Float32Array>> | null {
     if (!this.tileCache) return null
 
-    const expectedHash = JSON.stringify(querySelector)
-    if (expectedHash !== JSON.stringify(this.selector)) return null
+    const expectedHash = hashSelector(querySelector)
+    if (expectedHash !== hashSelector(this.selector)) return null
 
     const desc = this.zarrStore.describe()
     const dimensions = desc.dimensions

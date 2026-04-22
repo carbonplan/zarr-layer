@@ -49,7 +49,12 @@ import {
   type XYLimits,
   type Wgs84Bounds,
 } from './map-utils'
-import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
+import {
+  loadDimensionValues,
+  normalizeSelector,
+  getBands,
+  hashSelector,
+} from './zarr-utils'
 import {
   createSubdividedQuad,
   interleaveBands,
@@ -2498,7 +2503,7 @@ export class UntiledMode implements ZarrMode {
   } | null {
     if (!this.regionSize || !this.baseSliceArgsReady) return null
     if (this.regionCache.size === 0) return null
-    if (JSON.stringify(selector) !== JSON.stringify(this.selector)) return null
+    if (hashSelector(selector) !== hashSelector(this.selector)) return null
 
     const [regionH, regionW] = this.regionSize
     const minX = Math.max(0, Math.floor(spatialQuery.minX))
