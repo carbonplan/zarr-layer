@@ -442,9 +442,9 @@ const Controls = () => {
         <Column start={2} width={3}>
           <Box sx={{ color: 'secondary' }}>
             <Flex
-              sx={{ justifyContent: 'space-between', alignItems: 'center' }}
+              sx={{ justifyContent: 'space-between', alignItems: 'baseline' }}
             >
-              <Flex sx={{ alignItems: 'center', gap: 2 }}>
+              <Flex sx={{ gap: 2, alignItems: 'center' }}>
                 <Badge>
                   {pointDisplayValue !== null
                     ? pointDisplayValue.toFixed(2)
@@ -465,7 +465,7 @@ const Controls = () => {
                   </Box>
                 )}
               </Flex>
-              <Flex sx={{ alignItems: 'center', gap: 2 }}>
+              <Flex sx={{ gap: 2 }}>
                 <Box sx={{ fontSize: 2, color: 'secondary' }}>Hover</Box>
                 <Filter
                   values={{
