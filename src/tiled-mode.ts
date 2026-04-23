@@ -9,10 +9,7 @@ import { queryRegionTiled } from './query/region-query'
 import {
   preprocessQueryGeometry,
   rasterExtentCrossesAntimeridian,
-  getTilesForBoundingBox,
-  getTilesForPolygon,
 } from './query/query-utils'
-import { getChunks } from './query/selector-utils'
 import type {
   LoadingStateCallback,
   MapLike,
@@ -21,16 +18,10 @@ import type {
   CRS,
 } from './types'
 import {
-  type ThrottleState,
   type RequestCanceller,
   type LoadingManager,
-  createThrottleState,
   createRequestCanceller,
   createLoadingManager,
-  getThrottleWaitTime,
-  scheduleThrottledUpdate,
-  markFetchStart,
-  clearThrottle,
   cancelOlderRequests,
   cancelAllRequests,
   setLoadingCallback as setLoadingCallbackUtil,
@@ -121,13 +112,11 @@ export class TiledMode implements ZarrMode {
   private pendingChunks: Set<string> = new Set()
   private currentLevel: number | null = null
   private selectorVersion: number = 0
-  private throttleMs: number
   private fixedDataScale: number
 
   private _antimeridianWarnings: Set<string> = new Set()
 
   // Shared state managers
-  private throttleState: ThrottleState = createThrottleState()
   private requestCanceller: RequestCanceller = createRequestCanceller()
   private loadingManager: LoadingManager = createLoadingManager()
 
@@ -136,14 +125,12 @@ export class TiledMode implements ZarrMode {
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    throttleMs: number = 100,
     fixedDataScale: number = 1
   ) {
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
     this.invalidate = invalidate
-    this.throttleMs = throttleMs
     this.fixedDataScale = fixedDataScale
   }
 
@@ -222,19 +209,6 @@ export class TiledMode implements ZarrMode {
     }
 
     if (tilesToFetch.length > 0) {
-      // Throttle: if too soon since last fetch, schedule a trailing update
-      const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs)
-      if (waitTime > 0) {
-        // Set loading state even when throttled so callers know data is pending
-        if (!this.throttleState.throttledPending) {
-          this.throttleState.throttledPending = true
-          this.emitLoadingState()
-        }
-        scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate)
-        return
-      }
-      markFetchStart(this.throttleState)
-
       const wasEmpty = this.pendingChunks.size === 0
       for (const tileTuple of tilesToFetch) {
         this.pendingChunks.add(tileToKey(tileTuple))
@@ -338,11 +312,14 @@ export class TiledMode implements ZarrMode {
   }
 
   dispose(_gl: WebGL2RenderingContext | WebGLRenderingContext): void {
-    clearThrottle(this.throttleState)
     cancelAllRequests(this.requestCanceller)
     this.tileCache?.clear()
     this.tileCache = null
     this.pendingChunks.clear()
+    if (this.loadingShowTimer) {
+      clearTimeout(this.loadingShowTimer)
+      this.loadingShowTimer = null
+    }
     this.emitLoadingState()
   }
 
@@ -366,34 +343,48 @@ export class TiledMode implements ZarrMode {
     return this.zarrStore.levels
   }
 
+  private loadingShowTimer: ReturnType<typeof setTimeout> | null = null
+
   private emitLoadingState(): void {
-    // Update chunksLoading state based on pending chunks and throttle state
-    this.loadingManager.chunksLoading =
-      this.pendingChunks.size > 0 || this.throttleState.throttledPending
-    emitLoadingStateUtil(this.loadingManager)
+    const loading = this.pendingChunks.size > 0
+
+    // Delay flipping the spinner on so cache-hit refetches (scrub) never
+    // trigger it. Flip off immediately so the UI stays honest.
+    if (loading) {
+      if (this.loadingManager.chunksLoading) return
+      if (this.loadingShowTimer) return
+      this.loadingShowTimer = setTimeout(() => {
+        this.loadingShowTimer = null
+        if (this.pendingChunks.size > 0 && !this.loadingManager.chunksLoading) {
+          this.loadingManager.chunksLoading = true
+          emitLoadingStateUtil(this.loadingManager)
+        }
+      }, 80)
+      return
+    }
+
+    if (this.loadingShowTimer) {
+      clearTimeout(this.loadingShowTimer)
+      this.loadingShowTimer = null
+    }
+    if (this.loadingManager.chunksLoading) {
+      this.loadingManager.chunksLoading = false
+      emitLoadingStateUtil(this.loadingManager)
+    }
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
     this.selectorVersion++
-    // Abort in-flight tile fetches from the old selector. Otherwise an
-    // older request can resolve after reextractTileSlices cleared the tile
-    // and write stale chunkData back with the now-obsolete selector hash,
-    // causing a brief render of the wrong band until a newer fetch lands.
+    // Abort in-flight fetches from the old selector so their AbortSignal
+    // wins the race vs. the version guard in fetchTile.
     cancelAllRequests(this.requestCanceller)
     const bandNames = getBands(this.variable, selector)
 
     this.tileCache?.updateSelector(this.selector)
     this.tileCache?.updateBandNames(bandNames)
-
     if (this.tileCache && this.visibleTiles.length > 0) {
-      const currentHash = hashSelector(this.selector)
-      // Unified cache handles both data and texture state
-      await this.tileCache.reextractTileSlices(
-        this.visibleTiles,
-        currentHash,
-        this.selectorVersion
-      )
+      this.tileCache.invalidateSelector(this.visibleTiles, this.selectorVersion)
     }
 
     this.invalidate()
@@ -572,72 +563,6 @@ export class TiledMode implements ZarrMode {
   }
 
   /**
-   * Attempt to populate chunk data for `tiles` entirely from the render tile
-   * cache. Returns null on any cache miss so the caller falls back to fetching.
-   *
-   * Preconditions for a hit:
-   * - Query selector hash equals what the renderer tagged tiles with.
-   * - Every tile is cached with its chunkData/chunkIndices matching the one
-   *   chunk the query needs (multi-chunk queries bypass the cache, since the
-   *   render stores at most one chunk per tile).
-   *
-   * All-or-nothing: a partial hit would leave some tiles missing from the
-   * returned map, and `queryRegionTiled` skips tiles it has no chunks for —
-   * which would silently drop data. Returning null on any miss forces the
-   * caller into the uniform fetch path.
-   *
-   * Buffer sharing: the returned map aliases `tile.chunkData` directly (no
-   * copy). Callees must treat these Float32Arrays as read-only; mutating
-   * them would corrupt the rendered tile.
-   */
-  private tryBuildCachedTileChunks(
-    tiles: TileTuple[],
-    querySelector: NormalizedSelector
-  ): Map<string, Map<string, Float32Array>> | null {
-    if (!this.tileCache) return null
-
-    const expectedHash = hashSelector(querySelector)
-    if (expectedHash !== hashSelector(this.selector)) return null
-
-    const desc = this.zarrStore.describe()
-    const dimensions = desc.dimensions
-    const coordinates = desc.coordinates
-    const shape = desc.shape || []
-    const chunks = desc.chunks || []
-
-    const out = new Map<string, Map<string, Float32Array>>()
-    for (const tileTuple of tiles) {
-      const [, x, y] = tileTuple
-      const tileKey = tileToKey(tileTuple)
-      const tile = this.tileCache.get(tileKey)
-      if (
-        !tile ||
-        !tile.chunkData ||
-        !tile.chunkIndices ||
-        tile.selectorHash !== expectedHash
-      ) {
-        return null
-      }
-      const needed = getChunks(
-        querySelector,
-        dimensions,
-        coordinates,
-        shape,
-        chunks,
-        x,
-        y
-      )
-      if (needed.length !== 1) return null
-      const neededKey = needed[0].join(',')
-      if (neededKey !== tile.chunkIndices.join(',')) return null
-      const chunkMap = new Map<string, Float32Array>()
-      chunkMap.set(neededKey, tile.chunkData)
-      out.set(tileKey, chunkMap)
-    }
-    return out
-  }
-
-  /**
    * Query data for point or region geometries.
    */
   async queryData(
@@ -662,9 +587,6 @@ export class TiledMode implements ZarrMode {
       fillValue: desc.fill_value,
     }
 
-    const levelPath = desc.levels[level]
-    const actualZoom = levelPath ? parseLevelZoom(levelPath, level) : level
-
     // Antimeridian preprocessing
     const { geometry: processedGeometry, bbox: wrappedBbox } =
       preprocessQueryGeometry(geometry)
@@ -680,16 +602,6 @@ export class TiledMode implements ZarrMode {
           'Antimeridian-crossing polygon queries are not supported for rasters whose own extent crosses the antimeridian; results may be incorrect'
         )
       }
-      const fallbackTiles = getTilesForPolygon(
-        geometry,
-        actualZoom,
-        this.crs,
-        this.xyLimits
-      )
-      const preCached = this.tryBuildCachedTileChunks(
-        fallbackTiles,
-        querySelector
-      )
       return queryRegionTiled(
         this.variable,
         geometry,
@@ -700,21 +612,9 @@ export class TiledMode implements ZarrMode {
         level,
         this.tileSize,
         transforms,
-        options,
-        undefined,
-        preCached ?? undefined
+        options
       )
     }
-
-    const queryTiles = wrappedBbox.crossesAntimeridian
-      ? getTilesForBoundingBox(wrappedBbox, actualZoom, this.crs, this.xyLimits)
-      : getTilesForPolygon(
-          processedGeometry,
-          actualZoom,
-          this.crs,
-          this.xyLimits
-        )
-    const preCached = this.tryBuildCachedTileChunks(queryTiles, querySelector)
 
     return queryRegionTiled(
       this.variable,
@@ -727,8 +627,7 @@ export class TiledMode implements ZarrMode {
       this.tileSize,
       transforms,
       options,
-      wrappedBbox,
-      preCached ?? undefined
+      wrappedBbox
     )
   }
 }

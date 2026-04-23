@@ -172,7 +172,6 @@ export class ZarrLayer {
   private metadataLoading: boolean = false
   private chunksLoading: boolean = false
   private initError: Error | null = null
-  private throttleMs: number
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
   private customStore: Readable | undefined
@@ -290,7 +289,6 @@ export class ZarrLayer {
     uniforms,
     renderingMode = '3d',
     onLoadingStateChange,
-    throttleMs = 100,
     proj4,
     transformRequest,
     store,
@@ -357,7 +355,6 @@ export class ZarrLayer {
 
     if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
-    this.throttleMs = throttleMs
     this.proj4 = proj4
     this.transformRequest = transformRequest
     this.customStore = store
@@ -575,7 +572,6 @@ export class ZarrLayer {
         this.variable,
         this.normalizedSelector,
         this.invalidate,
-        this.throttleMs,
         this.fixedDataScale
       )
     } else {
@@ -585,7 +581,6 @@ export class ZarrLayer {
         this.variable,
         this.normalizedSelector,
         this.invalidate,
-        this.throttleMs,
         this.fixedDataScale
       )
     }

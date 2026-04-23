@@ -127,8 +127,7 @@ export async function queryRegionTiled(
   tileSize: number,
   transforms?: QueryTransformOptions,
   options?: QueryOptions,
-  wrappedBbox?: WrappedBoundingBox,
-  preCachedTileChunks?: Map<string, Map<string, Float32Array>>
+  wrappedBbox?: WrappedBoundingBox
 ): Promise<QueryResult> {
   const { signal, includeSpatialCoordinates = true } = options ?? {}
   const desc = zarrStore.describe()
@@ -222,61 +221,56 @@ export async function queryRegionTiled(
   checkAborted(signal)
 
   // For each tile, determine which chunks we need based on selector and fetch them.
-  // If the caller pre-populated chunks from a render cache, reuse them directly.
-  const tileChunkData =
-    preCachedTileChunks ?? new Map<string, Map<string, Float32Array>>()
+  // Zarrita's withByteCaching handles duplicate fetches transparently, so we
+  // don't need a render-side chunk cache here.
+  const tileChunkData = new Map<string, Map<string, Float32Array>>()
 
-  if (!preCachedTileChunks) {
-    // Parallelize tile fetching - process all tiles concurrently instead of serially
-    await Promise.all(
-      tiles.map(async (tileTuple) => {
-        const [, x, y] = tileTuple
-        const chunksToFetch = getChunks(
-          selector,
-          dimensions,
-          coordinates,
-          shape,
-          chunks,
-          x,
-          y
-        )
+  await Promise.all(
+    tiles.map(async (tileTuple) => {
+      const [, x, y] = tileTuple
+      const chunksToFetch = getChunks(
+        selector,
+        dimensions,
+        coordinates,
+        shape,
+        chunks,
+        x,
+        y
+      )
 
-        const tileKey = tileToKey(tileTuple)
-        const chunkDataMap = new Map<string, Float32Array>()
+      const tileKey = tileToKey(tileTuple)
+      const chunkDataMap = new Map<string, Float32Array>()
 
-        // Fetch all chunks for this tile
-        await Promise.all(
-          chunksToFetch.map(async (chunkIndices) => {
-            try {
-              const chunk = await zarrStore.getChunk(
-                levelPath,
-                chunkIndices,
-                signal ? { signal } : undefined
-              )
-              // Make a proper copy to avoid buffer sharing issues
-              const chunkData = new Float32Array(
-                chunk.data as ArrayLike<number>
-              )
-
-              // Store chunk with indices as key
-              const chunkKey = chunkIndices.join(',')
-              chunkDataMap.set(chunkKey, chunkData)
-            } catch (err) {
-              if (err instanceof DOMException && err.name === 'AbortError') {
-                throw err
-              }
-              console.warn(
-                `Failed to fetch chunk ${chunkIndices} for tile ${tileKey}:`,
-                err
-              )
+      await Promise.all(
+        chunksToFetch.map(async (chunkIndices) => {
+          try {
+            const chunk = await zarrStore.getChunk(
+              levelPath,
+              chunkIndices,
+              signal ? { signal } : undefined
+            )
+            // `chunk` may be shared via the decoded-chunk cache, so copy
+            // into a Float32Array this query owns before handing it to
+            // downstream extractors (which may read it at non-native types
+            // or buffer offsets).
+            const chunkData = new Float32Array(chunk.data as ArrayLike<number>)
+            const chunkKey = chunkIndices.join(',')
+            chunkDataMap.set(chunkKey, chunkData)
+          } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') {
+              throw err
             }
-          })
-        )
+            console.warn(
+              `Failed to fetch chunk ${chunkIndices} for tile ${tileKey}:`,
+              err
+            )
+          }
+        })
+      )
 
-        tileChunkData.set(tileKey, chunkDataMap)
-      })
-    )
-  }
+      tileChunkData.set(tileKey, chunkDataMap)
+    })
+  )
 
   // Iterate over tiles, using scanline rasterization per tile
   for (const tileTuple of tiles) {

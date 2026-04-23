@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import { createLRU, withDecodedChunkCaching } from './decoded-chunk-cache'
 import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
   Bounds,
@@ -247,8 +248,29 @@ export class ZarrStore {
           'customStore must implement Readable interface with get() method'
         )
       }
-      // Use custom store directly (e.g., IcechunkStore)
-      this.store = this.customStore as ZarrStoreType
+      // Wrap custom stores (e.g., IcechunkStore) with the same data-layer
+      // caching as fetch-backed stores so hover/query paths benefit from
+      // byte + decoded-chunk memoization. Skip consolidated-metadata: custom
+      // stores typically have their own efficient metadata layer.
+      //
+      // `withRangeCoalescing` eagerly asserts `store.getRange`, so skip it
+      // for Readable-only custom stores to avoid throwing at init.
+      const byteCache = createLRU<Uint8Array | undefined>(1024)
+      const hasGetRange =
+        typeof (this.customStore as { getRange?: unknown }).getRange ===
+        'function'
+      this.store = hasGetRange
+        ? ((await zarr.extendStore(
+            this.customStore as AsyncReadable,
+            (store) => zarr.withRangeCoalescing(store),
+            (store) => zarr.withByteCaching(store, { cache: byteCache }),
+            (store) => withDecodedChunkCaching(store)
+          )) as ZarrStoreType)
+        : ((await zarr.extendStore(
+            this.customStore as AsyncReadable,
+            (store) => zarr.withByteCaching(store, { cache: byteCache }),
+            (store) => withDecodedChunkCaching(store)
+          )) as ZarrStoreType)
     } else {
       const bypassCache = !!this.transformRequest
       let storePromise = bypassCache
@@ -268,15 +290,26 @@ export class ZarrStore {
             : this.version === 3
             ? { format: 'v3' }
             : undefined
-        // Range coalescing groups concurrent HTTP range requests into fewer
-        // round-trips, reducing latency when fetching many tiles in parallel.
+        // Layered data access:
+        // - Range coalescing: batches concurrent HTTP range requests in a
+        //   microtask tick so many tile fetches become few round-trips.
+        // - Byte caching: memoizes raw chunk bytes so re-reads skip the
+        //   network entirely. Bounded — this wrapped store is retained in
+        //   the static `_storeCache` for the session, so an unbounded Map
+        //   would grow monotonically across pan + scrub.
+        // - Decoded-chunk caching: memoizes the decompressed `getChunk`
+        //   ndarray so selector scrubs within already-fetched tiles skip
+        //   both network and decompression.
+        const byteCache = createLRU<Uint8Array | undefined>(1024)
         storePromise = zarr.extendStore(
           baseStore,
           (store) =>
             zarr
               .withMaybeConsolidatedMetadata(store, consolidatedOpts)
               .catch(() => store),
-          (store) => zarr.withRangeCoalescing(store)
+          (store) => zarr.withRangeCoalescing(store),
+          (store) => zarr.withByteCaching(store, { cache: byteCache }),
+          (store) => withDecodedChunkCaching(store)
         ) as Promise<ZarrStoreType>
         if (!bypassCache) {
           ZarrStore._storeCache.set(storeCacheKey, storePromise)

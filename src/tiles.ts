@@ -21,10 +21,6 @@ import {
  * Tile cache entry containing raw data and WebGL resources.
  */
 export interface TileData {
-  // Raw chunk data
-  chunkData: Float32Array | null
-  chunkShape: number[] | null
-  chunkIndices?: number[]
   data: Float32Array | null
   bandData: Map<string, Float32Array>
   channels: number
@@ -120,15 +116,6 @@ export class Tiles {
     if (['depth', 'z', 'level', 'lev', 'elevation'].includes(lower))
       return 'elevation'
     return dimName
-  }
-
-  private arraysEqual(a: number[] | undefined, b: number[] | undefined) {
-    if (!a || !b) return false
-    if (a.length !== b.length) return false
-    for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false
-    }
-    return true
   }
 
   private normalizeSelection(
@@ -452,9 +439,6 @@ export class Tiles {
 
     // Create new tile entry with WebGL resources if GL context available
     tile = {
-      chunkData: null,
-      chunkShape: null,
-      chunkIndices: undefined,
       data: null,
       bandData: new Map(),
       channels: 1,
@@ -594,51 +578,18 @@ export class Tiles {
     }
   }
 
-  async reextractTileSlices(
-    visibleTiles: TileTuple[],
-    selectorHash: string,
-    version: number
-  ): Promise<void> {
+  /**
+   * Mark visible tiles stale after a selector change. `updateTiles` picks
+   * them up and refetches via `store.getChunk` — the decoded-chunk cache
+   * makes same-chunk scrubs effectively free; the caller's loading-state
+   * debounce keeps the spinner from flashing on those quick refetches.
+   */
+  invalidateSelector(visibleTiles: TileTuple[], version: number): void {
     for (const tileTuple of visibleTiles) {
-      const tileKey = tileToKey(tileTuple)
-      const tile = this.tiles.get(tileKey)
+      const tile = this.tiles.get(tileToKey(tileTuple))
       if (!tile) continue
-      const levelPath = this.store.levels[tileTuple[0]]
-      if (!levelPath) continue
-      const levelArray = await this.store.getLevelArray(levelPath)
-      const desiredChunkIndices = this.computeChunkIndices(
-        levelArray,
-        tileTuple
-      )
-      const canReuseChunk =
-        tile.chunkData &&
-        tile.chunkShape &&
-        this.arraysEqual(tile.chunkIndices, desiredChunkIndices)
-      if (canReuseChunk) {
-        // Only update if this version is newer than what's already rendered
-        if (version < tile.selectorVersion) continue
-        const sliced = this.extractSliceFromChunk(
-          tile.chunkData!,
-          tile.chunkShape!,
-          levelArray,
-          desiredChunkIndices
-        )
-        this.applyNormalization(tile, sliced)
-        tile.selectorHash = selectorHash
-        tile.selectorVersion = version
-      } else {
-        // Keep old data visible while new chunk loads - don't clear tile.data
-        // The stale selectorHash ensures a new fetch will be triggered,
-        // and the old data continues to render until replaced.
-        // Bump selectorVersion so any still-in-flight fetch from an older
-        // selector fails the `version < tile.selectorVersion` guard when it
-        // resolves, rather than writing stale chunkData back into the tile.
-        tile.selectorHash = null
-        tile.chunkData = null
-        tile.chunkShape = null
-        tile.chunkIndices = undefined
-        tile.selectorVersion = version
-      }
+      tile.selectorHash = null
+      tile.selectorVersion = version
     }
   }
 
@@ -692,37 +643,21 @@ export class Tiles {
 
     try {
       const chunkIndices = this.computeChunkIndices(levelArray, tileTuple)
-      const canReuseChunk =
-        tile.chunkData &&
-        tile.chunkShape &&
-        this.arraysEqual(tile.chunkIndices, chunkIndices)
 
-      if (canReuseChunk) {
-        // Only update if this version is newer than what's already rendered
-        if (version < tile.selectorVersion) {
-          tile.loading = false
-          return null
-        }
-        const sliced = this.extractSliceFromChunk(
-          tile.chunkData!,
-          tile.chunkShape!,
-          levelArray,
-          chunkIndices
-        )
-        this.applyNormalization(tile, sliced)
-        tile.selectorHash = selectorHash
-        tile.selectorVersion = version
-        tile.loading = false
-        return tile
-      }
-
+      // Bytes are cached by zarrita's withByteCaching, so re-fetching the
+      // same chunk after a selector change skips the HTTP round-trip and
+      // only pays decompression cost.
       const chunk = await this.store.getChunk(levelPath, chunkIndices, {
         signal,
       })
       const chunkShape = (chunk.shape as number[]).map((n) => Number(n))
+      // `chunk` may be shared across tiles by the decoded-chunk cache, so
+      // treat `chunk.data` as read-only. Reuse the existing Float32Array
+      // directly (only reads hit it below); for other dtypes, copy once
+      // into a Float32Array we fully own.
       const chunkData =
         chunk.data instanceof Float32Array
-          ? new Float32Array(chunk.data.buffer)
+          ? chunk.data
           : Float32Array.from(chunk.data as ArrayLike<number>)
 
       // Only update if this version is newer than what's already rendered
@@ -731,9 +666,6 @@ export class Tiles {
         return null
       }
 
-      tile.chunkData = chunkData
-      tile.chunkShape = chunkShape
-      tile.chunkIndices = chunkIndices
       const sliced = this.extractSliceFromChunk(
         chunkData,
         chunkShape,
@@ -747,12 +679,14 @@ export class Tiles {
       return tile
     } catch (err) {
       tile.loading = false
-      // AbortError is expected when requests are cancelled - don't log as error
+      // AbortError is expected when requests are cancelled.
       if (err instanceof DOMException && err.name === 'AbortError') {
         return null
       }
-      console.error('Error fetching tile data:', err)
-      return null
+      // Rethrow real errors so callers distinguish them from stale/aborted
+      // nulls. `tiled-mode` reinvalidates on null, which would retry-loop
+      // against a permanently failing chunk if errors also returned null.
+      throw err
     }
   }
 

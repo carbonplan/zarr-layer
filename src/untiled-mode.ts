@@ -49,12 +49,7 @@ import {
   type XYLimits,
   type Wgs84Bounds,
 } from './map-utils'
-import {
-  loadDimensionValues,
-  normalizeSelector,
-  getBands,
-  hashSelector,
-} from './zarr-utils'
+import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
 import {
   createSubdividedQuad,
   interleaveBands,
@@ -81,16 +76,10 @@ import {
 import { createHybridMesh } from './mesh-reprojector'
 import { geoToArrayIndex } from './map-utils'
 import {
-  type ThrottleState,
   type RequestCanceller,
   type LoadingManager,
-  createThrottleState,
   createRequestCanceller,
   createLoadingManager,
-  getThrottleWaitTime,
-  scheduleThrottledUpdate,
-  markFetchStart,
-  clearThrottle,
   cancelAllRequests,
   hasActiveRequests,
   setLoadingCallback as setLoadingCallbackUtil,
@@ -215,11 +204,9 @@ export class UntiledMode implements ZarrMode {
 
   // Loading state
   private isRemoved: boolean = false
-  private throttleMs: number
   private _antimeridianWarnings: Set<string> = new Set()
 
   // Shared state managers
-  private throttleState: ThrottleState = createThrottleState()
   private requestCanceller: RequestCanceller = createRequestCanceller()
   private loadingManager: LoadingManager = createLoadingManager()
 
@@ -270,7 +257,6 @@ export class UntiledMode implements ZarrMode {
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    throttleMs: number = 100,
     fixedDataScale: number = 1
   ) {
     this.zarrStore = store
@@ -278,7 +264,6 @@ export class UntiledMode implements ZarrMode {
     this.selector = selector
     this.bandNames = getBands(variable, selector)
     this.invalidate = invalidate
-    this.throttleMs = throttleMs
     this.fixedDataScale = fixedDataScale
   }
 
@@ -1393,8 +1378,8 @@ export class UntiledMode implements ZarrMode {
     }
 
     // Separate regions into two categories:
-    // 1. New regions (no data) - viewport change, fetch immediately
-    // 2. Stale regions (have data, wrong selector) - selector change, throttle
+    // 1. New regions (no data) - viewport change
+    // 2. Stale regions (have data, wrong selector) - selector change
     const newRegions: Array<{ regionX: number; regionY: number }> = []
     const staleRegions: Array<{ regionX: number; regionY: number }> = []
 
@@ -1433,38 +1418,12 @@ export class UntiledMode implements ZarrMode {
       return
     }
 
-    // Fetch new regions immediately (viewport changes - no throttle)
     if (newRegions.length > 0) {
       this.fetchRegions(newRegions, gl)
     }
-
-    // Fetch stale regions with throttle (selector changes)
     if (staleRegions.length > 0) {
-      this.fetchRegionsThrottled(staleRegions, gl)
+      this.fetchRegions(staleRegions, gl)
     }
-  }
-
-  /**
-   * Fetch regions with throttling (for selector changes).
-   */
-  private fetchRegionsThrottled(
-    regions: Array<{ regionX: number; regionY: number }>,
-    gl: WebGL2RenderingContext
-  ): void {
-    const waitTime = getThrottleWaitTime(this.throttleState, this.throttleMs)
-    if (waitTime > 0) {
-      // Set loading state even when throttled so callers know data is pending
-      if (!this.throttleState.throttledPending) {
-        this.throttleState.throttledPending = true
-        this.emitLoadingState()
-      }
-      scheduleThrottledUpdate(this.throttleState, waitTime, this.invalidate)
-      return
-    }
-    markFetchStart(this.throttleState)
-
-    // Actually fetch the regions
-    this.fetchRegions(regions, gl)
   }
 
   /**
@@ -2308,7 +2267,6 @@ export class UntiledMode implements ZarrMode {
 
   dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void {
     this.isRemoved = true
-    clearThrottle(this.throttleState)
     cancelAllRequests(this.requestCanceller)
     // Clean up region caches
     this.clearRegionCache(gl)
@@ -2420,13 +2378,6 @@ export class UntiledMode implements ZarrMode {
   }
 
   private emitLoadingState(): void {
-    // Update chunksLoading to include throttle state
-    if (
-      this.throttleState.throttledPending &&
-      !this.loadingManager.chunksLoading
-    ) {
-      this.loadingManager.chunksLoading = true
-    }
     emitLoadingStateUtil(this.loadingManager)
   }
 
@@ -2474,113 +2425,6 @@ export class UntiledMode implements ZarrMode {
     }
 
     return typeof value === 'number' ? value : 0
-  }
-
-  /**
-   * Try to assemble query data from the render region cache.
-   *
-   * Gated on:
-   * - Every region covering the query is loaded for the current level.
-   * - Each region's selectorVersion equals the mode's current selectorVersion.
-   * - The query selector matches what's currently rendered.
-   *
-   * Returns null on any miss so the caller falls back to fetchQueryData.
-   *
-   * The returned data is normalized (divided by fixedDataScale with fills → NaN),
-   * so callers must un-scale via `transforms: { scaleFactor: fixedDataScale }`.
-   */
-  private tryBuildCachedQueryStrip(
-    selector: NormalizedSelector,
-    spatialQuery: { minX: number; maxX: number; minY: number; maxY: number }
-  ): {
-    data: Float32Array
-    width: number
-    height: number
-    channels: number
-    channelLabels: (string | number)[][]
-    multiValueDimNames: string[]
-    fromCache: true
-  } | null {
-    if (!this.regionSize || !this.baseSliceArgsReady) return null
-    if (this.regionCache.size === 0) return null
-    if (hashSelector(selector) !== hashSelector(this.selector)) return null
-
-    const [regionH, regionW] = this.regionSize
-    const minX = Math.max(0, Math.floor(spatialQuery.minX))
-    const maxX = Math.min(this.width, Math.ceil(spatialQuery.maxX))
-    const minY = Math.max(0, Math.floor(spatialQuery.minY))
-    const maxY = Math.min(this.height, Math.ceil(spatialQuery.maxY))
-    if (maxX <= minX || maxY <= minY) return null
-
-    const rxStart = Math.floor(minX / regionW)
-    const rxEnd = Math.floor((maxX - 1) / regionW) + 1
-    const ryStart = Math.floor(minY / regionH)
-    const ryEnd = Math.floor((maxY - 1) / regionH) + 1
-
-    const { combinations, labelCombinations } = this.buildChannelCombinations(
-      this.baseMultiValueDims
-    )
-    const numChannels = combinations.length || 1
-    const multiValueDimNames = this.baseMultiValueDims.map((d) => d.dimName)
-
-    const coveringRegions: RegionState[] = []
-    for (let ry = ryStart; ry < ryEnd; ry++) {
-      for (let rx = rxStart; rx < rxEnd; rx++) {
-        const key = `${this.currentLevelIndex}:${rx},${ry}`
-        const region = this.regionCache.get(key)
-        if (
-          !region ||
-          region.loading ||
-          !region.data ||
-          region.selectorVersion !== this.selectorVersion ||
-          region.width <= 0 ||
-          region.height <= 0 ||
-          region.channels !== numChannels
-        ) {
-          return null
-        }
-        coveringRegions.push(region)
-      }
-    }
-
-    const outW = maxX - minX
-    const outH = maxY - minY
-    const composite = new Float32Array(outW * outH * numChannels)
-    composite.fill(NaN)
-
-    for (const region of coveringRegions) {
-      const regionData = region.data
-      if (!regionData) return null
-      const rxPixel = region.regionX * regionW
-      const ryPixel = region.regionY * regionH
-      const srcX0 = Math.max(0, minX - rxPixel)
-      const srcY0 = Math.max(0, minY - ryPixel)
-      const srcX1 = Math.min(region.width, maxX - rxPixel)
-      const srcY1 = Math.min(region.height, maxY - ryPixel)
-      if (srcX1 <= srcX0 || srcY1 <= srcY0) continue
-
-      const dstX0 = rxPixel + srcX0 - minX
-      const dstY0 = ryPixel + srcY0 - minY
-      const rowLen = (srcX1 - srcX0) * numChannels
-      for (let sy = srcY0; sy < srcY1; sy++) {
-        const srcStart = (sy * region.width + srcX0) * numChannels
-        const dstStart = ((dstY0 + (sy - srcY0)) * outW + dstX0) * numChannels
-        composite.set(
-          regionData.subarray(srcStart, srcStart + rowLen),
-          dstStart
-        )
-      }
-    }
-
-    return {
-      data: composite,
-      width: outW,
-      height: outH,
-      channels: numChannels,
-      channelLabels: labelCombinations,
-      multiValueDimNames,
-      fromCache: true,
-    }
   }
 
   /**
@@ -2757,27 +2601,12 @@ export class UntiledMode implements ZarrMode {
       pixelBounds: PixelRect,
       opts?: QueryOptions
     ): Promise<QueryResult | null> => {
-      const cached = this.tryBuildCachedQueryStrip(
+      const fetched = await this.fetchQueryData(
         normalizedSelector,
-        pixelBounds
+        pixelBounds,
+        opts?.signal
       )
-      const fetched =
-        cached ??
-        (await this.fetchQueryData(
-          normalizedSelector,
-          pixelBounds,
-          opts?.signal
-        ))
       if (!fetched) return null
-
-      // Cache hit: data is pre-scaled and pre-offset; undo normalization only.
-      const effectiveTransforms = cached
-        ? {
-            scaleFactor: this.fixedDataScale,
-            addOffset: 0,
-            fillValue: null,
-          }
-        : transforms
 
       const subsetBounds = this.computeSubsetBounds(pixelBounds)
 
@@ -2823,7 +2652,7 @@ export class UntiledMode implements ZarrMode {
         fetched.channelLabels,
         fetched.multiValueDimNames,
         this.latIsAscending,
-        effectiveTransforms,
+        transforms,
         this.proj4def,
         subsetSourceBounds,
         opts,
