@@ -1816,11 +1816,7 @@ export class UntiledMode implements ZarrMode {
       }
     } else {
       // Single-level dataset - set up region-based loading if not already done
-      if (
-        !this.regionSize &&
-        this.zarrArray &&
-        !this.loadingManager.chunksLoading
-      ) {
+      if (!this.regionSize && this.zarrArray) {
         const detectedRegionSize = this.getRegionSize(this.zarrArray)
         this.regionSize = detectedRegionSize ?? [this.height, this.width]
 
@@ -1842,25 +1838,47 @@ export class UntiledMode implements ZarrMode {
     if (levelIndex < 0 || levelIndex >= this.levels.length) {
       return
     }
-    if (this.loadingManager.chunksLoading) {
+    if (this.currentLevelIndex !== -1 || this.pendingLevelIndex !== null) {
+      // Already initialized or initialization in flight.
       return
     }
-
-    // Ensure metadata is loaded for this level (lazy load if needed)
-    await this.ensureLevelMetadata(levelIndex)
+    // Claim the slot synchronously via `pendingLevelIndex` — the same
+    // mechanism `switchToLevel` uses. Don't touch `currentLevelIndex`
+    // until commit: it's the signal that lets `update()` route to the
+    // switch-level branch, and exposing it before state is consistent
+    // would let `switchToLevel` race against a half-initialized level.
+    this.pendingLevelIndex = levelIndex
 
     const level = this.levels[levelIndex]
-    this.currentLevelIndex = levelIndex
-
     try {
-      this.zarrArray = await this.zarrStore.getLevelArray(level.asset)
-      this.width = this.zarrArray.shape[this.dimIndices.lon.index]
-      this.height = this.zarrArray.shape[this.dimIndices.lat.index]
+      await this.ensureLevelMetadata(levelIndex)
+
+      const newArray = await this.zarrStore.getLevelArray(level.asset)
+      const newWidth = newArray.shape[this.dimIndices.lon.index]
+      const newHeight = newArray.shape[this.dimIndices.lat.index]
 
       // Always use region-based loading for unified rendering path
       // If no chunk/shard boundaries, treat whole level as one region
-      const detectedRegionSize = this.getRegionSize(this.zarrArray)
-      this.regionSize = detectedRegionSize ?? [this.height, this.width]
+      const detectedRegionSize = this.getRegionSize(newArray)
+      const newRegionSize: [number, number] = detectedRegionSize ?? [
+        newHeight,
+        newWidth,
+      ]
+
+      // Bail if the target changed while loading; `update()` will kick off
+      // the new init on the next tick.
+      if (this.pendingLevelIndex !== levelIndex) {
+        this.invalidate()
+        return
+      }
+
+      // Commit all level state atomically after async work completes.
+      this.currentLevelIndex = levelIndex
+      this.pendingLevelIndex = null
+      this.zarrArray = newArray
+      this.width = newWidth
+      this.height = newHeight
+      this.regionSize = newRegionSize
       this.regionCache.clear()
 
       // Build base slice args for non-spatial dimensions
@@ -1869,6 +1887,9 @@ export class UntiledMode implements ZarrMode {
       // Let update() trigger viewport-aware loading
       this.invalidate()
     } catch (err) {
+      if (this.pendingLevelIndex === levelIndex) {
+        this.pendingLevelIndex = null
+      }
       console.error(`Failed to initialize level ${level.asset}:`, err)
     }
   }
