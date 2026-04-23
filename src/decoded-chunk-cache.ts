@@ -1,18 +1,9 @@
 import * as zarr from 'zarrita'
 
-/**
- * Small insertion-order LRU. Exposes `has`/`get`/`set` so it can be used
- * both for this module's decoded-chunk extension and as the `cache`
- * container for zarrita's `withByteCaching` (which calls `cache.has(k)`
- * before `cache.get(k)` and therefore needs to distinguish "missing" from
- * "stored undefined value").
- */
-export const createLRU = <V>(maxEntries: number) => {
+/** Insertion-order LRU bounded by entry count. */
+const createLRU = <V>(maxEntries: number) => {
   const store = new Map<string, V>()
   return {
-    has(key: string): boolean {
-      return store.has(key)
-    },
     get(key: string): V | undefined {
       if (!store.has(key)) return undefined
       const hit = store.get(key) as V
@@ -33,15 +24,11 @@ export const createLRU = <V>(maxEntries: number) => {
 }
 
 /**
- * Cache decoded chunks at the zarr.Array level so both render (which calls
- * `store.getChunk` / `array.getChunk`) and query (which calls `zarr.get`,
- * internally driven by `array.getChunk`) skip decompression on re-reads.
- *
- * Complements `withByteCaching` (which skips the HTTP round-trip): byte
- * caching removes network cost, decoded caching removes decompression cost.
- * Scrubbing a selector within already-rendered tiles is the dominant
- * beneficiary — the same chunk is asked for on every scrub tick and the
- * decode is the heavy piece.
+ * Cache decoded chunks at the zarr.Array level so render
+ * (`array.getChunk`), scrub (same chunks, new selector slice), and query
+ * (`zarr.get`, internally driven by `array.getChunk`) skip decompression
+ * on re-reads. Concurrent callers for the same chunk share one fetch via
+ * the in-flight map so they don't each decompress independently.
  *
  * Cached chunks are returned by reference; callers must treat `chunk.data`
  * as read-only. Downstream code in this repo only reads from it (slice +
@@ -57,14 +44,32 @@ const chunkCacheKey = (path: string, coords: number[]): string =>
   `${path}\0${coords.join(',')}`
 
 const decodedChunkExtension = zarr.defineArrayExtension(
-  (array, opts: { cache: ReturnType<typeof createLRU<AnyChunk>> }) => ({
+  (
+    array,
+    opts: {
+      cache: ReturnType<typeof createLRU<AnyChunk>>
+      pending: Map<string, Promise<AnyChunk>>
+    }
+  ) => ({
     async getChunk(coords, options) {
       const key = chunkCacheKey(array.path, coords)
       const hit = opts.cache.get(key)
       if (hit) return hit
-      const chunk = await array.getChunk(coords, options)
-      opts.cache.set(key, chunk)
-      return chunk
+      const inflight = opts.pending.get(key)
+      if (inflight) return inflight
+      const promise = array
+        .getChunk(coords, options)
+        .then((chunk) => {
+          opts.cache.set(key, chunk)
+          return chunk
+        })
+        .finally(() => {
+          if (opts.pending.get(key) === promise) {
+            opts.pending.delete(key)
+          }
+        })
+      opts.pending.set(key, promise)
+      return promise
     },
   })
 )
@@ -76,9 +81,12 @@ const decodedChunkExtension = zarr.defineArrayExtension(
  */
 export const withDecodedChunkCaching = zarr.defineStoreExtension(
   (_inner, opts: { maxEntries?: number } = {}) => {
-    const cache = createLRU<AnyChunk>(opts.maxEntries ?? 128)
+    const cache = createLRU<AnyChunk>(opts.maxEntries ?? 512)
+    const pending = new Map<string, Promise<AnyChunk>>()
     return {
-      arrayExtensions: [(array) => decodedChunkExtension(array, { cache })],
+      arrayExtensions: [
+        (array) => decodedChunkExtension(array, { cache, pending }),
+      ],
     }
   }
 )

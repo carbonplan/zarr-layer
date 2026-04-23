@@ -644,9 +644,9 @@ export class Tiles {
     try {
       const chunkIndices = this.computeChunkIndices(levelArray, tileTuple)
 
-      // Bytes are cached by zarrita's withByteCaching, so re-fetching the
-      // same chunk after a selector change skips the HTTP round-trip and
-      // only pays decompression cost.
+      // Decoded chunks are cached at the zarr.Array level, so re-fetching
+      // the same chunk after a selector change is an in-memory hit with
+      // no network or decompression cost.
       const chunk = await this.store.getChunk(levelPath, chunkIndices, {
         signal,
       })

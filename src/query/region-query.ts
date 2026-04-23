@@ -221,7 +221,7 @@ export async function queryRegionTiled(
   checkAborted(signal)
 
   // For each tile, determine which chunks we need based on selector and fetch them.
-  // Zarrita's withByteCaching handles duplicate fetches transparently, so we
+  // The decoded-chunk cache handles duplicate fetches transparently, so we
   // don't need a render-side chunk cache here.
   const tileChunkData = new Map<string, Map<string, Float32Array>>()
 
