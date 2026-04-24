@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { Selector } from '@carbonplan/zarr-layer'
 import type { Dataset, ControlsProps } from './types'
 import { Slider, BandSelector } from '../components/shared-controls'
@@ -15,9 +15,23 @@ type HurricaneState = {
 
 const is4D = (variable: Variable) => variable !== 'surface_pressure'
 
+const useDebouncedCommit = <T,>(value: T, commit: (v: T) => void, ms = 100) => {
+  const commitRef = useRef(commit)
+  commitRef.current = commit
+  useEffect(() => {
+    const id = setTimeout(() => commitRef.current(value), ms)
+    return () => clearTimeout(id)
+  }, [value, ms])
+}
+
 const Controls = ({ state, setState }: ControlsProps<HurricaneState>) => {
   const setClim = useAppStore((s) => s.setClim)
   const setColormap = useAppStore((s) => s.setColormap)
+
+  const [time, setTime] = useState(state.time)
+  const [level, setLevel] = useState(state.level)
+  useDebouncedCommit(time, (v) => setState({ time: v }))
+  useDebouncedCommit(level, (v) => setState({ level: v }))
 
   const handleVariableChange = (variable: Variable) => {
     setState({ variable })
@@ -38,17 +52,11 @@ const Controls = ({ state, setState }: ControlsProps<HurricaneState>) => {
         onChange={handleVariableChange}
         label='Variable'
       />
-      <Slider
-        value={state.time}
-        onChange={(v) => setState({ time: v })}
-        min={0}
-        max={95}
-        label='Time'
-      />
+      <Slider value={time} onChange={setTime} min={0} max={95} label='Time' />
       {is4D(state.variable) && (
         <Slider
-          value={state.level}
-          onChange={(v) => setState({ level: v })}
+          value={level}
+          onChange={setLevel}
           min={0}
           max={36}
           label='Level'

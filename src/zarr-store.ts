@@ -244,13 +244,9 @@ export class ZarrStore {
           'customStore must implement Readable interface with get() method'
         )
       }
-      // Wrap custom stores (e.g., IcechunkStore) with decoded-chunk caching
-      // so hover/query paths benefit from decompress-skip memoization. Skip
-      // consolidated-metadata: custom stores typically have their own
-      // efficient metadata layer.
-      //
-      // `withRangeCoalescing` eagerly asserts `store.getRange`, so skip it
-      // for Readable-only custom stores to avoid throwing at init.
+      // Skip consolidated metadata: custom stores typically have their
+      // own efficient metadata layer. `withRangeCoalescing` eagerly
+      // asserts `getRange`, so only install it when the store has one.
       const hasGetRange =
         typeof (this.customStore as { getRange?: unknown }).getRange ===
         'function'
@@ -264,27 +260,24 @@ export class ZarrStore {
             withDecodedChunkCaching(store)
           )) as ZarrStoreType)
     } else {
-      const baseStore = createFetchStore(this.source, this.transformRequest)
-      // When the version is known, tell the consolidated-metadata wrapper
-      // to only try that format — avoids a wasted .zmetadata fetch on v3
-      // stores (and vice versa). Falls back to auto-detect when unknown.
-      // v3 consolidated metadata support is experimental; the outer
-      // `.catch` keeps us on the raw store if the wrapper trips.
-      const consolidatedOpts: zarr.ConsolidatedMetadataOptions | undefined =
-        this.version === 2
-          ? { format: 'v2' }
-          : this.version === 3
-          ? { format: 'v3' }
-          : undefined
       // Layered data access:
+      // - Consolidated metadata: one-shot fetch of the `.zmetadata`/`zarr.json`
+      //   blob so array opens are in-memory lookups. Falls back to the raw
+      //   store if the wrapper trips (e.g. v3 experimental).
       // - Range coalescing: batches concurrent HTTP range requests in a
       //   microtask tick so many tile fetches become few round-trips.
       // - Decoded-chunk caching: memoizes the decompressed `getChunk`
       //   ndarray so selector scrubs and hover queries within
       //   already-fetched chunks skip decompression. Concurrent requests
       //   for the same chunk share one fetch via an in-flight map.
+      const consolidatedOpts: zarr.ConsolidatedMetadataOptions | undefined =
+        this.version === 2
+          ? { format: 'v2' }
+          : this.version === 3
+          ? { format: 'v3' }
+          : undefined
       this.store = (await zarr.extendStore(
-        baseStore,
+        createFetchStore(this.source, this.transformRequest),
         (store) =>
           zarr
             .withMaybeConsolidatedMetadata(store, consolidatedOpts)

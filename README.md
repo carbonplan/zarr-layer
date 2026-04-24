@@ -114,7 +114,6 @@ map.on('load', () => {
 | customFrag | string | - | Custom fragment shader |
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
-| throttleMs | number | `100` | Throttle interval (ms) for data fetching during rapid selector changes. Set to `0` to disable. |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
 | renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for untiled EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on tiled or EPSG:3857 data. MapLibre always renders to the poles. |
 
@@ -128,6 +127,10 @@ layer.setSelector({ time: 5 })
 layer.setVariable('precipitation') // async - reloads metadata
 layer.setUniforms({ u_weight: 1.5 }) // no-op unless layer has customFrag
 ```
+
+### throttling rapid selector changes
+
+`setSelector` is synchronous and kicks off a fetch on every call. For UIs that fire rapid updates (e.g. dragging a time slider), debounce the value on your side before handing it to the layer so you aren't firing one abort-cancelled fetch per pointer event.
 
 ## selectors
 

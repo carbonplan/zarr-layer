@@ -1842,11 +1842,14 @@ export class UntiledMode implements ZarrMode {
     }
 
     // Committed level matches target — render from it. If a selector
-    // rebuild is in flight (`loadingLevelIndex === activeLevel.index`),
-    // skip the fetch loop: `updateVisibleRegions` would dispatch fetches
-    // against the old `baseSliceArgs` and stamp them with the pending
-    // selectorVersion, leaving stale data marked fresh in the cache.
-    if (this.loadingLevelIndex !== null) return
+    // rebuild is in flight *for this level* (`loadingLevelIndex ===
+    // activeLevel.index`), skip the fetch loop: `updateVisibleRegions`
+    // would dispatch fetches against the old `baseSliceArgs` and stamp
+    // them with the pending selectorVersion, leaving stale data marked
+    // fresh in the cache. A pending load for a *different* level (e.g.
+    // user zoomed in then zoomed back out while the deeper-level load
+    // was still outstanding) shouldn't block rendering the current one.
+    if (this.loadingLevelIndex === this.activeLevel.index) return
     this.updateVisibleRegions(map, gl)
   }
 
