@@ -1510,38 +1510,26 @@ export class UntiledMode implements ZarrMode {
       region.loading = true
     }
 
-    const MAX_CONCURRENT = 32
-    const executing: Promise<void>[] = []
-
-    for (const { regionX, regionY } of regions) {
-      // Check if level or selector changed - bail out to avoid stale fetches
-      if (
-        (this.activeLevel?.index ?? -1) !== snapshot.index ||
-        this.selectorVersion !== snapshot.selectorVersion
-      ) {
-        cancelAllRequests(this.requestCanceller)
-        this.clearBatchLoadingFlags(regions, snapshot.index)
-        break
-      }
-
-      const promise = this.fetchRegion(regionX, regionY, gl, snapshot)
-        .then(() => {
-          executing.splice(executing.indexOf(promise), 1)
-        })
-        .catch(() => {
-          executing.splice(executing.indexOf(promise), 1)
-        })
-
-      executing.push(promise)
-
-      if (executing.length >= MAX_CONCURRENT) {
-        await Promise.race(executing)
-      }
-    }
-
-    // Wait for remaining requests (if any are still in flight)
-    if (executing.length > 0) {
-      await Promise.allSettled(executing)
+    // Pre-flight staleness check. Mid-flight changes are handled by the
+    // `cancelAllRequests` in `loadLevel`/`setSelector`, which aborts the
+    // signals that fetchRegion threads through every await.
+    if (
+      (this.activeLevel?.index ?? -1) !== snapshot.index ||
+      this.selectorVersion !== snapshot.selectorVersion
+    ) {
+      cancelAllRequests(this.requestCanceller)
+      this.clearBatchLoadingFlags(regions, snapshot.index)
+    } else {
+      // Kick off every region synchronously so their underlying chunk reads
+      // land in one microtask drain — that's what lets the range coalescer
+      // (icechunk-js + zarrita) merge them into a handful of HTTP fetches
+      // instead of one per region. Browser HTTP queueing handles back-
+      // pressure on the connection pool; throttling fetchRegion calls here
+      // just fragments the coalescer's same-tick batch window.
+      const fetches = regions.map(({ regionX, regionY }) =>
+        this.fetchRegion(regionX, regionY, gl, snapshot)
+      )
+      await Promise.allSettled(fetches)
     }
 
     // Only update loading state if we're still on the same level
