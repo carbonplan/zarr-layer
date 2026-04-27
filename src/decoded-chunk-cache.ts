@@ -43,6 +43,9 @@ type AnyChunk = zarr.Chunk<zarr.DataType>
 const chunkCacheKey = (path: string, coords: number[]): string =>
   `${path}\0${coords.join(',')}`
 
+const createAbortError = () =>
+  new DOMException('The operation was aborted.', 'AbortError')
+
 interface PendingEntry {
   promise: Promise<AnyChunk>
   // Used to abort the underlying fetch only when every awaiter has given
@@ -60,6 +63,11 @@ const decodedChunkExtension = zarr.defineArrayExtension(
     }
   ) => ({
     async getChunk(coords, options) {
+      const callerSignal = options?.signal
+      if (callerSignal?.aborted) {
+        throw createAbortError()
+      }
+
       const key = chunkCacheKey(array.path, coords)
       const hit = opts.cache.get(key)
       if (hit) return hit
@@ -105,7 +113,6 @@ const decodedChunkExtension = zarr.defineArrayExtension(
         }
       }
 
-      const callerSignal = options?.signal
       if (!callerSignal) {
         try {
           const chunk = await ownedEntry.promise
@@ -117,25 +124,27 @@ const decodedChunkExtension = zarr.defineArrayExtension(
         }
       }
 
-      if (callerSignal.aborted) {
-        abandonRef()
-        throw new DOMException('The operation was aborted.', 'AbortError')
-      }
-
       return new Promise<AnyChunk>((resolve, reject) => {
+        let settled = false
         const onAbort = () => {
+          if (settled) return
+          settled = true
           callerSignal.removeEventListener('abort', onAbort)
           abandonRef()
-          reject(new DOMException('The operation was aborted.', 'AbortError'))
+          reject(createAbortError())
         }
         callerSignal.addEventListener('abort', onAbort, { once: true })
         ownedEntry.promise.then(
           (chunk) => {
+            if (settled) return
+            settled = true
             callerSignal.removeEventListener('abort', onAbort)
             releaseRef()
             resolve(chunk)
           },
           (err) => {
+            if (settled) return
+            settled = true
             callerSignal.removeEventListener('abort', onAbort)
             releaseRef()
             reject(err)

@@ -483,7 +483,11 @@ export class TiledMode implements ZarrMode {
       const fetchPromises = tiles.map((tiletuple) =>
         this.fetchTileData(tiletuple, selectorHash, version, controller.signal)
       )
-      await Promise.all(fetchPromises)
+      const results = await Promise.allSettled(fetchPromises)
+      const rejected = results.find((result) => result.status === 'rejected')
+      if (rejected) {
+        throw rejected.reason
+      }
     } finally {
       this.requestCanceller.controllers.delete(version)
     }
