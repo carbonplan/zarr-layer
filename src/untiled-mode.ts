@@ -160,6 +160,7 @@ interface LevelSnapshot {
   height: number
   regionSize: [number, number]
   selectorVersion: number
+  bandNames: string[]
 }
 
 /**
@@ -185,6 +186,11 @@ interface LevelRuntime {
     labels: (number | string)[]
   }>
 }
+
+type QueryLevelSnapshot = Pick<
+  LevelRuntime,
+  'index' | 'zarrArray' | 'width' | 'height'
+>
 
 export class UntiledMode implements ZarrMode {
   isMultiscale: boolean = false
@@ -581,7 +587,9 @@ export class UntiledMode implements ZarrMode {
         numRegionsX,
         numRegionsY,
         regionW,
-        regionH
+        regionH,
+        width,
+        height
       )
 
       // Verify candidates via inverse transform to WGS84 for precise overlap.
@@ -589,7 +597,11 @@ export class UntiledMode implements ZarrMode {
       // produce false positives.
       const regions: Array<{ regionX: number; regionY: number }> = []
       for (const { regionX, regionY } of candidates) {
-        const regBounds = this.getRegionBounds(regionX, regionY)
+        const regBounds = this.getRegionBounds(regionX, regionY, {
+          width,
+          height,
+          regionSize,
+        })
         const xMid = (regBounds.xMin + regBounds.xMax) / 2
         const yMid = (regBounds.yMin + regBounds.yMax) / 2
 
@@ -737,7 +749,8 @@ export class UntiledMode implements ZarrMode {
       region.vertexBuffer &&
       region.pixCoordBuffer &&
       region.vertexArr &&
-      region.mercatorBounds
+      region.mercatorBounds &&
+      region.levelMeta
     )
   }
 
@@ -885,7 +898,9 @@ export class UntiledMode implements ZarrMode {
     numRegionsX: number,
     numRegionsY: number,
     regionW: number,
-    regionH: number
+    regionH: number,
+    width: number,
+    height: number
   ): Array<{ regionX: number; regionY: number }> {
     if (!this.xyLimits) return []
     const { xMin, xMax, yMin, yMax } = this.xyLimits
@@ -951,18 +966,14 @@ export class UntiledMode implements ZarrMode {
     // Widen margin when some samples failed (projection boundary)
     const margin = validCount < totalCount ? 8 : 2
 
-    const pxXMin =
-      ((srcXMin - xMin) / (xMax - xMin)) * (this.activeLevel?.width ?? 0)
-    const pxXMax =
-      ((srcXMax - xMin) / (xMax - xMin)) * (this.activeLevel?.width ?? 0)
-    const pxYMin =
-      ((srcYMin - yMin) / (yMax - yMin)) * (this.activeLevel?.height ?? 0)
-    const pxYMax =
-      ((srcYMax - yMin) / (yMax - yMin)) * (this.activeLevel?.height ?? 0)
+    const pxXMin = ((srcXMin - xMin) / (xMax - xMin)) * width
+    const pxXMax = ((srcXMax - xMin) / (xMax - xMin)) * width
+    const pxYMin = ((srcYMin - yMin) / (yMax - yMin)) * height
+    const pxYMax = ((srcYMax - yMin) / (yMax - yMin)) * height
     let rXMin: number, rXMax: number, rYMin: number, rYMax: number
     if (this.latIsAscending === false) {
-      const invYMin = (this.activeLevel?.height ?? 0) - pxYMax
-      const invYMax = (this.activeLevel?.height ?? 0) - pxYMin
+      const invYMin = height - pxYMax
+      const invYMax = height - pxYMin
       rYMin = Math.floor(invYMin / regionH) - margin
       rYMax = Math.floor(invYMax / regionH) + margin
     } else {
@@ -990,21 +1001,19 @@ export class UntiledMode implements ZarrMode {
   /**
    * Get geographic bounds for a region.
    * Accounts for data orientation (latIsAscending).
-   * Accepts optional levelMeta to use level-specific dimensions instead of current level.
+   * Requires level-specific dimensions so async work never reaches back into
+   * `activeLevel`, which may have changed since the caller captured a region.
    */
   private getRegionBounds(
     regionX: number,
     regionY: number,
-    levelMeta?: LevelMeta
+    levelMeta: LevelMeta
   ): { xMin: number; xMax: number; yMin: number; yMax: number } {
-    const width = levelMeta?.width ?? this.activeLevel?.width ?? 0
-    const height = levelMeta?.height ?? this.activeLevel?.height ?? 0
-    const regionSize =
-      levelMeta?.regionSize ?? this.activeLevel?.regionSize ?? null
+    const { width, height, regionSize } = levelMeta
 
     // xyLimits is assumed constant across all multiscale levels (same geographic extent).
     // If per-level bounds are ever needed, add xyLimits to LevelMeta type.
-    if (!this.xyLimits || !regionSize) {
+    if (!this.xyLimits) {
       return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
     }
 
@@ -1054,9 +1063,7 @@ export class UntiledMode implements ZarrMode {
     region: RegionState
   ): void {
     // Guard: can't create geometry without dimension info
-    if (!region.levelMeta && !(this.activeLevel?.regionSize ?? null)) {
-      return
-    }
+    if (!region.levelMeta) return
 
     // Defensive reset: wgs84Bounds is only set by the proj4 branch below.
     // Ensures it's not stale after projection toggle or geometry rebuild.
@@ -1064,11 +1071,7 @@ export class UntiledMode implements ZarrMode {
     region.indexArr = null
     region.useIndexedMesh = false
 
-    const geoBounds = this.getRegionBounds(
-      regionX,
-      regionY,
-      region.levelMeta ?? undefined
-    )
+    const geoBounds = this.getRegionBounds(regionX, regionY, region.levelMeta)
 
     // Use cached mercatorBounds if set (from fetchRegion's resampling path),
     // otherwise compute from geoBounds (for non-resampling cases like EPSG:3857)
@@ -1242,11 +1245,12 @@ export class UntiledMode implements ZarrMode {
         maxY: number
       }
       /**
-       * Array to derive shape from. Use during `loadLevel` when the new
-       * array isn't committed to `activeLevel` yet; otherwise defaults to
-       * the active level's array.
+       * Array to derive shape from. Caller pins this so we don't read
+       * `this.activeLevel?.zarrArray` mid-flight (which can swap during
+       * `loadLevel` or zoom). Pass the new array during `loadLevel`, or
+       * a snapshot of the active array for query/render paths.
        */
-      array?: zarr.Array<zarr.DataType>
+      array: zarr.Array<zarr.DataType>
     }
   ): Promise<{
     sliceArgs: (number | zarr.Slice)[]
@@ -1257,10 +1261,7 @@ export class UntiledMode implements ZarrMode {
       labels: (number | string)[]
     }>
   }> {
-    const array = options.array ?? this.activeLevel?.zarrArray ?? null
-    if (!array) {
-      return { sliceArgs: [], multiValueDims: [] }
-    }
+    const { array } = options
 
     const sliceArgs: (number | zarr.Slice)[] = new Array(
       array.shape.length
@@ -1287,7 +1288,7 @@ export class UntiledMode implements ZarrMode {
           )
         } else {
           sliceArgs[dimInfo.index] = options.includeSpatialSlices
-            ? zarr.slice(0, this.activeLevel?.width ?? 0)
+            ? zarr.slice(0, array.shape[dimInfo.index] ?? 0)
             : 0
         }
       } else if (dimType === 'lat') {
@@ -1298,7 +1299,7 @@ export class UntiledMode implements ZarrMode {
           )
         } else {
           sliceArgs[dimInfo.index] = options.includeSpatialSlices
-            ? zarr.slice(0, this.activeLevel?.height ?? 0)
+            ? zarr.slice(0, array.shape[dimInfo.index] ?? 0)
             : 0
         }
       } else {
@@ -1488,6 +1489,7 @@ export class UntiledMode implements ZarrMode {
       height: level.height,
       regionSize: level.regionSize,
       selectorVersion: this.selectorVersion,
+      bandNames: [...this.bandNames],
       baseMultiValueDims: level.baseMultiValueDims.map((dim) => ({
         dimIndex: dim.dimIndex,
         dimName: dim.dimName,
@@ -1602,12 +1604,9 @@ export class UntiledMode implements ZarrMode {
       const { combinations: channelCombinations } =
         this.buildChannelCombinations(snapshot.baseMultiValueDims)
       const numChannels = channelCombinations.length || 1
-      const pixelCount = actualW * actualH
 
       // Fetch data for all channels
       const bandArrays: Float32Array[] = []
-      const packedData = new Float32Array(pixelCount * numChannels)
-      packedData.fill(fillValue ?? 0)
 
       const isStale = () =>
         controller.signal.aborted ||
@@ -1626,7 +1625,6 @@ export class UntiledMode implements ZarrMode {
 
         const rawData = new Float32Array(result.data as ArrayLike<number>)
         bandArrays.push(rawData)
-        packedData.set(rawData)
       } else {
         // Multi-channel - fetch all channels in parallel
         if (isStale()) return
@@ -1660,11 +1658,6 @@ export class UntiledMode implements ZarrMode {
           const result = results[c] as { data: ArrayLike<number> }
           const bandData = new Float32Array(result.data as ArrayLike<number>)
           bandArrays.push(bandData)
-
-          // Pack into interleaved format for main texture
-          for (let pixIdx = 0; pixIdx < pixelCount; pixIdx++) {
-            packedData[pixIdx * numChannels + c] = bandData[pixIdx]
-          }
         }
       }
 
@@ -1675,10 +1668,6 @@ export class UntiledMode implements ZarrMode {
       region.selectorVersion = fetchSelectorVersion
 
       // Resample bands to Mercator space if needed (EPSG:4326 or custom projection)
-      let bandDataToProcess = bandArrays
-      let outputW = actualW
-      let outputH = actualH
-
       // For non-EPSG:3857 datasets: GPU handles reprojection
       // - Proj4 datasets: adaptive mesh (CRS→4326), GPU projects to Mercator or ECEF
       // - EPSG:4326 datasets: subdivided quad, GPU reprojects via fragment or ECEF
@@ -1706,9 +1695,9 @@ export class UntiledMode implements ZarrMode {
       region.bandTexturesUploaded.clear()
       const normalizedBands: Float32Array[] = []
 
-      for (let c = 0; c < bandDataToProcess.length; c++) {
-        const bandName = this.bandNames[c] || `band_${c}`
-        let bandData = bandDataToProcess[c]
+      for (let c = 0; c < bandArrays.length; c++) {
+        const bandName = snapshot.bandNames[c] || `band_${c}`
+        let bandData = bandArrays[c]
 
         // Apply scale/offset if needed (converts raw to physical values)
         if (scaleFactor !== 1 || addOffset !== 0) {
@@ -1747,11 +1736,11 @@ export class UntiledMode implements ZarrMode {
       // The adaptive mesh only depends on spatial bounds and dimensions, not the selector
       const needsGeometry =
         !region.vertexBuffer ||
-        region.width !== outputW ||
-        region.height !== outputH
+        region.width !== actualW ||
+        region.height !== actualH
 
-      region.width = outputW
-      region.height = outputH
+      region.width = actualW
+      region.height = actualH
       region.channels = numChannels
       region.loading = false
 
@@ -1773,8 +1762,8 @@ export class UntiledMode implements ZarrMode {
       const result = uploadDataTexture(gl, {
         texture: region.texture!,
         data: region.data!,
-        width: outputW,
-        height: outputH,
+        width: actualW,
+        height: actualH,
         channels: numChannels,
         configured: false,
       })
@@ -2453,6 +2442,7 @@ export class UntiledMode implements ZarrMode {
    * Handles multi-value dimensions and channel combinations.
    */
   private async fetchQueryData(
+    level: QueryLevelSnapshot,
     selector: NormalizedSelector,
     spatialQuery: {
       minX: number
@@ -2469,15 +2459,13 @@ export class UntiledMode implements ZarrMode {
     channelLabels: (string | number)[][]
     multiValueDimNames: string[]
   } | null> {
-    if (!this.activeLevel) return null
-    const { zarrArray } = this.activeLevel
-
     try {
       const { sliceArgs: baseSliceArgs, multiValueDims } =
         await this.buildSliceArgsForSelector(selector, {
           includeSpatialSlices: false,
           trackMultiValue: true,
           spatialBounds: spatialQuery,
+          array: level.zarrArray,
         })
 
       const {
@@ -2492,9 +2480,11 @@ export class UntiledMode implements ZarrMode {
       const fetchHeight = spatialQuery.maxY - spatialQuery.minY
 
       if (numChannels === 1) {
-        const result = (await zarr.get(zarrArray, baseSliceArgs, getOpts)) as {
-          data: ArrayLike<number>
-        }
+        const result = (await zarr.get(
+          level.zarrArray,
+          baseSliceArgs,
+          getOpts
+        )) as { data: ArrayLike<number> }
         return {
           data: new Float32Array(result.data),
           width: fetchWidth,
@@ -2515,9 +2505,11 @@ export class UntiledMode implements ZarrMode {
           sliceArgs[multiValueDims[i].dimIndex] = combo[i]
         }
 
-        const bandData = (await zarr.get(zarrArray, sliceArgs, getOpts)) as {
-          data: ArrayLike<number>
-        }
+        const bandData = (await zarr.get(
+          level.zarrArray,
+          sliceArgs,
+          getOpts
+        )) as { data: ArrayLike<number> }
         for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
           packedData[pixIdx * numChannels + c] = bandData.data[pixIdx]
         }
@@ -2541,23 +2533,18 @@ export class UntiledMode implements ZarrMode {
   /**
    * Compute subset bounds from pixel bounds against the full mercator bounds.
    */
-  private computeSubsetBounds(pixelBounds: PixelRect): MercatorBounds {
+  private computeSubsetBounds(
+    pixelBounds: PixelRect,
+    level: QueryLevelSnapshot
+  ): MercatorBounds {
     const { minX, maxX, minY, maxY } = pixelBounds
     const xRange = this.mercatorBounds!.x1 - this.mercatorBounds!.x0
     const yRange = this.mercatorBounds!.y1 - this.mercatorBounds!.y0
     const subsetBounds: MercatorBounds = {
-      x0:
-        this.mercatorBounds!.x0 +
-        (minX / (this.activeLevel?.width ?? 0)) * xRange,
-      x1:
-        this.mercatorBounds!.x0 +
-        (maxX / (this.activeLevel?.width ?? 0)) * xRange,
-      y0:
-        this.mercatorBounds!.y0 +
-        (minY / (this.activeLevel?.height ?? 0)) * yRange,
-      y1:
-        this.mercatorBounds!.y0 +
-        (maxY / (this.activeLevel?.height ?? 0)) * yRange,
+      x0: this.mercatorBounds!.x0 + (minX / level.width) * xRange,
+      x1: this.mercatorBounds!.x0 + (maxX / level.width) * xRange,
+      y0: this.mercatorBounds!.y0 + (minY / level.height) * yRange,
+      y1: this.mercatorBounds!.y0 + (maxY / level.height) * yRange,
     }
     if (
       this.mercatorBounds!.latMin !== undefined &&
@@ -2566,18 +2553,14 @@ export class UntiledMode implements ZarrMode {
       const latRange = this.mercatorBounds!.latMax - this.mercatorBounds!.latMin
       if (this.latIsAscending) {
         subsetBounds.latMin =
-          this.mercatorBounds!.latMin +
-          (minY / (this.activeLevel?.height ?? 0)) * latRange
+          this.mercatorBounds!.latMin + (minY / level.height) * latRange
         subsetBounds.latMax =
-          this.mercatorBounds!.latMin +
-          (maxY / (this.activeLevel?.height ?? 0)) * latRange
+          this.mercatorBounds!.latMin + (maxY / level.height) * latRange
       } else {
         subsetBounds.latMax =
-          this.mercatorBounds!.latMax -
-          (minY / (this.activeLevel?.height ?? 0)) * latRange
+          this.mercatorBounds!.latMax - (minY / level.height) * latRange
         subsetBounds.latMin =
-          this.mercatorBounds!.latMax -
-          (maxY / (this.activeLevel?.height ?? 0)) * latRange
+          this.mercatorBounds!.latMax - (maxY / level.height) * latRange
       }
     }
     return subsetBounds
@@ -2597,14 +2580,22 @@ export class UntiledMode implements ZarrMode {
       coordinates: { lat: [], lon: [] },
     })
 
-    if (!this.mercatorBounds) return emptyResult()
+    const activeLevel = this.activeLevel
+    if (!this.mercatorBounds || !activeLevel) return emptyResult()
+
+    const level: QueryLevelSnapshot = {
+      index: activeLevel.index,
+      zarrArray: activeLevel.zarrArray,
+      width: activeLevel.width,
+      height: activeLevel.height,
+    }
 
     const normalizedSelector = selector
       ? normalizeSelector(selector)
       : this.selector
 
     const desc = this.zarrStore.describe()
-    const currentLevel = this.levels[this.activeLevel?.index ?? -1]
+    const currentLevel = this.levels[level.index]
     const transforms = {
       scaleFactor: currentLevel?.scaleFactor ?? desc.scaleFactor,
       addOffset: currentLevel?.addOffset ?? desc.addOffset,
@@ -2628,13 +2619,14 @@ export class UntiledMode implements ZarrMode {
       opts?: QueryOptions
     ): Promise<QueryResult | null> => {
       const fetched = await this.fetchQueryData(
+        level,
         normalizedSelector,
         pixelBounds,
         opts?.signal
       )
       if (!fetched) return null
 
-      const subsetBounds = this.computeSubsetBounds(pixelBounds)
+      const subsetBounds = this.computeSubsetBounds(pixelBounds, level)
 
       let subsetSourceBounds: [number, number, number, number] | null = null
       if (this.proj4def && sourceBounds) {
@@ -2643,16 +2635,16 @@ export class UntiledMode implements ZarrMode {
           minX,
           minY,
           sourceBounds,
-          this.activeLevel?.width ?? 0,
-          this.activeLevel?.height ?? 0,
+          level.width,
+          level.height,
           this.latIsAscending
         )
         const [xMax, yMax] = pixelToSourceCRS(
           maxX,
           maxY,
           sourceBounds,
-          this.activeLevel?.width ?? 0,
-          this.activeLevel?.height ?? 0,
+          level.width,
+          level.height,
           this.latIsAscending
         )
         subsetSourceBounds = [
@@ -2691,8 +2683,8 @@ export class UntiledMode implements ZarrMode {
       const pixelBounds = computePixelBoundsFromGeometry(
         geom,
         this.mercatorBounds!,
-        this.activeLevel?.width ?? 0,
-        this.activeLevel?.height ?? 0,
+        level.width,
+        level.height,
         this.crs ?? 'EPSG:4326',
         this.latIsAscending,
         this.proj4def,
@@ -2747,8 +2739,8 @@ export class UntiledMode implements ZarrMode {
     const spans = wrappedBboxToPixelSpans(
       wrappedBbox,
       this.mercatorBounds,
-      this.activeLevel?.width ?? 0,
-      this.activeLevel?.height ?? 0,
+      level.width,
+      level.height,
       this.crs ?? 'EPSG:4326',
       this.latIsAscending
     )
