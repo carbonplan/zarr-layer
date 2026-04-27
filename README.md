@@ -304,7 +304,7 @@ transformRequest: async (url) => ({
 For advanced use cases like [Icechunk](https://icechunk.io/), you can pass a custom zarrita-compatible store directly. When using a custom store, `source` becomes optional:
 
 ```ts
-import { IcechunkStore } from 'wip-tk'
+import { IcechunkStore } from 'icechunk-js'
 
 const store = await IcechunkStore.open(...)
 
