@@ -62,7 +62,7 @@ export interface RegionRenderState {
   bandTextures?: Map<string, WebGLTexture>
   bandTexturesUploaded?: Set<string>
   bandTexturesConfigured?: Set<string>
-  /** Index buffer for adaptive mesh (proj4 datasets) */
+  /** Index buffer for adaptive source-projected meshes */
   indexBuffer?: WebGLBuffer
   /** Number of vertices/indices to draw */
   vertexCount?: number
