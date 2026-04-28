@@ -7,7 +7,7 @@
  * adapted from zarr-cesium/src/map-utils.ts
  */
 
-import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
+import { MERCATOR_LAT_LIMIT } from './constants'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 import type { MapLike } from './types'
@@ -466,49 +466,6 @@ export function findBestChildTiles<T extends TileDataLike>(
   }
 
   return bestChildren.length > 0 ? bestChildren : null
-}
-
-/**
- * Converts geographic bounds to normalized Web Mercator bounds [0, 1].
- * Handles both EPSG:4326 (lat/lon) and EPSG:3857 (already mercator) coordinate systems.
- * @param xyLimits - Geographic bounds { xMin, xMax, yMin, yMax }.
- * @param crs - Coordinate reference system ('EPSG:4326' or 'EPSG:3857').
- * @returns Normalized mercator bounds { x0, y0, x1, y1 }.
- */
-export function boundsToMercatorNorm(
-  xyLimits: { xMin: number; xMax: number; yMin: number; yMax: number },
-  crs: 'EPSG:4326' | 'EPSG:3857' | null
-): MercatorBounds {
-  if (crs === 'EPSG:3857') {
-    return {
-      x0: (xyLimits.xMin + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
-      y0: (WEB_MERCATOR_EXTENT - xyLimits.yMax) / (2 * WEB_MERCATOR_EXTENT),
-      x1: (xyLimits.xMax + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
-      y1: (WEB_MERCATOR_EXTENT - xyLimits.yMin) / (2 * WEB_MERCATOR_EXTENT),
-    }
-  }
-
-  let yMin = xyLimits.yMin
-  let yMax = xyLimits.yMax
-  if (yMin > yMax) {
-    ;[yMin, yMax] = [yMax, yMin]
-  }
-
-  const bounds: MercatorBounds = {
-    x0: lonToMercatorNorm(xyLimits.xMin),
-    y0: latToMercatorNorm(yMax),
-    x1: lonToMercatorNorm(xyLimits.xMax),
-    y1: latToMercatorNorm(yMin),
-  }
-
-  if (crs === 'EPSG:4326') {
-    // Preserve original latitude bounds for equirectangular data so callers
-    // can perform linear-latitude calculations when needed (e.g. queries).
-    bounds.latMin = yMin
-    bounds.latMax = yMax
-  }
-
-  return bounds
 }
 
 // === Untiled mode utilities ===
