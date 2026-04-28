@@ -74,7 +74,6 @@ import {
   sampleEdgesToMercatorBounds,
 } from './projection-utils'
 import { createHybridMesh } from './mesh-reprojector'
-import { geoToArrayIndex } from './map-utils'
 import {
   type RequestCanceller,
   type LoadingManager,
@@ -311,7 +310,13 @@ export class UntiledMode implements ZarrMode {
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
-      this.proj4def = desc.proj4 ?? null
+      // proj4js ships with EPSG:4326 and EPSG:3857 pre-registered, so we
+      // can pass the EPSG code itself as a proj4 def for those CRSes when
+      // the consumer didn't supply a string. Lets `getVisibleRegions` use
+      // the proj4-aware path uniformly for supported CRSes. (#59)
+      const proj4jsHasBuiltinDef =
+        desc.crs === 'EPSG:4326' || desc.crs === 'EPSG:3857'
+      this.proj4def = desc.proj4 ?? (proj4jsHasBuiltinDef ? desc.crs : null)
 
       // Cache transformers once for reuse (major performance optimization)
       if (this.proj4def && this.xyLimits) {
@@ -562,124 +567,88 @@ export class UntiledMode implements ZarrMode {
   ): Array<{ regionX: number; regionY: number }> {
     const bounds = map.getBounds?.()?.toArray?.()
     if (!bounds || !this.xyLimits || !this.activeLevel) return []
+    if (!this.proj4def || !this.cachedWGS84Transformer) {
+      // No proj4 transformer was set up — either because the CRS isn't
+      // one proj4js handles natively and no `proj4` prop was supplied
+      // (constructor warned), or because proj4 init threw on a malformed
+      // string. Either way, computing region indices here would be wrong;
+      // skip rather than render a misleading partial result.
+      return []
+    }
 
     const { width, height, regionSize } = this.activeLevel
     const [[west, south], [east, north]] = bounds
-    const { xMin, xMax, yMin, yMax } = this.xyLimits
     const [regionH, regionW] = regionSize
 
-    if (this.proj4def && this.cachedWGS84Transformer) {
-      // For projected data, use a two-pass approach:
-      // 1. Forward-transform viewport edges to source CRS to find candidate regions
-      //    via index math (O(1) proj4 cost, may include false positives for non-
-      //    bijective projections like UTM outside their zone)
-      // 2. Inverse-transform candidate region bounds to WGS84 for precise overlap
-      const transformer = this.cachedWGS84Transformer
-      const numRegionsX = Math.ceil(width / regionW)
-      const numRegionsY = Math.ceil(height / regionH)
-
-      const candidates = this.getCandidateRegions(
-        west,
-        south,
-        east,
-        north,
-        transformer,
-        numRegionsX,
-        numRegionsY,
-        regionW,
-        regionH,
-        width,
-        height
-      )
-
-      // Verify candidates via inverse transform to WGS84 for precise overlap.
-      // This handles non-bijective projections where forward transforms can
-      // produce false positives.
-      const regions: Array<{ regionX: number; regionY: number }> = []
-      for (const { regionX, regionY } of candidates) {
-        const regBounds = this.getRegionBounds(regionX, regionY, {
-          width,
-          height,
-          regionSize,
-        })
-        const xMid = (regBounds.xMin + regBounds.xMax) / 2
-        const yMid = (regBounds.yMin + regBounds.yMax) / 2
-
-        const samplePoints = [
-          transformer.inverse(regBounds.xMin, regBounds.yMin),
-          transformer.inverse(regBounds.xMax, regBounds.yMin),
-          transformer.inverse(regBounds.xMax, regBounds.yMax),
-          transformer.inverse(regBounds.xMin, regBounds.yMax),
-          transformer.inverse(xMid, regBounds.yMin),
-          transformer.inverse(xMid, regBounds.yMax),
-          transformer.inverse(regBounds.xMin, yMid),
-          transformer.inverse(regBounds.xMax, yMid),
-        ]
-
-        let regWest = Infinity
-        let regEast = -Infinity
-        let regSouth = Infinity
-        let regNorth = -Infinity
-        let hasValid = false
-        for (const [lon, lat] of samplePoints) {
-          if (!isFinite(lon) || !isFinite(lat)) continue
-          hasValid = true
-          if (lon < regWest) regWest = lon
-          if (lon > regEast) regEast = lon
-          if (lat < regSouth) regSouth = lat
-          if (lat > regNorth) regNorth = lat
-        }
-        if (!hasValid) continue
-
-        if (
-          regEast >= west &&
-          regWest <= east &&
-          regNorth >= south &&
-          regSouth <= north
-        ) {
-          regions.push({ regionX, regionY })
-        }
-      }
-
-      return regions
-    }
-
-    // Standard case: viewport bounds are in same CRS as xyLimits
-    const xMinIdx = geoToArrayIndex(west, xMin, xMax, width)
-    const xMaxIdx = geoToArrayIndex(east, xMin, xMax, width)
-
-    // For Y axis, geoToArrayIndex assumes yMin maps to row 0.
-    // But if latIsAscending=false (row 0 = north = yMax), we need to invert.
-    let ySouthIdx = geoToArrayIndex(south, yMin, yMax, height)
-    let yNorthIdx = geoToArrayIndex(north, yMin, yMax, height)
-
-    // Only invert if we explicitly know latIsAscending is false
-    // If null/undefined, assume ascending (yMin at row 0) as default
-    if (this.latIsAscending === false) {
-      // Invert Y indices: row 0 = north (yMax), row height-1 = south (yMin)
-      ySouthIdx = height - 1 - ySouthIdx
-      yNorthIdx = height - 1 - yNorthIdx
-    }
-
-    // Convert pixel indices to region indices
-    const regionXMin = Math.floor(Math.min(xMinIdx, xMaxIdx) / regionW)
-    const regionXMax = Math.floor(Math.max(xMinIdx, xMaxIdx) / regionW)
-    const regionYMin = Math.floor(Math.min(ySouthIdx, yNorthIdx) / regionH)
-    const regionYMax = Math.floor(Math.max(ySouthIdx, yNorthIdx) / regionH)
-
-    // Clamp to valid range
+    // For projected data, use a two-pass approach:
+    // 1. Forward-transform viewport edges to source CRS to find candidate
+    //    regions via index math (O(1) proj4 cost, may include false
+    //    positives for non-bijective projections like UTM outside their zone)
+    // 2. Inverse-transform candidate region bounds to WGS84 for precise overlap
+    const transformer = this.cachedWGS84Transformer
     const numRegionsX = Math.ceil(width / regionW)
     const numRegionsY = Math.ceil(height / regionH)
-    const clampedXMin = Math.max(0, regionXMin)
-    const clampedXMax = Math.min(numRegionsX - 1, regionXMax)
-    const clampedYMin = Math.max(0, regionYMin)
-    const clampedYMax = Math.min(numRegionsY - 1, regionYMax)
 
-    // Build list of visible region coordinates
+    const candidates = this.getCandidateRegions(
+      west,
+      south,
+      east,
+      north,
+      transformer,
+      numRegionsX,
+      numRegionsY,
+      regionW,
+      regionH,
+      width,
+      height
+    )
+
+    // Verify candidates via inverse transform to WGS84 for precise overlap.
+    // This handles non-bijective projections where forward transforms can
+    // produce false positives.
     const regions: Array<{ regionX: number; regionY: number }> = []
-    for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
-      for (let rx = clampedXMin; rx <= clampedXMax; rx++) {
-        regions.push({ regionX: rx, regionY: ry })
+    for (const { regionX, regionY } of candidates) {
+      const regBounds = this.getRegionBounds(regionX, regionY, {
+        width,
+        height,
+        regionSize,
+      })
+      const xMid = (regBounds.xMin + regBounds.xMax) / 2
+      const yMid = (regBounds.yMin + regBounds.yMax) / 2
+
+      const samplePoints = [
+        transformer.inverse(regBounds.xMin, regBounds.yMin),
+        transformer.inverse(regBounds.xMax, regBounds.yMin),
+        transformer.inverse(regBounds.xMax, regBounds.yMax),
+        transformer.inverse(regBounds.xMin, regBounds.yMax),
+        transformer.inverse(xMid, regBounds.yMin),
+        transformer.inverse(xMid, regBounds.yMax),
+        transformer.inverse(regBounds.xMin, yMid),
+        transformer.inverse(regBounds.xMax, yMid),
+      ]
+
+      let regWest = Infinity
+      let regEast = -Infinity
+      let regSouth = Infinity
+      let regNorth = -Infinity
+      let hasValid = false
+      for (const [lon, lat] of samplePoints) {
+        if (!isFinite(lon) || !isFinite(lat)) continue
+        hasValid = true
+        if (lon < regWest) regWest = lon
+        if (lon > regEast) regEast = lon
+        if (lat < regSouth) regSouth = lat
+        if (lat > regNorth) regNorth = lat
+      }
+      if (!hasValid) continue
+
+      if (
+        regEast >= west &&
+        regWest <= east &&
+        regNorth >= south &&
+        regSouth <= north
+      ) {
+        regions.push({ regionX, regionY })
       }
     }
 
