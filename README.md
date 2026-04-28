@@ -264,12 +264,12 @@ const result = await layer.queryData({
 // Returns:
 // {
 //   [variable]: number[],
-//   dimensions: ['lat', 'lon'],
-//   coordinates: { lat: number[], lon: number[] }
+//   dimensions: ['<source-y>', '<source-x>'],
+//   coordinates: { '<source-y>': number[], '<source-x>': number[] }
 // }
 ```
 
-Datasets using a custom projection (via the `proj4` option) return coordinates in the source coordinate system, with keys matching the store's axis names (e.g. `y`/`x`). All other datasets (EPSG:4326, EPSG:3857) return `lat`/`lon` keys with WGS84 degree values.
+Spatial query coordinates follow the source data axes when source bounds are available, with keys matching the store's axis names (for example `lat`/`lon` for EPSG:4326 or `y`/`x` for projected data). Query geometries are still supplied as GeoJSON lon/lat coordinates.
 
 You can pass a third `options` argument to control query behavior:
 

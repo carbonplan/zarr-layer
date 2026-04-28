@@ -36,18 +36,16 @@ import { SPATIAL_DIMENSION_ALIASES } from '../constants'
 /**
  * Determine spatial coordinate keys for query results.
  *
- * For proj4 data we emit source-CRS values, so keys match the store's
- * original axis names (e.g. 'y'/'x' or 'projection_y_coordinate').
- *
- * For standard CRS the values are always WGS84 lat/lon (from pixelToLatLon),
- * so keys are always 'lat'/'lon' regardless of what the store calls its axes.
+ * When a source CRS projection is active, keys match the store's original axis
+ * names (e.g. 'y'/'x' or 'projection_y_coordinate'). Otherwise values are
+ * WGS84 lat/lon and keys are always 'lat'/'lon'.
  *
  * Uses dimIndices (which incorporates spatialDimensions overrides) when available,
  * falling back to alias matching on the raw dimension names.
  */
 export function findSpatialDimNames(
   dimensions: string[],
-  isProj4: boolean,
+  usesSourceCoordinates: boolean,
   dimIndices?: DimIndicesProps
 ): {
   yDim: string
@@ -61,10 +59,10 @@ export function findSpatialDimNames(
   const yStoreDim = dimIndices?.lat?.name ?? findByAlias(dimensions, 'lat')
   const xStoreDim = dimIndices?.lon?.name ?? findByAlias(dimensions, 'lon')
 
-  if (!isProj4) {
+  if (!usesSourceCoordinates) {
     return { yDim: 'lat', xDim: 'lon', yStoreDim, xStoreDim }
   }
-  // For proj4, emit coordinates under the store's own axis names
+  // Source-CRS coordinates should use the store's own axis names.
   return { yDim: yStoreDim, xDim: xStoreDim, yStoreDim, xStoreDim }
 }
 
@@ -409,7 +407,8 @@ export function queryRegionUntiled(
   proj4def?: string | null,
   sourceBounds?: Bounds | null,
   options?: QueryOptions,
-  dimIndices?: DimIndicesProps
+  dimIndices?: DimIndicesProps,
+  cachedTransformer?: CachedTransformer
 ): QueryResult {
   const { signal, includeSpatialCoordinates = true } = options ?? {}
 
@@ -422,10 +421,11 @@ export function queryRegionUntiled(
   // Determine if results should be nested
   const useNestedResults = resultDim > 2
   let results: QueryDataValues = useNestedResults ? {} : []
+  const usesSourceCoordinates = !!proj4def && !!sourceBounds
 
   const { yDim, xDim, yStoreDim, xStoreDim } = findSpatialDimNames(
     dimensions,
-    !!proj4def,
+    usesSourceCoordinates,
     dimIndices
   )
   const yCoords: number[] = []
@@ -483,8 +483,8 @@ export function queryRegionUntiled(
   checkAborted(signal)
 
   // Create transformer once for all pixels
-  const cachedTransformer: CachedTransformer | undefined = proj4def
-    ? createWGS84ToSourceTransformer(proj4def)
+  const transformer: CachedTransformer | undefined = proj4def
+    ? cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
     : undefined
 
   // Transform the query polygon into pixel-space coordinates once.
@@ -498,39 +498,41 @@ export function queryRegionUntiled(
     latIsAscending,
     proj4def,
     sourceBounds,
-    cachedTransformer
+    transformer
   )
   if (!pixelGeometry) return buildResult()
 
-  // Emit pixel-center coordinates: source CRS for proj4, lat/lon otherwise.
+  // Emit pixel-center coordinates: source CRS when available, lat/lon otherwise.
   // Both paths use pixel centers (+0.5); pixelToLatLon applies it internally.
-  const emitCoords =
-    proj4def && sourceBounds
-      ? (x: number, y: number) => {
-          const [srcX, srcY] = pixelToSourceCRS(
-            x + 0.5,
-            y + 0.5,
-            sourceBounds,
-            width,
-            height,
-            latIsAscending
-          )
-          yCoords.push(srcY)
-          xCoords.push(srcX)
-        }
-      : (x: number, y: number) => {
-          const { lat, lon } = pixelToLatLon(
-            x,
-            y,
-            bounds,
-            width,
-            height,
-            _crs,
-            latIsAscending
-          )
-          yCoords.push(lat)
-          xCoords.push(lon)
-        }
+  const emitCoords = usesSourceCoordinates
+    ? (x: number, y: number) => {
+        const [srcX, srcY] = pixelToSourceCRS(
+          x + 0.5,
+          y + 0.5,
+          sourceBounds!,
+          width,
+          height,
+          latIsAscending
+        )
+        yCoords.push(srcY)
+        xCoords.push(srcX)
+      }
+    : (x: number, y: number) => {
+        const { lat, lon } = pixelToLatLon(
+          x,
+          y,
+          bounds,
+          width,
+          height,
+          _crs,
+          latIsAscending,
+          proj4def,
+          sourceBounds,
+          transformer
+        )
+        yCoords.push(lat)
+        xCoords.push(lon)
+      }
 
   // Helper to process a single pixel
   const processPixel = (x: number, y: number) => {

@@ -24,11 +24,11 @@ export interface RenderableRegion {
   pixCoordBuffer: WebGLBuffer
   vertexCount: number
 
-  // Indexed mesh support (for adaptive mesh with proj4 datasets)
+  // Indexed mesh support (for adaptive source-projected meshes)
   indexBuffer?: WebGLBuffer | null
   useIndexedMesh?: boolean
 
-  // WGS84 bounds for vertex shader positioning (proj4 datasets, ECEF globe)
+  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
   wgs84Bounds?: Wgs84Bounds | null
 
   // Data orientation: true = row 0 is south (latitude ascending)
