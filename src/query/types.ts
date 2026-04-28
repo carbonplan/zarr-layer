@@ -18,9 +18,10 @@ export type QueryDataValues = number[] | NestedValues
  * Result from a query (point or region).
  * Matches carbonplan/maps structure: { [variable]: values, dimensions, coordinates }
  *
- * Spatial coordinate keys follow the emitted coordinate space:
+ * Spatial result dimensions and coordinate keys follow the emitted coordinate space:
  * - WGS84 fallback: `lat`/`lon`
- * - Source CRS: the store's spatial axis names (for example `y`/`x`)
+ * - Source CRS: the store's spatial axis names (for example `y`/`x`,
+ *   `lat`/`lon`, or `latitude`/`longitude`)
  */
 export interface QueryResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */
@@ -28,7 +29,7 @@ export interface QueryResult {
     | QueryDataValues
     | string[]
     | { [key: string]: (number | string)[] }
-  /** Dimension names in order (e.g., ['month', 'lat', 'lon'] or ['month', 'y', 'x']) */
+  /** Dimension names in order, using the same spatial keys as coordinates */
   dimensions: string[]
   /** Coordinate arrays for each dimension */
   coordinates: {

@@ -264,12 +264,12 @@ const result = await layer.queryData({
 // Returns:
 // {
 //   [variable]: number[],
-//   dimensions: ['<source-y>', '<source-x>'],
-//   coordinates: { '<source-y>': number[], '<source-x>': number[] }
+//   dimensions: ['<store-y-axis>', '<store-x-axis>'],
+//   coordinates: { '<store-y-axis>': number[], '<store-x-axis>': number[] }
 // }
 ```
 
-Spatial query coordinates follow the source data axes when source bounds are available, with keys matching the store's axis names (for example `lat`/`lon` for EPSG:4326 or `y`/`x` for projected data). Query geometries are still supplied as GeoJSON lon/lat coordinates.
+Spatial query result dimensions and coordinate keys use the store's own spatial axis names whenever source bounds are available. `lat`/`lon` are used only when the zarr store literally names its axes that way; otherwise results use whatever names the store provides, such as `y`/`x` or `latitude`/`longitude`. Fallback paths that emit WGS84 coordinates use `lat`/`lon`. Query geometries are still supplied as GeoJSON lon/lat coordinates.
 
 You can pass a third `options` argument to control query behavior:
 

@@ -94,7 +94,9 @@ export function pixelToLatLon(
     return { lat, lon }
   }
 
-  // Standard CRS handling
+  // Standard CRS handling. Untiled source-projected queries normally take the
+  // proj4 branch above; this fallback is retained for exported callers and
+  // other internal paths that pass already-mercator-normalized bounds.
   // Guard against zero-dimension cases
   // centerPixel=true: return center of pixel (x+0.5), centerPixel=false: return corner (x)
   const xFrac = width <= 1 ? 0.5 : centerPixel ? (x + 0.5) / width : x / width
