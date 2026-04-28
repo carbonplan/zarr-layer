@@ -315,7 +315,7 @@ function computeYPixelRange(
 /**
  * Computes pixel bounds from a geometry's bounding box.
  * Returns the pixel range [minX, maxX, minY, maxY] that covers the geometry.
- * Supports custom projections via proj4.
+ * Supports source projections via proj4.
  */
 export function computePixelBoundsFromGeometry(
   geometry: QueryGeometry,
@@ -328,6 +328,39 @@ export function computePixelBoundsFromGeometry(
   sourceBounds?: Bounds | null,
   cachedTransformer?: CachedTransformer
 ): PixelRect | null {
+  if (geometry.type === 'Point') {
+    const [lon, lat] = geometry.coordinates
+    const point = lonLatToPixel(
+      lon,
+      lat,
+      bounds,
+      width,
+      height,
+      crs,
+      latIsAscending,
+      proj4def,
+      sourceBounds,
+      cachedTransformer
+    )
+    if (!point) return null
+
+    const [xPixel, yPixel] = point
+    if (
+      !isFinite(xPixel) ||
+      !isFinite(yPixel) ||
+      xPixel < 0 ||
+      xPixel > width ||
+      yPixel < 0 ||
+      yPixel > height
+    ) {
+      return null
+    }
+
+    const xStart = Math.min(Math.max(0, Math.floor(xPixel)), width - 1)
+    const yStart = Math.min(Math.max(0, Math.floor(yPixel)), height - 1)
+    return { minX: xStart, maxX: xStart + 1, minY: yStart, maxY: yStart + 1 }
+  }
+
   const bbox = computeBoundingBox(geometry)
 
   // If proj4 is provided, use proj4 to transform bbox
@@ -511,8 +544,8 @@ function densifyAndTransformRing(
 
 /**
  * Transform a query geometry from WGS84 lon/lat into pixel-space coordinates.
- * For proj4 projections: forward-transforms vertices, then converts source CRS → pixel.
- * For standard CRS: uses mercator/equirect math → pixel.
+ * For source-projected data: forward-transforms vertices, then converts source
+ * CRS → pixel. Otherwise uses mercator/equirect math → pixel.
  * Densifies edges to preserve curvature under nonlinear projections.
  *
  * Returns a geometry with the same GeoJSON ring structure but in pixel coordinates,
@@ -1293,7 +1326,9 @@ function alignMultiPolygonMembers(members: number[][][][]): number[][][][] {
  * For Polygon/MultiPolygon: normalizes ring longitudes, computes a
  * WrappedBoundingBox, and clips at ±180 if crossing. For Point: returns as-is.
  *
- * Standard CRS only (EPSG:3857, EPSG:4326). Proj4 callers should skip this.
+ * The normalized geometry is only valid for CRSes that share WGS84 wrapped
+ * longitude semantics (EPSG:3857, EPSG:4326). Generic proj4 callers may still
+ * use the returned bbox to detect unsupported crossings.
  */
 export function preprocessQueryGeometry(geometry: QueryGeometry): {
   geometry: QueryGeometry
@@ -1397,8 +1432,8 @@ export function preprocessQueryGeometry(geometry: QueryGeometry): {
  * West strip: [westPx, width)  — covers lon [bbox.west, 180]
  * East strip: [0, eastPx)      — covers lon [-180, bbox.east]
  *
- * Uses standard-CRS floor/ceil/clamp conventions from computePixelBoundsFromGeometry.
- * Only valid for standard CRS (EPSG:3857, EPSG:4326), not proj4.
+ * Uses built-in wrapped-longitude CRS floor/ceil/clamp conventions from
+ * computePixelBoundsFromGeometry. Not valid for explicit custom proj4 data.
  */
 export function wrappedBboxToPixelSpans(
   bbox: WrappedBoundingBox,

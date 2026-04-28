@@ -18,9 +18,9 @@ export type QueryDataValues = number[] | NestedValues
  * Result from a query (point or region).
  * Matches carbonplan/maps structure: { [variable]: values, dimensions, coordinates }
  *
- * Spatial coordinate keys depend on the dataset's CRS:
- * - Standard CRS (EPSG:3857/4326): `lat`/`lon`
- * - Projected CRS (proj4): `y`/`x` in the source coordinate system
+ * Spatial coordinate keys follow the emitted coordinate space:
+ * - WGS84 fallback: `lat`/`lon`
+ * - Source CRS: the store's spatial axis names (for example `y`/`x`)
  */
 export interface QueryResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */
