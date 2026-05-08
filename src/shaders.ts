@@ -88,6 +88,13 @@ const VERTEX_TO_MERCATOR = `
  * (also small in clip space) keeps the final `gl_Position` small in Float32 →
  * sub-pixel precision even at high zoom.
  *
+ * `u_worldXOffset` is the renderer's world-wrap offset (±1.0 in mercator x for
+ * wrapped tile copies, 0 otherwise). It can't be folded into `u_anchor_clip`
+ * (per-frame, per-layer; offset varies per draw call) or into `mercDelta` in
+ * Float32 (delta ≈ 1e-7 vs offset ≈ 1 → small term gets washed out), so it
+ * goes through the matrix as a separate small clip-space delta. Zero cost
+ * when offset is 0.
+ *
  * Caller responsibilities (see UntiledMode + createHybridMesh):
  *   1. Pre-project each vertex's WGS84 (lon, lat) to mercator [0, 1] in JS
  *      Float64, encode as `(mercX − anchorX, mercY − anchorY) / layerHalfXY`,
@@ -102,12 +109,11 @@ const VERTEX_TO_MERCATOR = `
  *
  * `merc` is reconstructed at low precision purely for fragment-shader
  * varyings (`v_mercatorPos`); its precision doesn't affect `gl_Position`.
- * Reconstructing it also keeps `shift_x`, `shift_y`, and `u_worldXOffset`
- * referenced so the shader compiler doesn't drop those uniforms.
  */
 const VERTEX_TO_WGS84_TO_MERCATOR = `
   vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
   vec4 deltaClip = u_eye_matrix * vec4(mercDelta, 0.0, 0.0);
+  vec4 wrapClip = u_eye_matrix * vec4(u_worldXOffset, 0.0, 0.0, 0.0);
   vec2 merc = vec2(
     shift_x + mercDelta.x + u_worldXOffset,
     shift_y + mercDelta.y
@@ -312,11 +318,12 @@ export function createVertexShader(options: VertexShaderOptions): string {
     projectionOutput = PROJECT_MAPLIBRE_ECEF
   } else if (inputSpace === 'wgs84') {
     // Eye-coords path: VERTEX_TO_WGS84_TO_MERCATOR already produced `deltaClip`
-    // (matrix · vec4(mercDelta, 0, 0)); adding the precomputed `u_anchor_clip`
-    // gives gl_Position with sub-pixel Float32 precision. Skip the standard
-    // projectTile/matrix path so we don't lose precision routing through
-    // absolute world coords.
-    projectionOutput = `  gl_Position = u_anchor_clip + deltaClip;`
+    // (matrix · vec4(mercDelta, 0, 0)) and `wrapClip` (matrix · vec4(offset, 0, 0, 0)
+    // for world-wrapped tile copies; zero when not wrapping). Adding both to
+    // the precomputed `u_anchor_clip` gives gl_Position with sub-pixel Float32
+    // precision. Skip the standard projectTile/matrix path so we don't lose
+    // precision routing through absolute world coords.
+    projectionOutput = `  gl_Position = u_anchor_clip + deltaClip + wrapClip;`
   } else if (projection === 'maplibre') {
     projectionOutput = PROJECT_MAPLIBRE_GLOBE
   } else {

@@ -660,6 +660,17 @@ export function createHybridMesh(
       crossesAntimeridian,
       a
     )
+    // NOTE: in the eye-coords path the lon0/lon1/lat0/lat1 fields actually
+    // hold mercator x/y bounds in [0, 1] world coords. lat0/lat1 carry mercY
+    // values, NOT geographic latitude (mercY is non-linear in lat). The render
+    // path consumes these numerically to derive scale_x/scale_y/shift_x/shift_y
+    // uniforms; both the original and eye-coords encoding produce mathematically
+    // correct uniforms. shift_x/shift_y are unused by the eye-coords vertex
+    // shader path — only scale_x/scale_y feed `mercDelta = vertex.xy * scale`.
+    // We reuse the existing field instead of introducing a discriminated-union
+    // type to keep the surface small; if a future caller wants to interpret
+    // `lat0`/`lat1` as degrees, they should branch on whether the layer is
+    // proj4 (this branch) vs Mercator/WGS84.
     wgs84Bounds = {
       lon0: a.x - a.halfX,
       lon1: a.x + a.halfX,
