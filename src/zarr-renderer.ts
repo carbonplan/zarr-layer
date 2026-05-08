@@ -164,6 +164,45 @@ export class ZarrRenderer {
         isGlobeTileRender
       )
     }
+
+    // Eye-coords path (proj4 / wgs84 inputSpace). Compute u_anchor_clip in JS
+    // Float64 from the layer's mercator anchor and the projection matrix; near
+    // the camera at typical viewports this lands near origin in clip space, so
+    // its Float32 representation is essentially exact. Sum with the small
+    // matrix·delta computed in the vertex shader → sub-pixel-precise gl_Position
+    // even at z ≈ 19. See VERTEX_TO_WGS84_TO_MERCATOR for the math.
+    if (
+      uniforms.eyeAnchorMerc &&
+      shaderProgram.eyeMatrixLoc &&
+      shaderProgram.anchorClipLoc
+    ) {
+      const isMaplibreProj =
+        shaderProgram.projectionMode === 'maplibre' ||
+        shaderProgram.projectionMode === 'maplibre-proj4' ||
+        shaderProgram.projectionMode === 'maplibre-ecef'
+      const eyeMatrix = isMaplibreProj ? projectionData?.mainMatrix : matrix
+      if (eyeMatrix && eyeMatrix.length >= 16) {
+        gl.uniformMatrix4fv(
+          shaderProgram.eyeMatrixLoc,
+          false,
+          eyeMatrix instanceof Float32Array
+            ? eyeMatrix
+            : new Float32Array(eyeMatrix)
+        )
+        // Column-major: result[i] = m[0+i]*x + m[4+i]*y + m[8+i]*0 + m[12+i]*1.
+        // JS arithmetic is Float64; only the final 4 values lose precision in
+        // the cast to Float32. Each component lands near zero in clip space
+        // for typical viewports → Float32 ULP near zero.
+        const m = eyeMatrix
+        const ax = uniforms.eyeAnchorMerc.x
+        const ay = uniforms.eyeAnchorMerc.y
+        const cx = m[0] * ax + m[4] * ay + m[12]
+        const cy = m[1] * ax + m[5] * ay + m[13]
+        const cz = m[2] * ax + m[6] * ay + m[14]
+        const cw = m[3] * ax + m[7] * ay + m[15]
+        gl.uniform4f(shaderProgram.anchorClipLoc, cx, cy, cz, cw)
+      }
+    }
   }
 
   renderTiles(
