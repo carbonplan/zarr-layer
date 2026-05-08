@@ -660,22 +660,16 @@ export function createHybridMesh(
       crossesAntimeridian,
       a
     )
-    // NOTE: in the eye-coords path the lon0/lon1/lat0/lat1 fields actually
-    // hold mercator x/y bounds in [0, 1] world coords. lat0/lat1 carry mercY
-    // values, NOT geographic latitude (mercY is non-linear in lat). The render
-    // path consumes these numerically to derive scale_x/scale_y/shift_x/shift_y
-    // uniforms; both the original and eye-coords encoding produce mathematically
-    // correct uniforms. shift_x/shift_y are unused by the eye-coords vertex
-    // shader path — only scale_x/scale_y feed `mercDelta = vertex.xy * scale`.
-    // We reuse the existing field instead of introducing a discriminated-union
-    // type to keep the surface small; if a future caller wants to interpret
-    // `lat0`/`lat1` as degrees, they should branch on whether the layer is
-    // proj4 (this branch) vs Mercator/WGS84.
+    // Eye-coords path bounds are in normalized mercator [0, 1] world coords,
+    // not geographic lat/lon. Use mercX0/mercX1/mercY0/mercY1 keys so
+    // downstream code can't accidentally pass these through a geographic
+    // transform (e.g. lat → mercY) and silently produce garbage. The render
+    // path resolves either name set with `?? lon0` / `?? lat0` fallbacks.
     wgs84Bounds = {
-      lon0: a.x - a.halfX,
-      lon1: a.x + a.halfX,
-      lat0: a.y - a.halfY,
-      lat1: a.y + a.halfY,
+      mercX0: a.x - a.halfX,
+      mercX1: a.x + a.halfX,
+      mercY0: a.y - a.halfY,
+      mercY1: a.y + a.halfY,
     }
   } else {
     // Fallback: original absolute WGS84 [-1, 1] encoding. Shared-edge vertices

@@ -97,12 +97,29 @@ export function renderRegion(
     shiftX = (region.mercatorBounds.x0 + region.mercatorBounds.x1) / 2
     shiftY = (region.mercatorBounds.y0 + region.mercatorBounds.y1) / 2
   } else {
-    // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift
+    // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift.
+    //
+    // Eye-coords path returns mercX0/mercX1/mercY0/mercY1 (mercator [0, 1]
+    // world coords); the legacy / ECEF path returns lon0/lon1/lat0/lat1
+    // (lat/lon-derived [0, 1]). The math here is identical for either set,
+    // so we resolve whichever the producer populated.
     if (!wgs84Bounds) return false
-    scaleX = (wgs84Bounds.lon1 - wgs84Bounds.lon0) / 2
-    scaleY = (wgs84Bounds.lat1 - wgs84Bounds.lat0) / 2
-    shiftX = (wgs84Bounds.lon0 + wgs84Bounds.lon1) / 2
-    shiftY = (wgs84Bounds.lat0 + wgs84Bounds.lat1) / 2
+    const x0 = wgs84Bounds.mercX0 ?? wgs84Bounds.lon0
+    const x1 = wgs84Bounds.mercX1 ?? wgs84Bounds.lon1
+    const y0 = wgs84Bounds.mercY0 ?? wgs84Bounds.lat0
+    const y1 = wgs84Bounds.mercY1 ?? wgs84Bounds.lat1
+    if (
+      x0 === undefined ||
+      x1 === undefined ||
+      y0 === undefined ||
+      y1 === undefined
+    ) {
+      return false
+    }
+    scaleX = (x1 - x0) / 2
+    scaleY = (y1 - y0) / 2
+    shiftX = (x0 + x1) / 2
+    shiftY = (y0 + y1) / 2
   }
 
   gl.uniform1f(shaderProgram.scaleLoc, 0)

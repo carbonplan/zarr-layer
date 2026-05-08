@@ -60,15 +60,40 @@ export interface MercatorBounds {
  * lon: -180 → 0, 180 → 1
  * lat: -90 → 0, 90 → 1
  */
+/**
+ * Bounds for the wgs84 inputSpace shader. Two flavours:
+ *
+ * - **Legacy / wgs84-direct**: `lon0`/`lon1`/`lat0`/`lat1` in [0, 1] world
+ *   coords (`-180° → 0`, `180° → 1` for lon; `-90° → 0`, `90° → 1` for lat).
+ *   Linear in lat.
+ *
+ * - **Eye-coords (proj4)**: `mercX0`/`mercX1`/`mercY0`/`mercY1` in [0, 1]
+ *   world coords (mercator-normalized). `mercX` matches `lon` (linear), but
+ *   `mercY` is non-linear in lat — `mercY = (1 − ln(tan(π/4 + φ/2)) / π) / 2`.
+ *
+ * Producers populate one or the other set; the render path resolves whichever
+ * is present with `?? lon0`/`?? lat0` fallbacks. Keeping the eye-coords keys
+ * distinct prevents downstream code from accidentally passing mercator y
+ * through a geographic transform (e.g. lat → mercY) and silently producing
+ * garbage.
+ */
 export interface Wgs84Bounds {
   /** Min longitude normalized [0, 1] where -180 → 0, 180 → 1 */
-  lon0: number
+  lon0?: number
   /** Min latitude normalized [0, 1] where -90 → 0, 90 → 1 */
-  lat0: number
+  lat0?: number
   /** Max longitude normalized [0, 1] */
-  lon1: number
+  lon1?: number
   /** Max latitude normalized [0, 1] */
-  lat1: number
+  lat1?: number
+  /** Min mercator x normalized [0, 1] (eye-coords path; linear in lon) */
+  mercX0?: number
+  /** Max mercator x normalized [0, 1] (eye-coords path; linear in lon) */
+  mercX1?: number
+  /** Min mercator y normalized [0, 1] (eye-coords path; non-linear in lat) */
+  mercY0?: number
+  /** Max mercator y normalized [0, 1] (eye-coords path; non-linear in lat) */
+  mercY1?: number
   /** True if bounds cross the antimeridian (lon0 > lon1 in degrees) */
   crossesAntimeridian?: boolean
 }
