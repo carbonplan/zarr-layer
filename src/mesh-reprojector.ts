@@ -61,6 +61,25 @@ interface HybridMeshOptions {
   transformer: ProjectionTransformer
   latIsAscending: boolean
   maxError?: number
+  /**
+   * Layer-level mercator anchor (Float64) shared by every chunk of the layer.
+   * When provided, vertices are pre-projected to mercator in JS Float64 and
+   * encoded as `(mercX − anchor.x, mercY − anchor.y) / anchor.halfXY` chunk-
+   * local-in-layer in [-1, 1]; the returned `wgs84Bounds` describes the same
+   * anchor + half-extent so the renderer's `scale_x`/`shift_x` uniforms come
+   * out identical for every chunk. Pair this with the eye-coords vertex shader
+   * path (see VERTEX_TO_WGS84_TO_MERCATOR in shaders.ts) to avoid forming
+   * absolute world coords in Float32 — which otherwise quantize to ~1 m at lat
+   * 38, ~4 viewport pixels of jitter at z ≈ 19.
+   *
+   * Omit (or pass null) for the original absolute-world-coord encoding.
+   */
+  layerMercAnchor?: {
+    x: number
+    y: number
+    halfX: number
+    halfY: number
+  } | null
 }
 
 // ============================================================================
@@ -162,6 +181,73 @@ function encodeAbsoluteWgs84(
     // Absolute WGS84 [0,1] encoded as [-1,1]
     encoded[i * 2] = ((lon + 180) / 360) * 2 - 1
     encoded[i * 2 + 1] = ((lat + 90) / 180) * 2 - 1
+  }
+
+  return encoded
+}
+
+/**
+ * Mercator y for a given latitude in degrees, clamped to the standard Mercator
+ * limits and returned in normalized [0, 1] world coords (y=0 at the north
+ * limit, y=1 at the south).
+ */
+const MERC_LAT_LIMIT_RAD = (85.05112878 * Math.PI) / 180
+function lonLatToMerc(lon: number, lat: number): [number, number] {
+  const mercX = (lon + 180) / 360
+  const phi = Math.max(
+    -MERC_LAT_LIMIT_RAD,
+    Math.min(MERC_LAT_LIMIT_RAD, (lat * Math.PI) / 180)
+  )
+  const mercY_raw = Math.log(Math.tan(Math.PI / 4 + phi / 2))
+  const mercY = (1 - mercY_raw / Math.PI) / 2
+  return [mercX, mercY]
+}
+
+/**
+ * Encode WGS84 lon/lat positions as chunk-local-in-layer mercator deltas in
+ * [-1, 1] for the eye-coords precision path.
+ *
+ * `layerMercAnchor.{x, y}` are the layer's mercator center (Float64);
+ * `halfX`/`halfY` are half-extents in mercator. Each vertex's WGS84 lon/lat is
+ * pre-projected to mercator (Float64) and stored as
+ * `(mercX − anchor.x) / halfX`, etc. Adjacent chunks share corners with
+ * deterministically equal Float64 mercator values, so their Float32-cast
+ * encoded vertex values are exactly equal — and since every chunk of a layer
+ * uses the same `scale_x`/`shift_x` uniforms (derived from `wgs84Bounds`
+ * = anchor ± half), the shader reconstructs shared edges identically across
+ * chunks. No boundary gaps.
+ *
+ * Pair with `VERTEX_TO_WGS84_TO_MERCATOR` (eye-coords variant) and the
+ * per-frame `u_anchor_clip` upload in `applyCommonUniforms`.
+ */
+function encodeMercDeltaInLayer(
+  positions: ArrayLike<number>,
+  minLon: number,
+  crossesAntimeridian: boolean,
+  anchor: { x: number; y: number; halfX: number; halfY: number }
+): Float32Array {
+  const numVerts = positions.length / 2
+  const encoded = new Float32Array(numVerts * 2)
+  const safeHalfX = anchor.halfX > 0 ? anchor.halfX : 0.5
+  const safeHalfY = anchor.halfY > 0 ? anchor.halfY : 0.5
+
+  for (let i = 0; i < numVerts; i++) {
+    let lon = normalizeLon180(positions[i * 2])
+    const lat = positions[i * 2 + 1]
+
+    if (crossesAntimeridian && lon < minLon) {
+      lon += 360
+    }
+
+    if (!isFinite(lon) || !isFinite(lat)) {
+      encoded[i * 2] = NaN
+      encoded[i * 2 + 1] = NaN
+      continue
+    }
+
+    const [mercX, mercY] = lonLatToMerc(lon, lat)
+    encoded[i * 2] = (mercX - anchor.x) / safeHalfX
+    encoded[i * 2 + 1] = (mercY - anchor.y) / safeHalfY
   }
 
   return encoded
@@ -555,16 +641,49 @@ export function createHybridMesh(
     canCrossAntimeridian
   )
 
-  // Encode as absolute WGS84 coordinates so that shared-edge vertices between
-  // adjacent regions produce identical Float32 values (eliminates seams).
-  const positions = encodeAbsoluteWgs84(
-    splitResult.positions,
-    minLon,
-    crossesAntimeridian
-  )
-
-  // Identity bounds: shader maps [-1,1] → [0,1] via vertex * 0.5 + 0.5
-  const wgs84Bounds: Wgs84Bounds = { lon0: 0, lat0: 0, lon1: 1, lat1: 1 }
+  // Eye-coords path: pre-project each vertex to mercator (Float64) and encode
+  // as a chunk-local-in-layer mercator delta. Returned `wgs84Bounds` describes
+  // the layer anchor + half-extent so every chunk's `scale_x`/`shift_x`
+  // uniforms come out identical → shared-edge vertices reconstruct identically.
+  // See `encodeMercDeltaInLayer` and `VERTEX_TO_WGS84_TO_MERCATOR` for context.
+  let positions: Float32Array
+  let wgs84Bounds: Wgs84Bounds
+  if (
+    options.layerMercAnchor &&
+    options.layerMercAnchor.halfX > 0 &&
+    options.layerMercAnchor.halfY > 0
+  ) {
+    const a = options.layerMercAnchor
+    positions = encodeMercDeltaInLayer(
+      splitResult.positions,
+      minLon,
+      crossesAntimeridian,
+      a
+    )
+    // Eye-coords path bounds are in normalized mercator [0, 1] world coords,
+    // not geographic lat/lon. Use mercX0/mercX1/mercY0/mercY1 keys so
+    // downstream code can't accidentally pass these through a geographic
+    // transform (e.g. lat → mercY) and silently produce garbage. The render
+    // path resolves either name set with `?? lon0` / `?? lat0` fallbacks.
+    wgs84Bounds = {
+      mercX0: a.x - a.halfX,
+      mercX1: a.x + a.halfX,
+      mercY0: a.y - a.halfY,
+      mercY1: a.y + a.halfY,
+    }
+  } else {
+    // Fallback: original absolute WGS84 [-1, 1] encoding. Shared-edge vertices
+    // between adjacent regions produce identical Float32 values (no seams) but
+    // the shader will form an absolute world coord in Float32 → ~1m vertex
+    // quantization at lat 38, ~4 viewport pixels at z ≈ 19.
+    positions = encodeAbsoluteWgs84(
+      splitResult.positions,
+      minLon,
+      crossesAntimeridian
+    )
+    // Identity bounds: shader maps [-1,1] → [0,1] via vertex * 0.5 + 0.5
+    wgs84Bounds = { lon0: 0, lat0: 0, lon1: 1, lat1: 1 }
+  }
 
   return {
     positions,

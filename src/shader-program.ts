@@ -26,6 +26,10 @@ export interface ShaderProgram {
   shiftYLoc: WebGLUniformLocation
   worldXOffsetLoc: WebGLUniformLocation
   matrixLoc: WebGLUniformLocation | null
+  // Eye-coords uniforms — only the wgs84 (proj4) inputSpace shader uses them.
+  // For other shaders these will resolve to null and uploads no-op.
+  eyeMatrixLoc: WebGLUniformLocation | null
+  anchorClipLoc: WebGLUniformLocation | null
   projMatrixLoc: WebGLUniformLocation | null
   fallbackMatrixLoc: WebGLUniformLocation | null
   tileMercatorCoordsLoc: WebGLUniformLocation | null
@@ -218,6 +222,11 @@ export function createShaderProgram(
     matrixLoc: needsMaplibre
       ? null
       : mustGetUniformLocation(gl, program, 'matrix'),
+    // Eye-coords path is only used by the wgs84 inputSpace shader (proj4
+    // datasets); for other shaders the optimizer will drop these uniforms,
+    // so use the non-throwing lookup.
+    eyeMatrixLoc: gl.getUniformLocation(program, 'u_eye_matrix'),
+    anchorClipLoc: gl.getUniformLocation(program, 'u_anchor_clip'),
     projMatrixLoc: maplibreUniform('u_projection_matrix'),
     fallbackMatrixLoc: maplibreUniform('u_projection_fallback_matrix'),
     tileMercatorCoordsLoc: maplibreUniform('u_projection_tile_mercator_coords'),

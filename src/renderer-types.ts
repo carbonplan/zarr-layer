@@ -5,6 +5,16 @@ export interface RendererUniforms {
   scaleFactor: number
   offset: number
   fixedDataScale: number
+  /**
+   * Layer-level mercator anchor used by the eye-coords (render-relative-to-eye)
+   * path for proj4 datasets. When set, applyCommonUniforms uploads
+   * `u_eye_matrix` (= matrix) and `u_anchor_clip` (= matrix · vec4(anchor, 0, 1),
+   * computed in JS Float64) so the shader can avoid forming an absolute
+   * world-coord Float32. See VERTEX_TO_WGS84_TO_MERCATOR.
+   *
+   * `x` and `y` are in normalized mercator [0, 1] world coords.
+   */
+  eyeAnchorMerc?: { x: number; y: number } | null
 }
 
 export interface CustomShaderConfig {

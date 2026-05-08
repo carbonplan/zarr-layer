@@ -244,6 +244,18 @@ export class UntiledMode implements ZarrMode {
     typeof createTransformerTo4326
   > | null = null
 
+  // Layer-level mercator anchor (Float64) for the eye-coords precision path.
+  // Only set for proj4 datasets. Sourced from `mercatorBounds`; passed to
+  // `createHybridMesh` (so vertices encode mercator deltas relative to it) and
+  // exposed via `getUniformsForRender` (so the renderer can compute
+  // `u_anchor_clip = matrix · vec4(anchor, 0, 1)` per frame).
+  private layerMercAnchor: {
+    x: number
+    y: number
+    halfX: number
+    halfY: number
+  } | null = null
+
   // Loading state
   private isRemoved: boolean = false
   private _antimeridianWarnings: Set<string> = new Set()
@@ -364,6 +376,22 @@ export class UntiledMode implements ZarrMode {
           this.mercatorBounds = this.computeMercatorBoundsFromProjection()
         } else {
           this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs)
+        }
+        // Cache the layer's mercator center + half-extent (Float64) for the
+        // eye-coords precision path used by the proj4 vertex shader. All chunks
+        // of the layer share these values, so chunk corners that are
+        // deterministically Float64-equal at projection time stay Float32-equal
+        // in the shader (no boundary gaps). Only set for proj4 datasets;
+        // EPSG:3857 / EPSG:4326 paths render via different shaders that don't
+        // need eye-coords.
+        if (this.proj4def && this.mercatorBounds) {
+          const mb = this.mercatorBounds
+          this.layerMercAnchor = {
+            x: (mb.x0 + mb.x1) / 2,
+            y: (mb.y0 + mb.y1) / 2,
+            halfX: Math.max((mb.x1 - mb.x0) / 2, 1e-12),
+            halfY: Math.max(Math.abs(mb.y1 - mb.y0) / 2, 1e-12),
+          }
         }
       } else {
         console.warn('UntiledMode: No XY limits found')
@@ -783,6 +811,10 @@ export class UntiledMode implements ZarrMode {
       ...contextUniforms,
       scaleFactor: 1.0,
       offset: 0.0,
+      // Forwarded to applyCommonUniforms; null for non-proj4 datasets.
+      eyeAnchorMerc: this.layerMercAnchor
+        ? { x: this.layerMercAnchor.x, y: this.layerMercAnchor.y }
+        : null,
     }
   }
 
@@ -1109,6 +1141,10 @@ export class UntiledMode implements ZarrMode {
       )
 
       // Always use hybrid mesh (adaptive + uniform grid) for proj4 data.
+      // Pass the layer's mercator anchor so vertices encode chunk-local-in-layer
+      // mercator deltas. The shader's eye-coords path consumes these deltas
+      // together with `u_anchor_clip` (computed in JS Float64 each frame) for
+      // sub-pixel-precise gl_Position. See VERTEX_TO_WGS84_TO_MERCATOR.
       const meshResult = createHybridMesh({
         geoBounds,
         width: region.width,
@@ -1116,6 +1152,7 @@ export class UntiledMode implements ZarrMode {
         subdivisions: meshSubdivisions,
         transformer: this.cached4326Transformer!,
         latIsAscending: this.latIsAscending,
+        layerMercAnchor: this.layerMercAnchor,
       })
       region.vertexArr = meshResult.positions
       region.pixCoordArr = meshResult.texCoords

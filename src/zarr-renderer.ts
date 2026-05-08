@@ -164,6 +164,55 @@ export class ZarrRenderer {
         isGlobeTileRender
       )
     }
+
+    // Eye-coords path (proj4 / wgs84 inputSpace). Compute u_anchor_clip in JS
+    // Float64 from the layer's mercator anchor and the projection matrix; near
+    // the camera at typical viewports this lands near origin in clip space, so
+    // its Float32 representation is essentially exact. Sum with the small
+    // matrix·delta computed in the vertex shader → sub-pixel-precise gl_Position
+    // even at z ≈ 19. See VERTEX_TO_WGS84_TO_MERCATOR for the math.
+    if (
+      uniforms.eyeAnchorMerc &&
+      shaderProgram.eyeMatrixLoc &&
+      shaderProgram.anchorClipLoc
+    ) {
+      const isMaplibreProj =
+        shaderProgram.projectionMode === 'maplibre' ||
+        shaderProgram.projectionMode === 'maplibre-proj4' ||
+        shaderProgram.projectionMode === 'maplibre-ecef'
+      const eyeMatrix = isMaplibreProj ? projectionData?.mainMatrix : matrix
+      if (eyeMatrix && eyeMatrix.length >= 16) {
+        // Both the GPU upload and the JS anchor multiply must use the SAME
+        // matrix representation. If we computed anchor_clip against the
+        // possibly-Float64 source while uploading a Float32-quantized copy to
+        // the shader, the eye-coords identity
+        //   anchor_clip + matrix · delta  ≡  matrix · (anchor + delta)
+        // would hold only up to the matrix-element ULP — at z ≈ 19 the matrix
+        // scale columns are ~3×10⁵, so 1 Float32 ULP ≈ 3×10⁻² in clip space.
+        // Anchor magnitude ~0.5 → several viewport pixels of per-frame
+        // inconsistency, which is exactly what the eye-coords decomposition
+        // was meant to recover. Cast once and use the same Float32 array on
+        // both sides.
+        const eyeMatrixF32 =
+          eyeMatrix instanceof Float32Array
+            ? eyeMatrix
+            : new Float32Array(eyeMatrix)
+        gl.uniformMatrix4fv(shaderProgram.eyeMatrixLoc, false, eyeMatrixF32)
+        // anchor_clip = eyeMatrixF32 · vec4(anchor.x, anchor.y, 0, 1).
+        // JS reads Float32Array elements as Float64-promoted values, so the
+        // multiply-add runs in Float64 against the same Float32 inputs the
+        // shader will see, then uniform4f casts the four results back to
+        // Float32. Column-major: result[i] = m[i]*x + m[4+i]*y + m[12+i].
+        const m = eyeMatrixF32
+        const ax = uniforms.eyeAnchorMerc.x
+        const ay = uniforms.eyeAnchorMerc.y
+        const cx = m[0] * ax + m[4] * ay + m[12]
+        const cy = m[1] * ax + m[5] * ay + m[13]
+        const cz = m[2] * ax + m[6] * ay + m[14]
+        const cw = m[3] * ax + m[7] * ay + m[15]
+        gl.uniform4f(shaderProgram.anchorClipLoc, cx, cy, cz, cw)
+      }
+    }
   }
 
   renderTiles(

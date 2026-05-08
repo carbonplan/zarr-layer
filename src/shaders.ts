@@ -34,7 +34,18 @@ uniform float scale_x;
 uniform float scale_y;
 uniform float shift_x;
 uniform float shift_y;
-uniform float u_worldXOffset;`
+uniform float u_worldXOffset;
+// Eye-coords uniforms used by the wgs84 inputSpace shader for proj4 datasets.
+// u_eye_matrix is the projection matrix (MapLibre mainMatrix or Mapbox matrix).
+// u_anchor_clip is precomputed in JS Float64 each frame as
+// u_eye_matrix · vec4(layerAnchorMerc, 0, 1); cast to Float32 it lands near
+// origin in clip space at typical viewports, so its ULP is essentially zero.
+// Together with chunk-local mercator-delta vertex encoding, these let the
+// shader avoid forming an absolute world coord in Float32 — which would
+// otherwise quantize to ~1 m at lat 38 and become ~4 viewport pixels of
+// jitter per vertex at z ≈ 19 once amplified by the matrix scale columns.
+uniform mat4 u_eye_matrix;
+uniform vec4 u_anchor_clip;`
 
 /** Additional uniforms for Mapbox globe projection */
 const UNIFORMS_MAPBOX_GLOBE = `
@@ -61,29 +72,52 @@ const SCALE_HANDLING = `
 const VERTEX_TO_MERCATOR = `
   vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);`
 
-/** Transform vertex from local space to normalized WGS84, then to Mercator */
+/**
+ * Transform vertex from chunk-local mercator-delta space to clip space using
+ * the eye-coordinate (render-relative-to-eye) decomposition:
+ *
+ *     matrix · vec4(anchor + delta, 0, 1)
+ *       ≡ matrix · vec4(anchor, 0, 1)  +  matrix · vec4(delta, 0, 0)
+ *       ≡ anchorClip                   +  deltaClip
+ *
+ * The shader receives `vertex.xy` as a pre-projected mercator delta from the
+ * layer's anchor, encoded chunk-local-in-layer in [-1, 1]. Multiplying by
+ * `vec4(delta, 0, 0)` (note `w = 0`) means the matrix's translation column is
+ * ignored — only the scale/rotation columns multiply the small delta, so the
+ * product stays small in clip space. Adding the precomputed `u_anchor_clip`
+ * (also small in clip space) keeps the final `gl_Position` small in Float32 →
+ * sub-pixel precision even at high zoom.
+ *
+ * `u_worldXOffset` is the renderer's world-wrap offset (±1.0 in mercator x for
+ * wrapped tile copies, 0 otherwise). It can't be folded into `u_anchor_clip`
+ * (per-frame, per-layer; offset varies per draw call) or into `mercDelta` in
+ * Float32 (delta ≈ 1e-7 vs offset ≈ 1 → small term gets washed out), so it
+ * goes through the matrix as a separate small clip-space delta. Zero cost
+ * when offset is 0.
+ *
+ * Caller responsibilities (see UntiledMode + createHybridMesh):
+ *   1. Pre-project each vertex's WGS84 (lon, lat) to mercator [0, 1] in JS
+ *      Float64, encode as `(mercX − anchorX, mercY − anchorY) / layerHalfXY`,
+ *      pack Float32.
+ *   2. Set `wgs84Bounds` so the render path computes
+ *      `scale_x = layerHalfX`, `shift_x = layerAnchorX` (same uniforms for
+ *      every chunk of the layer → shared edges remain Float32-equal across
+ *      chunks → no boundary gaps).
+ *   3. Each frame, set `u_eye_matrix` = matrix and
+ *      `u_anchor_clip` = matrix · vec4(layerAnchorMerc, 0, 1) (Float64 in JS,
+ *      Float32 to GPU).
+ *
+ * `merc` is reconstructed at low precision purely for fragment-shader
+ * varyings (`v_mercatorPos`); its precision doesn't affect `gl_Position`.
+ */
 const VERTEX_TO_WGS84_TO_MERCATOR = `
-  // vertex.xy are in local [-1, 1] space for this region
-  // scale/shift transform to absolute normalized 4326 [0,1] on world
-  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
-  float normLat = vertex.y * sy + shift_y;
-
-  // Convert normalized [0,1] to degrees
-  float lon = normLon * 360.0 - 180.0;
-  float lat = normLat * 180.0 - 90.0;
-
-  // Clamp latitude to Mercator limits to avoid infinity at poles
-  lat = clamp(lat, -MERCATOR_LAT_LIMIT, MERCATOR_LAT_LIMIT);
-
-  // Mercator projection
-  float lambda = radians(lon);
-  float phi = radians(lat);
-  float mercY_raw = log(tan((PI / 2.0 + phi) / 2.0));
-
-  // Normalize mercator output to [0,1]
-  float mercX = (lambda / PI + 1.0) / 2.0;
-  float mercY = (1.0 - mercY_raw / PI) / 2.0;
-  vec2 merc = vec2(mercX, mercY);`
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  vec4 deltaClip = u_eye_matrix * vec4(mercDelta, 0.0, 0.0);
+  vec4 wrapClip = u_eye_matrix * vec4(u_worldXOffset, 0.0, 0.0, 0.0);
+  vec2 merc = vec2(
+    shift_x + mercDelta.x + u_worldXOffset,
+    shift_y + mercDelta.y
+  );`
 
 /** Individual shader constants (composed as needed) */
 const CONST_PI = `const float PI = 3.14159265358979323846;`
@@ -282,6 +316,14 @@ export function createVertexShader(options: VertexShaderOptions): string {
     projectionOutput = PROJECT_MAPBOX_ECEF
   } else if (isDirectEcef) {
     projectionOutput = PROJECT_MAPLIBRE_ECEF
+  } else if (inputSpace === 'wgs84') {
+    // Eye-coords path: VERTEX_TO_WGS84_TO_MERCATOR already produced `deltaClip`
+    // (matrix · vec4(mercDelta, 0, 0)) and `wrapClip` (matrix · vec4(offset, 0, 0, 0)
+    // for world-wrapped tile copies; zero when not wrapping). Adding both to
+    // the precomputed `u_anchor_clip` gives gl_Position with sub-pixel Float32
+    // precision. Skip the standard projectTile/matrix path so we don't lose
+    // precision routing through absolute world coords.
+    projectionOutput = `  gl_Position = u_anchor_clip + deltaClip + wrapClip;`
   } else if (projection === 'maplibre') {
     projectionOutput = PROJECT_MAPLIBRE_GLOBE
   } else {
