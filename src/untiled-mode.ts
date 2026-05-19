@@ -661,25 +661,47 @@ export class UntiledMode implements ZarrMode {
       yNorthIdx = height - 1 - yNorthIdx
     }
 
-    // Convert pixel indices to region indices
-    const regionXMin = Math.floor(Math.min(xMinIdx, xMaxIdx) / regionW)
-    const regionXMax = Math.floor(Math.max(xMinIdx, xMaxIdx) / regionW)
     const regionYMin = Math.floor(Math.min(ySouthIdx, yNorthIdx) / regionH)
     const regionYMax = Math.floor(Math.max(ySouthIdx, yNorthIdx) / regionH)
-
-    // Clamp to valid range
     const numRegionsX = Math.ceil(width / regionW)
     const numRegionsY = Math.ceil(height / regionH)
-    const clampedXMin = Math.max(0, regionXMin)
-    const clampedXMax = Math.min(numRegionsX - 1, regionXMax)
     const clampedYMin = Math.max(0, regionYMin)
     const clampedYMax = Math.min(numRegionsY - 1, regionYMax)
 
-    // Build list of visible region coordinates
     const regions: Array<{ regionX: number; regionY: number }> = []
-    for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
-      for (let rx = clampedXMin; rx <= clampedXMax; rx++) {
-        regions.push({ regionX: rx, regionY: ry })
+
+    if (east > xMax || west < xMin) {
+      // Viewport crosses the antimeridian. geoToArrayIndex clamps coordinates to
+      // the dataset edges, so a single index range would span the entire dataset
+      // width instead of just the two narrow strips that are actually visible.
+      // Fetch each strip separately by wrapping the overflowed coordinate back
+      // into the dataset's extent.
+      if (east > xMax) {
+        const asiaXMin = Math.max(0, Math.floor(xMinIdx / regionW))
+        const wrappedEastIdx = geoToArrayIndex(east - (xMax - xMin), xMin, xMax, width)
+        const alaskaXMax = Math.min(numRegionsX - 1, Math.floor(wrappedEastIdx / regionW))
+        for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
+          for (let rx = asiaXMin; rx < numRegionsX; rx++) regions.push({ regionX: rx, regionY: ry })
+          for (let rx = 0; rx <= alaskaXMax; rx++) regions.push({ regionX: rx, regionY: ry })
+        }
+      } else {
+        const wrappedWestIdx = geoToArrayIndex(west + (xMax - xMin), xMin, xMax, width)
+        const asiaXMin = Math.max(0, Math.floor(wrappedWestIdx / regionW))
+        const alaskaXMax = Math.min(numRegionsX - 1, Math.floor(xMaxIdx / regionW))
+        for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
+          for (let rx = asiaXMin; rx < numRegionsX; rx++) regions.push({ regionX: rx, regionY: ry })
+          for (let rx = 0; rx <= alaskaXMax; rx++) regions.push({ regionX: rx, regionY: ry })
+        }
+      }
+    } else {
+      const regionXMin = Math.floor(Math.min(xMinIdx, xMaxIdx) / regionW)
+      const regionXMax = Math.floor(Math.max(xMinIdx, xMaxIdx) / regionW)
+      const clampedXMin = Math.max(0, regionXMin)
+      const clampedXMax = Math.min(numRegionsX - 1, regionXMax)
+      for (let ry = clampedYMin; ry <= clampedYMax; ry++) {
+        for (let rx = clampedXMin; rx <= clampedXMax; rx++) {
+          regions.push({ regionX: rx, regionY: ry })
+        }
       }
     }
 
