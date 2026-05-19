@@ -18,10 +18,10 @@ export type QueryDataValues = number[] | NestedValues
  * Result from a query (point or region).
  * Matches carbonplan/maps structure: { [variable]: values, dimensions, coordinates }
  *
- * Spatial result dimensions and coordinate keys follow the emitted coordinate space:
- * - WGS84 fallback: `lat`/`lon`
- * - Source CRS: the store's spatial axis names (for example `y`/`x`,
- *   `lat`/`lon`, or `latitude`/`longitude`)
+ * Spatial result keys are the store's own axis names (e.g. `y`/`x`,
+ * `lat`/`lon`, `latitude`/`longitude`) and the coordinate arrays carry
+ * source-CRS values: Web Mercator meters for EPSG:3857, degrees for
+ * EPSG:4326, source units for custom-proj4 datasets.
  */
 export interface QueryResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */

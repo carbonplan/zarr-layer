@@ -33,6 +33,7 @@ import type {
   NormalizedSelector,
   Selector,
   CRS,
+  Bounds,
   DimIndicesProps,
   UntiledLevel,
 } from './types'
@@ -2405,10 +2406,8 @@ export class UntiledMode implements ZarrMode {
           this.xyLimits.yMax,
         ]
       : null
-    const usesSourceCoordinates = !!this.proj4def && !!sourceBounds
     const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
       desc.dimensions,
-      usesSourceCoordinates,
       desc.dimIndices
     )
     const emptyResult = (): QueryResult => ({
@@ -2418,7 +2417,9 @@ export class UntiledMode implements ZarrMode {
     })
 
     const activeLevel = this.activeLevel
-    if (!this.mercatorBounds || !activeLevel) return emptyResult()
+    if (!this.mercatorBounds || !activeLevel || !sourceBounds) {
+      return emptyResult()
+    }
 
     const level: QueryLevelSnapshot = {
       index: activeLevel.index,
@@ -2456,32 +2457,29 @@ export class UntiledMode implements ZarrMode {
 
       const subsetBounds = this.computeSubsetBounds(pixelBounds, level)
 
-      let subsetSourceBounds: [number, number, number, number] | null = null
-      if (this.proj4def && sourceBounds) {
-        const { minX, minY, maxX, maxY } = pixelBounds
-        const [xMin, yMin] = pixelToSourceCRS(
-          minX,
-          minY,
-          sourceBounds,
-          level.width,
-          level.height,
-          this.latIsAscending
-        )
-        const [xMax, yMax] = pixelToSourceCRS(
-          maxX,
-          maxY,
-          sourceBounds,
-          level.width,
-          level.height,
-          this.latIsAscending
-        )
-        subsetSourceBounds = [
-          Math.min(xMin, xMax),
-          Math.min(yMin, yMax),
-          Math.max(xMin, xMax),
-          Math.max(yMin, yMax),
-        ]
-      }
+      const { minX, minY, maxX, maxY } = pixelBounds
+      const [xMin0, yMin0] = pixelToSourceCRS(
+        minX,
+        minY,
+        sourceBounds,
+        level.width,
+        level.height,
+        this.latIsAscending
+      )
+      const [xMax0, yMax0] = pixelToSourceCRS(
+        maxX,
+        maxY,
+        sourceBounds,
+        level.width,
+        level.height,
+        this.latIsAscending
+      )
+      const subsetSourceBounds: Bounds = [
+        Math.min(xMin0, xMax0),
+        Math.min(yMin0, yMax0),
+        Math.max(xMin0, xMax0),
+        Math.max(yMin0, yMax0),
+      ]
 
       return queryRegionUntiled(
         this.variable,
@@ -2494,13 +2492,13 @@ export class UntiledMode implements ZarrMode {
         this.crs ?? 'EPSG:4326',
         desc.dimensions,
         desc.coordinates,
+        subsetSourceBounds,
         fetched.channels,
         fetched.channelLabels,
         fetched.multiValueDimNames,
         this.latIsAscending,
         transforms,
         this.proj4def,
-        subsetSourceBounds,
         opts,
         desc.dimIndices,
         this.cachedWGS84Transformer ?? undefined
@@ -2585,11 +2583,7 @@ export class UntiledMode implements ZarrMode {
     if (!westResult && !eastResult) return emptyResult()
     if (!westResult || !eastResult) return (westResult ?? eastResult)!
 
-    const { yDim, xDim } = findSpatialDimNames(
-      desc.dimensions,
-      usesSourceCoordinates,
-      desc.dimIndices
-    )
+    const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
     return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
 }

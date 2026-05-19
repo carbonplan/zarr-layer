@@ -10,18 +10,16 @@ import {
   getTilesAtZoomEquirect,
   latToMercatorNorm,
   lonToMercatorNorm,
-  mercatorNormToLat,
-  mercatorNormToLon,
   type TileTuple,
   type XYLimits,
   type MercatorBounds,
 } from '../map-utils'
+import { WEB_MERCATOR_EXTENT } from '../constants'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
 import {
   createWGS84ToSourceTransformer,
   sourceCRSToPixel,
-  pixelToSourceCRS,
 } from '../projection-utils'
 
 /** Pixel rectangle with exclusive max bounds. */
@@ -46,112 +44,10 @@ export function rasterExtentCrossesAntimeridian(
   )
 }
 
-/** Cached transformer type for reuse across multiple pixelToLatLon calls */
+/** Cached WGS84↔source-CRS transformer used by query input geometry transforms. */
 export type CachedTransformer = ReturnType<
   typeof createWGS84ToSourceTransformer
 >
-
-/**
- * Converts pixel coordinates to lat/lon.
- * Handles all CRS types including proj4 reprojection.
- * This is the canonical function for pixel → geographic conversion in queries.
- *
- * @param cachedTransformer - Optional pre-created transformer for performance.
- *   When processing many pixels, create once and reuse to avoid repeated proj4 init.
- */
-export function pixelToLatLon(
-  x: number,
-  y: number,
-  bounds: MercatorBounds,
-  width: number,
-  height: number,
-  crs: CRS,
-  latIsAscending?: boolean,
-  proj4def?: string | null,
-  sourceBounds?: Bounds | null,
-  cachedTransformer?: CachedTransformer,
-  centerPixel: boolean = true
-): { lat: number; lon: number } {
-  // For proj4, convert pixel → source CRS → WGS84
-  if (proj4def && sourceBounds) {
-    const transformer =
-      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-
-    // pixelToSourceCRS uses edge-based model: pixel 0 → xMin, pixel width → xMax
-    // For pixel centers, pass pixel + 0.5; for edges, pass pixel directly
-    const px = centerPixel ? x + 0.5 : x
-    const py = centerPixel ? y + 0.5 : y
-    const [srcX, srcY] = pixelToSourceCRS(
-      px,
-      py,
-      sourceBounds,
-      width,
-      height,
-      latIsAscending
-    )
-
-    const [lon, lat] = transformer.inverse(srcX, srcY)
-    return { lat, lon }
-  }
-
-  // Standard CRS handling. Untiled source-projected queries normally take the
-  // proj4 branch above; this fallback is retained for exported callers and
-  // other internal paths that pass already-mercator-normalized bounds.
-  // Guard against zero-dimension cases
-  // centerPixel=true: return center of pixel (x+0.5), centerPixel=false: return corner (x)
-  const xFrac = width <= 1 ? 0.5 : centerPixel ? (x + 0.5) / width : x / width
-  const yFrac =
-    height <= 1 ? 0.5 : centerPixel ? (y + 0.5) / height : y / height
-  const mercX = bounds.x0 + xFrac * (bounds.x1 - bounds.x0)
-  const mercY = bounds.y0 + yFrac * (bounds.y1 - bounds.y0)
-
-  const lon = mercatorNormToLon(mercX)
-
-  // Guard against zero-range bounds
-  const yRange = bounds.y1 - bounds.y0
-  const yNorm = yRange === 0 ? 0.5 : (mercY - bounds.y0) / yRange
-
-  const lat =
-    crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-      ? latIsAscending
-        ? bounds.latMin + yNorm * (bounds.latMax - bounds.latMin)
-        : bounds.latMax - yNorm * (bounds.latMax - bounds.latMin)
-      : mercatorNormToLat(mercY)
-
-  return { lat, lon }
-}
-
-/**
- * Converts latitude to tile Y coordinate at a given zoom level (Equirectangular/EPSG:4326).
- */
-function latToTileEquirect(
-  lat: number,
-  zoom: number,
-  xyLimits: XYLimits
-): number {
-  const { yMin, yMax } = xyLimits
-  const z2 = Math.pow(2, zoom)
-  const clamped = Math.max(Math.min(lat, yMax), yMin)
-  const norm = (yMax - clamped) / (yMax - yMin)
-  return Math.floor(norm * z2)
-}
-
-/**
- * Converts longitude to tile X coordinate at a given zoom level (Equirectangular/EPSG:4326).
- */
-function lonToTileEquirect(
-  lon: number,
-  zoom: number,
-  xyLimits: XYLimits
-): number {
-  const { xMin, xMax } = xyLimits
-  const z2 = Math.pow(2, zoom)
-  const clamped = Math.max(Math.min(lon, xMax), xMin)
-  const norm = (clamped - xMin) / (xMax - xMin)
-  return Math.floor(norm * z2)
-}
 
 /**
  * Computes fractional position within a tile for a geographic point.
@@ -192,35 +88,34 @@ function geoToTileFraction(
 }
 
 /**
- * Converts tile pixel position to geographic coordinates.
+ * Converts a tile-pixel position to source-CRS coordinates [x, y].
+ *
+ * EPSG:4326 tile pyramids: returns [lon, lat] in degrees, against xyLimits.
+ * EPSG:3857 tile pyramids: returns [x, y] in Web Mercator meters.
  */
-export function tilePixelToLatLon(
+export function tilePixelToSourceCRS(
   tile: TileTuple,
   pixelX: number,
   pixelY: number,
   tileSize: number,
   crs: CRS,
   xyLimits: XYLimits
-): { lat: number; lon: number } {
+): [number, number] {
   const [z, x, y] = tile
   const z2 = Math.pow(2, z)
-
   const fracX = (x + pixelX / tileSize) / z2
   const fracY = (y + pixelY / tileSize) / z2
 
   if (crs === 'EPSG:4326') {
     const { xMin, xMax, yMin, yMax } = xyLimits
-    const lon = xMin + fracX * (xMax - xMin)
-    const lat = yMax - fracY * (yMax - yMin)
-    return { lat, lon }
+    return [xMin + fracX * (xMax - xMin), yMax - fracY * (yMax - yMin)]
   }
 
-  // EPSG:3857 - invert mercator projection
-  const lon = fracX * 360 - 180
-  const y2 = 180 - fracY * 360
-  const lat = (360 / Math.PI) * Math.atan(Math.exp((y2 * Math.PI) / 180)) - 90
-
-  return { lat, lon }
+  // EPSG:3857: tile fractions map linearly to Web Mercator meters.
+  return [
+    (fracX * 2 - 1) * WEB_MERCATOR_EXTENT,
+    (1 - fracY * 2) * WEB_MERCATOR_EXTENT,
+  ]
 }
 
 /**

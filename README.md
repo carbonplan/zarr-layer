@@ -269,7 +269,7 @@ const result = await layer.queryData({
 // }
 ```
 
-Spatial query result dimensions and coordinate keys use the store's own spatial axis names whenever source bounds are available. `lat`/`lon` are used only when the zarr store literally names its axes that way; otherwise results use whatever names the store provides, such as `y`/`x` or `latitude`/`longitude`. Fallback paths that emit WGS84 coordinates use `lat`/`lon`. Query geometries are still supplied as GeoJSON lon/lat coordinates.
+Spatial query results are returned in the dataset's source CRS, under the store's own spatial axis names. An `EPSG:3857` dataset with `y`/`x` axes returns Web Mercator meters under `y`/`x`; an `EPSG:4326` dataset with `latitude`/`longitude` axes returns degrees under `latitude`/`longitude`; a custom-proj4 dataset returns its source-CRS values under whatever the store calls them. Input geometries are still supplied as GeoJSON lon/lat regardless of the source CRS.
 
 You can pass a third `options` argument to control query behavior:
 
