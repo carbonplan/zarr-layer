@@ -6,7 +6,7 @@
  * Matches carbonplan/maps structure and behavior.
  */
 
-import type { MercatorBounds, XYLimits } from '../map-utils'
+import type { XYLimits } from '../map-utils'
 import { parseLevelZoom, tileToKey } from '../map-utils'
 import type { ZarrStore } from '../zarr-store'
 import type { Bounds, CRS, DimIndicesProps, Selector } from '../types'
@@ -366,17 +366,15 @@ export function queryRegionUntiled(
   data: Float32Array | null,
   width: number,
   height: number,
-  bounds: MercatorBounds,
-  _crs: CRS,
   dimensions: string[],
   coordinates: Record<string, (string | number)[]>,
   sourceBounds: Bounds,
+  proj4def: string,
   channels: number = 1,
   channelLabels?: (string | number)[][],
   multiValueDimNames?: string[],
   latIsAscending?: boolean,
   transforms?: QueryTransformOptions,
-  proj4def?: string | null,
   options?: QueryOptions,
   dimIndices?: DimIndicesProps,
   cachedTransformer?: CachedTransformer
@@ -444,21 +442,18 @@ export function queryRegionUntiled(
   checkAborted(signal)
 
   // Create transformer once for all pixels
-  const transformer: CachedTransformer | undefined = proj4def
-    ? cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-    : undefined
+  const transformer: CachedTransformer =
+    cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
 
   // Transform the query polygon into pixel-space coordinates once.
   // This eliminates per-pixel proj4 calls during the intersection test.
   const pixelGeometry = transformGeometryToPixelSpace(
     geometry,
-    bounds,
+    sourceBounds,
     width,
     height,
-    _crs,
-    latIsAscending,
     proj4def,
-    sourceBounds,
+    latIsAscending,
     transformer
   )
   if (!pixelGeometry) return buildResult()

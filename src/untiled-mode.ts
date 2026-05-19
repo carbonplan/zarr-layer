@@ -2354,42 +2354,6 @@ export class UntiledMode implements ZarrMode {
   }
 
   /**
-   * Compute subset bounds from pixel bounds against the full mercator bounds.
-   */
-  private computeSubsetBounds(
-    pixelBounds: PixelRect,
-    level: QueryLevelSnapshot
-  ): MercatorBounds {
-    const { minX, maxX, minY, maxY } = pixelBounds
-    const xRange = this.mercatorBounds!.x1 - this.mercatorBounds!.x0
-    const yRange = this.mercatorBounds!.y1 - this.mercatorBounds!.y0
-    const subsetBounds: MercatorBounds = {
-      x0: this.mercatorBounds!.x0 + (minX / level.width) * xRange,
-      x1: this.mercatorBounds!.x0 + (maxX / level.width) * xRange,
-      y0: this.mercatorBounds!.y0 + (minY / level.height) * yRange,
-      y1: this.mercatorBounds!.y0 + (maxY / level.height) * yRange,
-    }
-    if (
-      this.mercatorBounds!.latMin !== undefined &&
-      this.mercatorBounds!.latMax !== undefined
-    ) {
-      const latRange = this.mercatorBounds!.latMax - this.mercatorBounds!.latMin
-      if (this.latIsAscending) {
-        subsetBounds.latMin =
-          this.mercatorBounds!.latMin + (minY / level.height) * latRange
-        subsetBounds.latMax =
-          this.mercatorBounds!.latMin + (maxY / level.height) * latRange
-      } else {
-        subsetBounds.latMax =
-          this.mercatorBounds!.latMax - (minY / level.height) * latRange
-        subsetBounds.latMin =
-          this.mercatorBounds!.latMax - (maxY / level.height) * latRange
-      }
-    }
-    return subsetBounds
-  }
-
-  /**
    * Query data for point or region geometries.
    */
   async queryData(
@@ -2455,8 +2419,6 @@ export class UntiledMode implements ZarrMode {
       )
       if (!fetched) return null
 
-      const subsetBounds = this.computeSubsetBounds(pixelBounds, level)
-
       const { minX, minY, maxX, maxY } = pixelBounds
       const [xMin0, yMin0] = pixelToSourceCRS(
         minX,
@@ -2488,34 +2450,29 @@ export class UntiledMode implements ZarrMode {
         fetched.data,
         fetched.width,
         fetched.height,
-        subsetBounds,
-        this.crs ?? 'EPSG:4326',
         desc.dimensions,
         desc.coordinates,
         subsetSourceBounds,
+        this.proj4def!,
         fetched.channels,
         fetched.channelLabels,
         fetched.multiValueDimNames,
         this.latIsAscending,
         transforms,
-        this.proj4def,
         opts,
         desc.dimIndices,
         this.cachedWGS84Transformer ?? undefined
       )
     }
 
-    // Helper for the single-fetch path shared by proj4 and non-crossing cases
     const singleFetch = async (geom: QueryGeometry): Promise<QueryResult> => {
       const pixelBounds = computePixelBoundsFromGeometry(
         geom,
-        this.mercatorBounds!,
+        sourceBounds,
         level.width,
         level.height,
-        this.crs ?? 'EPSG:4326',
+        this.proj4def!,
         this.latIsAscending,
-        this.proj4def,
-        sourceBounds,
         this.cachedWGS84Transformer ?? undefined
       )
       if (!pixelBounds) return emptyResult()
@@ -2562,11 +2519,12 @@ export class UntiledMode implements ZarrMode {
     // Crossing: two-strip fetch
     const spans = wrappedBboxToPixelSpans(
       wrappedBbox,
-      this.mercatorBounds,
+      sourceBounds,
       level.width,
       level.height,
-      this.crs ?? 'EPSG:4326',
-      this.latIsAscending
+      this.proj4def!,
+      this.latIsAscending,
+      this.cachedWGS84Transformer ?? undefined
     )
 
     const westResult = spans.west
