@@ -68,6 +68,19 @@ export function identifyDimensionIndices(
   spatialDimensions?: SpatialDimensions,
   coordinates?: CoordinatesMap
 ): DimIndicesProps {
+  // Validate explicit overrides
+  const lowerDimNames = dimNames.map((d) => d.toLowerCase())
+  for (const axis of ['lat', 'lon'] as const) {
+    const requested = spatialDimensions?.[axis]
+    if (requested && !lowerDimNames.includes(requested.toLowerCase())) {
+      throw new Error(
+        `spatialDimensions.${axis} = '${requested}' does not match any store dimension. Available: [${dimNames.join(
+          ', '
+        )}]`
+      )
+    }
+  }
+
   const aliases: Record<'lat' | 'lon', string[]> = {
     lat: [...SPATIAL_DIMENSION_ALIASES.lat],
     lon: [...SPATIAL_DIMENSION_ALIASES.lon],
