@@ -16,6 +16,7 @@ import { WEB_MERCATOR_EXTENT } from '../constants'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
 import {
+  clampLatLonToProj4def,
   createWGS84ToSourceTransformer,
   sourceCRSToPixel,
 } from '../projection-utils'
@@ -219,7 +220,8 @@ export function computePixelBoundsFromGeometry(
   let maxY = -Infinity
 
   for (const [lon, lat] of samplePoints) {
-    const [srcX, srcY] = transformer.forward(lon, lat)
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+    const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
     if (!isFinite(srcX) || !isFinite(srcY)) continue
 
     const [xPixel, yPixel] = sourceCRSToPixel(
@@ -255,10 +257,7 @@ export function computePixelBoundsFromGeometry(
   return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
 }
 
-import {
-  DEFAULT_QUERY_DENSIFY_MAX_ERROR,
-  MERCATOR_LAT_LIMIT,
-} from '../constants'
+import { DEFAULT_QUERY_DENSIFY_MAX_ERROR } from '../constants'
 
 /** Max recursion depth for adaptive subdivision */
 const DENSIFY_MAX_DEPTH = 10
@@ -423,13 +422,9 @@ export function transformGeometryToTilePixelSpace(
   xyLimits: XYLimits
 ): QueryGeometry | null {
   const transformVertex = (lon: number, lat: number): [number, number] => {
-    // Clamp latitude to Mercator limits to avoid infinities at the poles
-    const clampedLat =
-      crs !== 'EPSG:4326'
-        ? Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, lat))
-        : lat
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, crs)
     const { fracX, fracY } = geoToTileFraction(
-      lon,
+      clampedLon,
       clampedLat,
       tile,
       crs,
@@ -498,7 +493,8 @@ function lonLatToPixel(
 ): [number, number] | null {
   const transformer =
     cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-  const [srcX, srcY] = transformer.forward(lon, lat)
+  const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+  const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
   if (!isFinite(srcX) || !isFinite(srcY)) return null
   return sourceCRSToPixel(
     srcX,
@@ -1185,7 +1181,8 @@ export function wrappedBboxToPixelSpans(
     cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
 
   const toPixel = (lon: number, lat: number): [number, number] | null => {
-    const [srcX, srcY] = transformer.forward(lon, lat)
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+    const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
     if (!isFinite(srcX) || !isFinite(srcY)) return null
     return sourceCRSToPixel(
       srcX,
