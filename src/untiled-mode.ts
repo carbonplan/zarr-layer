@@ -2000,9 +2000,25 @@ export class UntiledMode implements ZarrMode {
         this.xyLimits.xMax,
         this.xyLimits.yMax
       )
-      const dataWidthMeters = Math.abs(maxMercX - minMercX)
+      let dataWidthMeters = Math.abs(maxMercX - minMercX)
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidthMeters / fullWorldMeters
+      // worldFraction > 1 indicates the corner projection failed — this happens for
+      // projections like MODIS sinusoidal where the rectangular bounding box corners
+      // are outside the valid CRS domain (near-polar latitudes give out-of-domain λ).
+      // Fall back to the equatorial strip (y=0), which is always in-domain for any
+      // cylindrical-like projection and gives the correct horizontal extent.
+      if (!isFinite(dataWidthMeters) || dataWidthMeters > fullWorldMeters) {
+        const [eqMinX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMin,
+          0
+        )
+        const [eqMaxX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMax,
+          0
+        )
+        dataWidthMeters = Math.abs(eqMaxX - eqMinX)
+      }
+      worldFraction = Math.min(1, dataWidthMeters / fullWorldMeters)
     } else if (this.crs === 'EPSG:3857') {
       // Web Mercator: full world is ~40,075,016 meters
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
