@@ -13,6 +13,7 @@ import {
   WEB_MERCATOR_EXTENT,
   MIN_SUBDIVISIONS,
   MAX_SUBDIVISIONS,
+  MERCATOR_LAT_LIMIT,
 } from './constants'
 import type {
   ZarrMode,
@@ -311,10 +312,25 @@ export class UntiledMode implements ZarrMode {
           this.xyLimits.xMax,
           this.xyLimits.yMax,
         ]
-        this.cachedMercatorTransformer = createTransformer(
-          this.proj4def,
-          bounds
-        )
+        const rawMercatorTransformer = createTransformer(this.proj4def, bounds)
+        // Wrap the source→3857 forward so lat=±90° inputs (common for global
+        // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
+        // sees them. Without this, `sampleEdgesToMercatorBounds` silently
+        // drops the polar edge samples and produces too-tight mercator bounds.
+        this.cachedMercatorTransformer =
+          this.crs === 'EPSG:4326'
+            ? {
+                ...rawMercatorTransformer,
+                forward: (x, y) =>
+                  rawMercatorTransformer.forward(
+                    x,
+                    Math.max(
+                      -MERCATOR_LAT_LIMIT,
+                      Math.min(MERCATOR_LAT_LIMIT, y)
+                    )
+                  ),
+              }
+            : rawMercatorTransformer
         this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
           this.proj4def
         )
