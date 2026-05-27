@@ -134,6 +134,8 @@ type LevelMeta = {
   // add xyLimits here and store per-region.
 }
 
+type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4' | 'unsupported'
+
 /** Maximum number of regions to keep in cache (LRU eviction) */
 const MAX_CACHED_REGIONS = 128
 /** Snapshot of level state captured at fetch start to prevent race conditions */
@@ -221,8 +223,9 @@ export class UntiledMode implements ZarrMode {
   // Multi-level support
   private levels: UntiledLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
+  private projectionKind: ProjectionKind = 'epsg4326'
+  // Transformer definition: EPSG code for built-ins, supplied string for custom proj4.
   private proj4def: string | null = null
-  private isNativeEpsg4326: boolean = true
 
   // Cached transformers for proj4 reprojection (created once, reused everywhere)
   private cachedMercatorTransformer: ReturnType<
@@ -298,16 +301,8 @@ export class UntiledMode implements ZarrMode {
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
-      // proj4js ships with EPSG:4326 and EPSG:3857 pre-registered, so we
-      // can pass the EPSG code itself as a proj4 def for those CRSes when
-      // the consumer didn't supply a string. Lets `getVisibleRegions` use
-      // the proj4-aware path uniformly for supported CRSes. (#59)
-      const proj4jsHasBuiltinDef =
-        desc.crs === 'EPSG:4326' || desc.crs === 'EPSG:3857'
-      this.proj4def = desc.proj4 ?? (proj4jsHasBuiltinDef ? desc.crs : null)
-      const isBuiltinEpsg4326Def =
-        !desc.proj4 || desc.proj4.trim().toUpperCase() === 'EPSG:4326'
-      this.isNativeEpsg4326 = this.crs === 'EPSG:4326' && isBuiltinEpsg4326Def
+      this.projectionKind = resolveProjectionKind(desc.crs, desc.proj4)
+      this.proj4def = resolveProjectionDef(desc.crs, desc.proj4)
 
       // Cache transformers once for reuse (major performance optimization)
       if (this.proj4def && this.xyLimits) {
@@ -322,16 +317,20 @@ export class UntiledMode implements ZarrMode {
         // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
         // sees them. Without this, `sampleEdgesToMercatorBounds` silently
         // drops the polar edge samples and produces too-tight mercator bounds.
-        this.cachedMercatorTransformer = this.isNativeEpsg4326
-          ? {
-              ...rawMercatorTransformer,
-              forward: (x, y) =>
-                rawMercatorTransformer.forward(
-                  x,
-                  Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, y))
-                ),
-            }
-          : rawMercatorTransformer
+        this.cachedMercatorTransformer =
+          this.projectionKind === 'epsg4326'
+            ? {
+                ...rawMercatorTransformer,
+                forward: (x, y) =>
+                  rawMercatorTransformer.forward(
+                    x,
+                    Math.max(
+                      -MERCATOR_LAT_LIMIT,
+                      Math.min(MERCATOR_LAT_LIMIT, y)
+                    )
+                  ),
+              }
+            : rawMercatorTransformer
         this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
           this.proj4def
         )
@@ -342,9 +341,9 @@ export class UntiledMode implements ZarrMode {
         )
       }
 
-      if (this.crs !== 'EPSG:4326' && this.crs !== 'EPSG:3857') {
+      if (this.projectionKind === 'unsupported') {
         console.warn(
-          `Unsupported CRS "${this.crs}" - rendering may be incorrect. Supported: EPSG:4326, EPSG:3857`
+          `Unsupported CRS "${this.crs}" without a proj4 definition - rendering may be incorrect. Supported built-ins: EPSG:4326, EPSG:3857`
         )
       }
 
@@ -1865,7 +1864,7 @@ export class UntiledMode implements ZarrMode {
 
     // Calculate what fraction of the world the data covers, accounting for CRS
     let worldFraction: number
-    if (this.isNativeEpsg4326) {
+    if (this.projectionKind === 'epsg4326') {
       // proj4's adjust_lon folds inputs outside [-180, 180] back into range
       // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
       // distorts the width for 0-360° stores and antimeridian-crossing
@@ -1873,6 +1872,11 @@ export class UntiledMode implements ZarrMode {
       // render bounds may conservatively expand antimeridian-crossing regions
       // to full-world X for tile intersection.
       worldFraction = longitudeWorldFraction(this.xyLimits)
+    } else if (this.projectionKind === 'epsg3857') {
+      // Web Mercator: full world is ~40,075,016 meters
+      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
+      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
+      worldFraction = dataWidth / fullWorldMeters
     } else if (this.proj4def && this.cachedMercatorTransformer) {
       // Source-projected data: transform bounds corners to mercator
       const [minMercX] = this.cachedMercatorTransformer.forward(
@@ -1886,11 +1890,6 @@ export class UntiledMode implements ZarrMode {
       const dataWidthMeters = Math.abs(maxMercX - minMercX)
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidthMeters / fullWorldMeters
-    } else if (this.crs === 'EPSG:3857') {
-      // Web Mercator: full world is ~40,075,016 meters
-      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
-      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidth / fullWorldMeters
     } else {
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
@@ -2148,8 +2147,11 @@ export class UntiledMode implements ZarrMode {
     if (!this.xyLimits) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
-    if (this.isNativeEpsg4326) {
+    if (this.projectionKind === 'epsg4326') {
       return boundsToMercatorNorm(this.xyLimits, 'EPSG:4326')
+    }
+    if (this.projectionKind === 'epsg3857') {
+      return boundsToMercatorNorm(this.xyLimits, 'EPSG:3857')
     }
     if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
@@ -2177,8 +2179,11 @@ export class UntiledMode implements ZarrMode {
     yMin: number
     yMax: number
   }): MercatorBounds {
-    if (this.isNativeEpsg4326) {
+    if (this.projectionKind === 'epsg4326') {
       return boundsToMercatorNorm(bounds, 'EPSG:4326')
+    }
+    if (this.projectionKind === 'epsg3857') {
+      return boundsToMercatorNorm(bounds, 'EPSG:3857')
     }
     if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
@@ -2417,6 +2422,10 @@ export class UntiledMode implements ZarrMode {
     if (!this.mercatorBounds || !activeLevel || !sourceBounds) {
       return emptyResult()
     }
+    const projectionDef = this.proj4def
+    if (!projectionDef) {
+      return emptyResult()
+    }
 
     const level: QueryLevelSnapshot = {
       index: activeLevel.index,
@@ -2486,7 +2495,7 @@ export class UntiledMode implements ZarrMode {
         desc.dimensions,
         desc.coordinates,
         subsetSourceBounds,
-        this.proj4def!,
+        projectionDef,
         fetched.channels,
         fetched.channelLabels,
         fetched.multiValueDimNames,
@@ -2504,7 +2513,7 @@ export class UntiledMode implements ZarrMode {
         sourceBounds,
         level.width,
         level.height,
-        this.proj4def!,
+        projectionDef,
         this.latIsAscending,
         this.cachedWGS84Transformer ?? undefined
       )
@@ -2517,7 +2526,7 @@ export class UntiledMode implements ZarrMode {
       preprocessQueryGeometry(geometry)
 
     const supportsWrappedLongitude =
-      !desc.proj4 && (this.crs === 'EPSG:4326' || this.crs === 'EPSG:3857')
+      this.projectionKind === 'epsg4326' || this.projectionKind === 'epsg3857'
     const queryGeometry = supportsWrappedLongitude
       ? processedGeometry
       : geometry
@@ -2538,7 +2547,8 @@ export class UntiledMode implements ZarrMode {
 
     // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in meters)
     if (
-      rasterExtentCrossesAntimeridian(this.crs ?? 'EPSG:4326', this.xyLimits)
+      this.projectionKind === 'epsg4326' &&
+      rasterExtentCrossesAntimeridian('EPSG:4326', this.xyLimits)
     ) {
       if (!this._antimeridianWarnings.has('raster-extent-crossing')) {
         this._antimeridianWarnings.add('raster-extent-crossing')
@@ -2555,7 +2565,7 @@ export class UntiledMode implements ZarrMode {
       sourceBounds,
       level.width,
       level.height,
-      this.proj4def!,
+      projectionDef,
       this.latIsAscending,
       this.cachedWGS84Transformer ?? undefined
     )
@@ -2577,6 +2587,45 @@ export class UntiledMode implements ZarrMode {
     const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
     return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
+}
+
+function normalizeBuiltinProjectionDef(
+  def: string | null | undefined
+): CRS | null {
+  if (!def) return null
+  const normalized = def.trim().toUpperCase()
+  return normalized === 'EPSG:4326' || normalized === 'EPSG:3857'
+    ? normalized
+    : null
+}
+
+function resolveProjectionKind(
+  crs: string,
+  proj4def: string | null
+): ProjectionKind {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) {
+    return builtinProj4Def === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+  }
+  if (proj4def?.trim()) {
+    return 'custom-proj4'
+  }
+  const builtinCrs = normalizeBuiltinProjectionDef(crs)
+  if (builtinCrs) {
+    return builtinCrs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+  }
+  return 'unsupported'
+}
+
+function resolveProjectionDef(
+  crs: string,
+  proj4def: string | null
+): string | null {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) return builtinProj4Def
+  const trimmedProj4Def = proj4def?.trim()
+  if (trimmedProj4Def) return trimmedProj4Def
+  return normalizeBuiltinProjectionDef(crs)
 }
 
 function longitudeWorldFraction(bounds: {
