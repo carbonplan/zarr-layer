@@ -7,7 +7,7 @@
  * adapted from zarr-cesium/src/map-utils.ts
  */
 
-import { MERCATOR_LAT_LIMIT } from './constants'
+import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 import type { MapLike } from './types'
@@ -466,6 +466,78 @@ export function findBestChildTiles<T extends TileDataLike>(
   }
 
   return bestChildren.length > 0 ? bestChildren : null
+}
+
+/**
+ * Converts geographic bounds to normalized Web Mercator bounds [0, 1].
+ * Handles both EPSG:4326 (lat/lon) and EPSG:3857 (already mercator) coordinate systems.
+ * @param xyLimits - Geographic bounds { xMin, xMax, yMin, yMax }.
+ * @param crs - Coordinate reference system ('EPSG:4326' or 'EPSG:3857').
+ * @returns Normalized mercator bounds { x0, y0, x1, y1 }.
+ */
+export function boundsToMercatorNorm(
+  xyLimits: { xMin: number; xMax: number; yMin: number; yMax: number },
+  crs: 'EPSG:4326' | 'EPSG:3857' | null
+): MercatorBounds {
+  if (crs === 'EPSG:3857') {
+    return {
+      x0: (xyLimits.xMin + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
+      y0: (WEB_MERCATOR_EXTENT - xyLimits.yMax) / (2 * WEB_MERCATOR_EXTENT),
+      x1: (xyLimits.xMax + WEB_MERCATOR_EXTENT) / (2 * WEB_MERCATOR_EXTENT),
+      y1: (WEB_MERCATOR_EXTENT - xyLimits.yMin) / (2 * WEB_MERCATOR_EXTENT),
+    }
+  }
+
+  let yMin = xyLimits.yMin
+  let yMax = xyLimits.yMax
+  if (yMin > yMax) {
+    ;[yMin, yMax] = [yMax, yMin]
+  }
+
+  let x0: number
+  let x1: number
+  const lonSpan = xyLimits.xMax - xyLimits.xMin
+  if (Math.abs(lonSpan) >= 360) {
+    x0 = 0
+    x1 = 1
+  } else {
+    let lonMin = xyLimits.xMin
+    let lonMax = xyLimits.xMax
+
+    // Keep 0-360-style intervals continuous when they sit entirely outside
+    // [-180, 180]. Intervals that still cross the wrap boundary cannot be
+    // represented as one MercatorBounds X span, so use full-world X bounds.
+    while (lonMin >= 180 && lonMax > 180) {
+      lonMin -= 360
+      lonMax -= 360
+    }
+    while (lonMin < -180 && lonMax <= -180) {
+      lonMin += 360
+      lonMax += 360
+    }
+
+    x0 = lonToMercatorNormWrapped(lonMin)
+    x1 = lonToMercatorNormWrapped(lonMax)
+    if (lonSpan !== 0 && x1 <= x0) {
+      x0 = 0
+      x1 = 1
+    }
+  }
+
+  return {
+    x0,
+    y0: latToMercatorNorm(yMax),
+    x1,
+    y1: latToMercatorNorm(yMin),
+  }
+}
+
+function lonToMercatorNormWrapped(lon: number): number {
+  if (lon >= -180 && lon <= 180) {
+    return lonToMercatorNorm(lon)
+  }
+  const wrapped = ((((lon + 180) % 360) + 360) % 360) - 180
+  return (wrapped + 180) / 360
 }
 
 // === Untiled mode utilities ===

@@ -40,6 +40,7 @@ import type {
 } from './types'
 import { ZarrStore } from './zarr-store'
 import {
+  boundsToMercatorNorm,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
@@ -221,6 +222,7 @@ export class UntiledMode implements ZarrMode {
   private levels: UntiledLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
   private proj4def: string | null = null
+  private isNativeEpsg4326: boolean = true
 
   // Cached transformers for proj4 reprojection (created once, reused everywhere)
   private cachedMercatorTransformer: ReturnType<
@@ -303,6 +305,9 @@ export class UntiledMode implements ZarrMode {
       const proj4jsHasBuiltinDef =
         desc.crs === 'EPSG:4326' || desc.crs === 'EPSG:3857'
       this.proj4def = desc.proj4 ?? (proj4jsHasBuiltinDef ? desc.crs : null)
+      const isBuiltinEpsg4326Def =
+        !desc.proj4 || desc.proj4.trim().toUpperCase() === 'EPSG:4326'
+      this.isNativeEpsg4326 = this.crs === 'EPSG:4326' && isBuiltinEpsg4326Def
 
       // Cache transformers once for reuse (major performance optimization)
       if (this.proj4def && this.xyLimits) {
@@ -317,20 +322,16 @@ export class UntiledMode implements ZarrMode {
         // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
         // sees them. Without this, `sampleEdgesToMercatorBounds` silently
         // drops the polar edge samples and produces too-tight mercator bounds.
-        this.cachedMercatorTransformer =
-          this.crs === 'EPSG:4326'
-            ? {
-                ...rawMercatorTransformer,
-                forward: (x, y) =>
-                  rawMercatorTransformer.forward(
-                    x,
-                    Math.max(
-                      -MERCATOR_LAT_LIMIT,
-                      Math.min(MERCATOR_LAT_LIMIT, y)
-                    )
-                  ),
-              }
-            : rawMercatorTransformer
+        this.cachedMercatorTransformer = this.isNativeEpsg4326
+          ? {
+              ...rawMercatorTransformer,
+              forward: (x, y) =>
+                rawMercatorTransformer.forward(
+                  x,
+                  Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, y))
+                ),
+            }
+          : rawMercatorTransformer
         this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
           this.proj4def
         )
@@ -1864,7 +1865,15 @@ export class UntiledMode implements ZarrMode {
 
     // Calculate what fraction of the world the data covers, accounting for CRS
     let worldFraction: number
-    if (this.proj4def && this.cachedMercatorTransformer) {
+    if (this.isNativeEpsg4326) {
+      // proj4's adjust_lon folds inputs outside [-180, 180] back into range
+      // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
+      // distorts the width for 0-360° stores and antimeridian-crossing
+      // extents. Use the source longitude span for level selection because
+      // render bounds may conservatively expand antimeridian-crossing regions
+      // to full-world X for tile intersection.
+      worldFraction = longitudeWorldFraction(this.xyLimits)
+    } else if (this.proj4def && this.cachedMercatorTransformer) {
       // Source-projected data: transform bounds corners to mercator
       const [minMercX] = this.cachedMercatorTransformer.forward(
         this.xyLimits.xMin,
@@ -1883,7 +1892,6 @@ export class UntiledMode implements ZarrMode {
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidth / fullWorldMeters
     } else {
-      // EPSG:4326: full world is 360 degrees
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
     }
@@ -2137,7 +2145,13 @@ export class UntiledMode implements ZarrMode {
    * Compute mercator bounds from proj4 by sampling edge points.
    */
   private computeMercatorBoundsFromProjection(): MercatorBounds {
-    if (!this.proj4def || !this.xyLimits || !this.cachedMercatorTransformer) {
+    if (!this.xyLimits) {
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    if (this.isNativeEpsg4326) {
+      return boundsToMercatorNorm(this.xyLimits, 'EPSG:4326')
+    }
+    if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     const result = sampleEdgesToMercatorBounds(
@@ -2163,6 +2177,9 @@ export class UntiledMode implements ZarrMode {
     yMin: number
     yMax: number
   }): MercatorBounds {
+    if (this.isNativeEpsg4326) {
+      return boundsToMercatorNorm(bounds, 'EPSG:4326')
+    }
     if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
@@ -2560,6 +2577,21 @@ export class UntiledMode implements ZarrMode {
     const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
     return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
+}
+
+function longitudeWorldFraction(bounds: {
+  xMin: number
+  xMax: number
+}): number {
+  const rawSpan = bounds.xMax - bounds.xMin
+  if (!Number.isFinite(rawSpan) || rawSpan === 0) {
+    return 1
+  }
+  if (Math.abs(rawSpan) >= 360) {
+    return 1
+  }
+  const span = rawSpan > 0 ? rawSpan : rawSpan + 360
+  return Math.max(span / 360, Number.EPSILON)
 }
 
 /**
