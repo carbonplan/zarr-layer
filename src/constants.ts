@@ -15,9 +15,6 @@ export const MIN_SUBDIVISIONS = 2
 /** Maximum subdivisions for region geometry tessellation (globe projection) */
 export const MAX_SUBDIVISIONS = 128
 
-/** Subdivisions for flat/mercator projection (simple quad, no curvature needed) */
-export const MERCATOR_SUBDIVISIONS = 1
-
 /** Web Mercator world extent in meters (half of full world width) */
 export const WEB_MERCATOR_EXTENT = 20037508.342789244
 

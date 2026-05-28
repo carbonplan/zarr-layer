@@ -134,7 +134,7 @@ type LevelMeta = {
   // add xyLimits here and store per-region.
 }
 
-type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4' | 'unsupported'
+type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4'
 
 /** Maximum number of regions to keep in cache (LRU eviction) */
 const MAX_CACHED_REGIONS = 128
@@ -338,12 +338,6 @@ export class UntiledMode implements ZarrMode {
         this.cached4326Transformer = createTransformerTo4326(
           this.proj4def,
           bounds
-        )
-      }
-
-      if (this.projectionKind === 'unsupported') {
-        console.warn(
-          `Unsupported CRS "${this.crs}" without a proj4 definition - rendering may be incorrect. Supported built-ins: EPSG:4326, EPSG:3857`
         )
       }
 
@@ -2600,7 +2594,7 @@ function normalizeBuiltinProjectionDef(
 }
 
 function resolveProjectionKind(
-  crs: string,
+  crs: CRS,
   proj4def: string | null
 ): ProjectionKind {
   const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
@@ -2610,22 +2604,15 @@ function resolveProjectionKind(
   if (proj4def?.trim()) {
     return 'custom-proj4'
   }
-  const builtinCrs = normalizeBuiltinProjectionDef(crs)
-  if (builtinCrs) {
-    return builtinCrs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
-  }
-  return 'unsupported'
+  return crs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
 }
 
-function resolveProjectionDef(
-  crs: string,
-  proj4def: string | null
-): string | null {
+function resolveProjectionDef(crs: CRS, proj4def: string | null): string {
   const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
   if (builtinProj4Def) return builtinProj4Def
   const trimmedProj4Def = proj4def?.trim()
   if (trimmedProj4Def) return trimmedProj4Def
-  return normalizeBuiltinProjectionDef(crs)
+  return crs
 }
 
 function longitudeWorldFraction(bounds: {

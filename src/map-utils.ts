@@ -303,11 +303,6 @@ export function mercatorNormToLat(mercY: number): number {
   return (180 / Math.PI) * Math.atan(Math.sinh(t))
 }
 
-/** Convert latitude in degrees to normalized WGS84 Y [0, 1] where -90 → 0, 90 → 1. */
-export function latToWgs84Norm(lat: number): number {
-  return (lat + 90) / 180
-}
-
 export function mercatorNormToLon(mercX: number): number {
   return mercX * 360 - 180
 }
@@ -561,20 +556,6 @@ export function geoToArrayIndex(
   return Math.floor(
     Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
   )
-}
-
-// === Texture coordinate utilities ===
-
-/**
- * Flip texture V coordinates (for EPSG:3857 data with latIsAscending=true).
- */
-export function flipTexCoordV(texCoords: Float32Array): Float32Array {
-  const flipped = new Float32Array(texCoords.length)
-  for (let i = 0; i < texCoords.length; i += 2) {
-    flipped[i] = texCoords[i]
-    flipped[i + 1] = 1 - texCoords[i + 1]
-  }
-  return flipped
 }
 
 // === Projection utilities ===

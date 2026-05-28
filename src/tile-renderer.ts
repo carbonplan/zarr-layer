@@ -52,6 +52,9 @@ function tileToRenderable(
   renderTileKey: string,
   latIsAscending: boolean
 ): RenderableRegion {
+  const usesMercatorInvert =
+    bounds.latMin !== undefined && bounds.latMax !== undefined
+
   return {
     mercatorBounds: bounds,
     vertexBuffer: tile.vertexBuffer!,
@@ -69,6 +72,7 @@ function tileToRenderable(
     ensureBandTexture: (bandName) =>
       tileCache.ensureBandTexture(renderTileKey, bandName),
     latIsAscending,
+    sampleMode: usesMercatorInvert ? 'mercator-invert' : 'linear',
   }
 }
 

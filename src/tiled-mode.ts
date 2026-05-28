@@ -5,7 +5,7 @@ import type {
   TiledRenderState,
 } from './zarr-mode'
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
-import { queryRegionTiled } from './query/region-query'
+import { queryRegionTiled, findSpatialDimNames } from './query/region-query'
 import {
   preprocessQueryGeometry,
   rasterExtentCrossesAntimeridian,
@@ -558,17 +558,21 @@ export class TiledMode implements ZarrMode {
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
+    const desc = this.zarrStore.describe()
     if (!this.tileCache || !this.xyLimits) {
+      const { yDim, xDim } = findSpatialDimNames(
+        desc.dimensions,
+        desc.dimIndices
+      )
       return {
         [this.variable]: [],
         dimensions: [],
-        coordinates: { lat: [], lon: [] },
+        coordinates: { [yDim]: [], [xDim]: [] },
       }
     }
 
     const querySelector = selector ? normalizeSelector(selector) : this.selector
     const level = this.currentLevel ?? this.maxLevelIndex
-    const desc = this.zarrStore.describe()
     const transforms = {
       scaleFactor: desc.scaleFactor,
       addOffset: desc.addOffset,
