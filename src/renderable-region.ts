@@ -24,11 +24,11 @@ export interface RenderableRegion {
   pixCoordBuffer: WebGLBuffer
   vertexCount: number
 
-  // Indexed mesh support (for adaptive mesh with proj4 datasets)
+  // Indexed mesh support (for adaptive source-projected meshes)
   indexBuffer?: WebGLBuffer | null
   useIndexedMesh?: boolean
 
-  // WGS84 bounds for vertex shader positioning (proj4 datasets, ECEF globe)
+  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
   wgs84Bounds?: Wgs84Bounds | null
 
   // Data orientation: true = row 0 is south (latitude ascending)
@@ -37,7 +37,7 @@ export interface RenderableRegion {
 
   // Render-time mode fields (computed in regionToRenderable, not cached on RegionState)
   // Defaults when unset: positionSpace = wgs84Bounds ? 'wgs84' : 'mercator'
-  //                      sampleMode = hasLatBounds && !wgs84Bounds ? 'mercator-invert' : 'linear'
+  //                      sampleMode = 'linear'
   positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
   sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
 
@@ -85,9 +85,7 @@ export function renderRegion(
   const hasLatBounds =
     region.mercatorBounds.latMin !== undefined &&
     region.mercatorBounds.latMax !== undefined
-  const sampMode =
-    region.sampleMode ??
-    (hasLatBounds && !wgs84Bounds ? 'mercator-invert' : 'linear')
+  const sampMode = region.sampleMode ?? 'linear'
 
   // Set position uniforms based on position space
   let scaleX: number, scaleY: number, shiftX: number, shiftY: number

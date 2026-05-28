@@ -1,7 +1,28 @@
 import proj4 from 'proj4'
 import type { MercatorBounds } from './map-utils'
-import { WEB_MERCATOR_EXTENT } from './constants'
+import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
 import type { Bounds } from './types'
+
+/**
+ * Clamp WGS84 lon/lat to the source CRS's valid input range so a subsequent
+ * proj4 forward doesn't return non-finite values at known singularities.
+ *
+ * Currently only EPSG:3857 (clamped to ±MERCATOR_LAT_LIMIT) — extend this
+ * when EPSG area-of-use metadata becomes available (see #61).
+ */
+export function clampLatLonToProj4def(
+  lon: number,
+  lat: number,
+  proj4def: string
+): [number, number] {
+  if (proj4def === 'EPSG:3857') {
+    return [
+      lon,
+      Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, lat)),
+    ]
+  }
+  return [lon, lat]
+}
 
 /**
  * Formats a proj4 error with helpful context.

@@ -303,11 +303,6 @@ export function mercatorNormToLat(mercY: number): number {
   return (180 / Math.PI) * Math.atan(Math.sinh(t))
 }
 
-/** Convert latitude in degrees to normalized WGS84 Y [0, 1] where -90 → 0, 90 → 1. */
-export function latToWgs84Norm(lat: number): number {
-  return (lat + 90) / 180
-}
-
 export function mercatorNormToLon(mercX: number): number {
   return mercX * 360 - 180
 }
@@ -494,21 +489,50 @@ export function boundsToMercatorNorm(
     ;[yMin, yMax] = [yMax, yMin]
   }
 
-  const bounds: MercatorBounds = {
-    x0: lonToMercatorNorm(xyLimits.xMin),
+  let x0: number
+  let x1: number
+  const lonSpan = xyLimits.xMax - xyLimits.xMin
+  if (Math.abs(lonSpan) >= 360) {
+    x0 = 0
+    x1 = 1
+  } else {
+    let lonMin = xyLimits.xMin
+    let lonMax = xyLimits.xMax
+
+    // Keep 0-360-style intervals continuous when they sit entirely outside
+    // [-180, 180]. Intervals that still cross the wrap boundary cannot be
+    // represented as one MercatorBounds X span, so use full-world X bounds.
+    while (lonMin >= 180 && lonMax > 180) {
+      lonMin -= 360
+      lonMax -= 360
+    }
+    while (lonMin < -180 && lonMax <= -180) {
+      lonMin += 360
+      lonMax += 360
+    }
+
+    x0 = lonToMercatorNormWrapped(lonMin)
+    x1 = lonToMercatorNormWrapped(lonMax)
+    if (lonSpan !== 0 && x1 <= x0) {
+      x0 = 0
+      x1 = 1
+    }
+  }
+
+  return {
+    x0,
     y0: latToMercatorNorm(yMax),
-    x1: lonToMercatorNorm(xyLimits.xMax),
+    x1,
     y1: latToMercatorNorm(yMin),
   }
+}
 
-  if (crs === 'EPSG:4326') {
-    // Preserve original latitude bounds for equirectangular data so callers
-    // can perform linear-latitude calculations when needed (e.g. queries).
-    bounds.latMin = yMin
-    bounds.latMax = yMax
+function lonToMercatorNormWrapped(lon: number): number {
+  if (lon >= -180 && lon <= 180) {
+    return lonToMercatorNorm(lon)
   }
-
-  return bounds
+  const wrapped = ((((lon + 180) % 360) + 360) % 360) - 180
+  return (wrapped + 180) / 360
 }
 
 // === Untiled mode utilities ===
@@ -532,20 +556,6 @@ export function geoToArrayIndex(
   return Math.floor(
     Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
   )
-}
-
-// === Texture coordinate utilities ===
-
-/**
- * Flip texture V coordinates (for EPSG:3857 data with latIsAscending=true).
- */
-export function flipTexCoordV(texCoords: Float32Array): Float32Array {
-  const flipped = new Float32Array(texCoords.length)
-  for (let i = 0; i < texCoords.length; i += 2) {
-    flipped[i] = texCoords[i]
-    flipped[i + 1] = 1 - texCoords[i + 1]
-  }
-  return flipped
 }
 
 // === Projection utilities ===

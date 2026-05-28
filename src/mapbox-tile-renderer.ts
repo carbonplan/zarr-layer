@@ -7,7 +7,7 @@
  * Mapbox's renderToTile() asks the custom layer to render individual tiles
  * to offscreen textures, requiring:
  * - Tile-specific transformation matrix (not camera matrix)
- * - For EPSG:4326 data: fragment shader reprojection (Mercator → latitude for texture lookup)
+ * - CRS-specific projection handling for tiled and untiled sources.
  */
 
 import {
@@ -200,7 +200,7 @@ function renderRegionsToTile(
   // Determine if we're in globe mode (default true for backwards compatibility)
   const isGlobe = context.isGlobe ?? true
 
-  // Check if any region uses WGS84 (proj4 datasets or EPSG:4326)
+  // Check if any untiled region uses WGS84 vertex positions.
   const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
 
   // Always use Mapbox globe shader for tile rendering - it handles both globe and mercator
@@ -236,9 +236,8 @@ function renderRegionsToTile(
     // per-region extent. (wgs84Bounds may be identity for absolute encoding.)
     if (!boundsIntersect(region.mercatorBounds, tileBounds)) continue
 
-    // For proj4 datasets: use indexed mesh with wgs84Bounds
-    // For EPSG:4326: use subdivided quad (not indexed) with wgs84Bounds
-    // Both use the mapbox-proj4 shader to convert WGS84 → Mercator
+    // Source-projected regions use WGS84 vertex positions and may use an
+    // indexed adaptive mesh.
     const useIndexedMesh = !!region.useIndexedMesh && !!region.indexBuffer
 
     const renderable: RenderableRegion = {
@@ -255,10 +254,10 @@ function renderRegionsToTile(
       bandTexturesConfigured: region.bandTexturesConfigured ?? new Set(),
       width: region.width,
       height: region.height,
-      // Include indexed mesh fields for proj4 datasets
+      // Include indexed mesh fields for adaptive source-projected meshes.
       indexBuffer: useIndexedMesh ? region.indexBuffer : undefined,
       useIndexedMesh: useIndexedMesh,
-      // Include wgs84Bounds for both proj4 and EPSG:4326 datasets
+      // Include wgs84Bounds for WGS84 vertex positioning.
       wgs84Bounds: region.wgs84Bounds,
       latIsAscending: region.latIsAscending,
     }

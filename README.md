@@ -264,12 +264,12 @@ const result = await layer.queryData({
 // Returns:
 // {
 //   [variable]: number[],
-//   dimensions: ['lat', 'lon'],
-//   coordinates: { lat: number[], lon: number[] }
+//   dimensions: ['<store-y-axis>', '<store-x-axis>'],
+//   coordinates: { '<store-y-axis>': number[], '<store-x-axis>': number[] }
 // }
 ```
 
-Datasets using a custom projection (via the `proj4` option) return coordinates in the source coordinate system, with keys matching the store's axis names (e.g. `y`/`x`). All other datasets (EPSG:4326, EPSG:3857) return `lat`/`lon` keys with WGS84 degree values.
+Spatial query results are returned in the dataset's source CRS, under the store's own spatial axis names. An `EPSG:3857` dataset with `y`/`x` axes returns Web Mercator meters under `y`/`x`; an `EPSG:4326` dataset with `latitude`/`longitude` axes returns degrees under `latitude`/`longitude`; a custom-proj4 dataset returns its source-CRS values under whatever the store calls them. Input geometries are still supplied as GeoJSON lon/lat regardless of the source CRS.
 
 You can pass a third `options` argument to control query behavior:
 

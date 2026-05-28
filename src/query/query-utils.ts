@@ -8,20 +8,17 @@
 import {
   getTilesAtZoom,
   getTilesAtZoomEquirect,
-  latToMercatorNorm,
   lonToMercatorNorm,
-  mercatorNormToLat,
-  mercatorNormToLon,
   type TileTuple,
   type XYLimits,
-  type MercatorBounds,
 } from '../map-utils'
+import { WEB_MERCATOR_EXTENT } from '../constants'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
 import {
+  clampLatLonToProj4def,
   createWGS84ToSourceTransformer,
   sourceCRSToPixel,
-  pixelToSourceCRS,
 } from '../projection-utils'
 
 /** Pixel rectangle with exclusive max bounds. */
@@ -46,110 +43,10 @@ export function rasterExtentCrossesAntimeridian(
   )
 }
 
-/** Cached transformer type for reuse across multiple pixelToLatLon calls */
+/** Cached WGS84↔source-CRS transformer used by query input geometry transforms. */
 export type CachedTransformer = ReturnType<
   typeof createWGS84ToSourceTransformer
 >
-
-/**
- * Converts pixel coordinates to lat/lon.
- * Handles all CRS types including proj4 reprojection.
- * This is the canonical function for pixel → geographic conversion in queries.
- *
- * @param cachedTransformer - Optional pre-created transformer for performance.
- *   When processing many pixels, create once and reuse to avoid repeated proj4 init.
- */
-export function pixelToLatLon(
-  x: number,
-  y: number,
-  bounds: MercatorBounds,
-  width: number,
-  height: number,
-  crs: CRS,
-  latIsAscending?: boolean,
-  proj4def?: string | null,
-  sourceBounds?: Bounds | null,
-  cachedTransformer?: CachedTransformer,
-  centerPixel: boolean = true
-): { lat: number; lon: number } {
-  // For proj4, convert pixel → source CRS → WGS84
-  if (proj4def && sourceBounds) {
-    const transformer =
-      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-
-    // pixelToSourceCRS uses edge-based model: pixel 0 → xMin, pixel width → xMax
-    // For pixel centers, pass pixel + 0.5; for edges, pass pixel directly
-    const px = centerPixel ? x + 0.5 : x
-    const py = centerPixel ? y + 0.5 : y
-    const [srcX, srcY] = pixelToSourceCRS(
-      px,
-      py,
-      sourceBounds,
-      width,
-      height,
-      latIsAscending
-    )
-
-    const [lon, lat] = transformer.inverse(srcX, srcY)
-    return { lat, lon }
-  }
-
-  // Standard CRS handling
-  // Guard against zero-dimension cases
-  // centerPixel=true: return center of pixel (x+0.5), centerPixel=false: return corner (x)
-  const xFrac = width <= 1 ? 0.5 : centerPixel ? (x + 0.5) / width : x / width
-  const yFrac =
-    height <= 1 ? 0.5 : centerPixel ? (y + 0.5) / height : y / height
-  const mercX = bounds.x0 + xFrac * (bounds.x1 - bounds.x0)
-  const mercY = bounds.y0 + yFrac * (bounds.y1 - bounds.y0)
-
-  const lon = mercatorNormToLon(mercX)
-
-  // Guard against zero-range bounds
-  const yRange = bounds.y1 - bounds.y0
-  const yNorm = yRange === 0 ? 0.5 : (mercY - bounds.y0) / yRange
-
-  const lat =
-    crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-      ? latIsAscending
-        ? bounds.latMin + yNorm * (bounds.latMax - bounds.latMin)
-        : bounds.latMax - yNorm * (bounds.latMax - bounds.latMin)
-      : mercatorNormToLat(mercY)
-
-  return { lat, lon }
-}
-
-/**
- * Converts latitude to tile Y coordinate at a given zoom level (Equirectangular/EPSG:4326).
- */
-function latToTileEquirect(
-  lat: number,
-  zoom: number,
-  xyLimits: XYLimits
-): number {
-  const { yMin, yMax } = xyLimits
-  const z2 = Math.pow(2, zoom)
-  const clamped = Math.max(Math.min(lat, yMax), yMin)
-  const norm = (yMax - clamped) / (yMax - yMin)
-  return Math.floor(norm * z2)
-}
-
-/**
- * Converts longitude to tile X coordinate at a given zoom level (Equirectangular/EPSG:4326).
- */
-function lonToTileEquirect(
-  lon: number,
-  zoom: number,
-  xyLimits: XYLimits
-): number {
-  const { xMin, xMax } = xyLimits
-  const z2 = Math.pow(2, zoom)
-  const clamped = Math.max(Math.min(lon, xMax), xMin)
-  const norm = (clamped - xMin) / (xMax - xMin)
-  return Math.floor(norm * z2)
-}
 
 /**
  * Computes fractional position within a tile for a geographic point.
@@ -190,35 +87,34 @@ function geoToTileFraction(
 }
 
 /**
- * Converts tile pixel position to geographic coordinates.
+ * Converts a tile-pixel position to source-CRS coordinates [x, y].
+ *
+ * EPSG:4326 tile pyramids: returns [lon, lat] in degrees, against xyLimits.
+ * EPSG:3857 tile pyramids: returns [x, y] in Web Mercator meters.
  */
-export function tilePixelToLatLon(
+export function tilePixelToSourceCRS(
   tile: TileTuple,
   pixelX: number,
   pixelY: number,
   tileSize: number,
   crs: CRS,
   xyLimits: XYLimits
-): { lat: number; lon: number } {
+): [number, number] {
   const [z, x, y] = tile
   const z2 = Math.pow(2, z)
-
   const fracX = (x + pixelX / tileSize) / z2
   const fracY = (y + pixelY / tileSize) / z2
 
   if (crs === 'EPSG:4326') {
     const { xMin, xMax, yMin, yMax } = xyLimits
-    const lon = xMin + fracX * (xMax - xMin)
-    const lat = yMax - fracY * (yMax - yMin)
-    return { lat, lon }
+    return [xMin + fracX * (xMax - xMin), yMax - fracY * (yMax - yMin)]
   }
 
-  // EPSG:3857 - invert mercator projection
-  const lon = fracX * 360 - 180
-  const y2 = 180 - fracY * 360
-  const lat = (360 / Math.PI) * Math.atan(Math.exp((y2 * Math.PI) / 180)) - 90
-
-  return { lat, lon }
+  // EPSG:3857: tile fractions map linearly to Web Mercator meters.
+  return [
+    (fracX * 2 - 1) * WEB_MERCATOR_EXTENT,
+    (1 - fracY * 2) * WEB_MERCATOR_EXTENT,
+  ]
 }
 
 /**
@@ -254,179 +150,114 @@ function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
 }
 
 /**
- * Compute the Y pixel range for a south/north lat extent against raster bounds.
- * Handles both EPSG:4326 (linear latitude) and Mercator (normalized coords).
- * Returns null if no overlap.
- */
-function computeYPixelRange(
-  south: number,
-  north: number,
-  bounds: MercatorBounds,
-  height: number,
-  crs: CRS,
-  latIsAscending?: boolean
-): { yStart: number; yEnd: number } | null {
-  if (
-    crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-  ) {
-    const latRange = bounds.latMax - bounds.latMin
-    if (latRange === 0) return null
-    const clampedNorth = Math.min(Math.max(north, bounds.latMin), bounds.latMax)
-    const clampedSouth = Math.min(Math.max(south, bounds.latMin), bounds.latMax)
-    const toFrac = (lat: number) =>
-      latIsAscending
-        ? (lat - bounds.latMin!) / latRange
-        : (bounds.latMax! - lat) / latRange
-    const yFracMin = Math.min(toFrac(clampedNorth), toFrac(clampedSouth))
-    const yFracMax = Math.max(toFrac(clampedNorth), toFrac(clampedSouth))
-    const yStart = Math.min(
-      Math.max(0, Math.floor(yFracMin * height)),
-      height - 1
-    )
-    const yEnd = Math.min(
-      height,
-      Math.max(Math.ceil(yFracMax * height), yStart + 1)
-    )
-    if (yEnd <= yStart) return null
-    return { yStart, yEnd }
-  }
-
-  // Mercator
-  const normNorth = latToMercatorNorm(north)
-  const normSouth = latToMercatorNorm(south)
-  const overlapY0 = Math.max(bounds.y0, Math.min(normNorth, normSouth))
-  const overlapY1 = Math.min(bounds.y1, Math.max(normNorth, normSouth))
-  if (overlapY1 < overlapY0) return null
-  const rawMinY = Math.floor(
-    ((overlapY0 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
-  )
-  const rawMaxY = Math.ceil(
-    ((overlapY1 - bounds.y0) / (bounds.y1 - bounds.y0)) * height
-  )
-  if (rawMaxY <= 0 || rawMinY >= height) return null
-  const yStart = Math.min(Math.max(0, rawMinY), height - 1)
-  const yEnd = Math.min(height, Math.max(rawMaxY, yStart + 1))
-  if (yEnd <= yStart) return null
-  return { yStart, yEnd }
-}
-
-/**
- * Computes pixel bounds from a geometry's bounding box.
- * Returns the pixel range [minX, maxX, minY, maxY] that covers the geometry.
- * Supports custom projections via proj4.
+ * Compute pixel bounds covering a GeoJSON geometry, in the raster's pixel grid.
+ *
+ * All math goes through the source CRS via the supplied proj4 transformer, so
+ * the mapping is linear in the raster's own coordinate space regardless of CRS.
  */
 export function computePixelBoundsFromGeometry(
   geometry: QueryGeometry,
-  bounds: MercatorBounds,
+  sourceBounds: Bounds,
   width: number,
   height: number,
-  crs: CRS,
+  proj4def: string,
   latIsAscending?: boolean,
-  proj4def?: string | null,
-  sourceBounds?: Bounds | null,
   cachedTransformer?: CachedTransformer
 ): PixelRect | null {
-  const bbox = computeBoundingBox(geometry)
+  const transformer =
+    cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
 
-  // If proj4 is provided, use proj4 to transform bbox
-  if (proj4def && sourceBounds) {
-    const transformer =
-      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+  if (geometry.type === 'Point') {
+    const [lon, lat] = geometry.coordinates
+    const point = lonLatToPixel(
+      lon,
+      lat,
+      sourceBounds,
+      width,
+      height,
+      proj4def,
+      latIsAscending,
+      transformer
+    )
+    if (!point) return null
 
-    // Sample points along bbox edges to capture curved projections
-    // (corners alone can miss extrema for conic/polar projections)
-    const numSamples = 5
-    const samplePoints: [number, number][] = []
-
-    for (let i = 0; i <= numSamples; i++) {
-      const t = i / numSamples
-      const lon = bbox.west + t * (bbox.east - bbox.west)
-      const lat = bbox.south + t * (bbox.north - bbox.south)
-      samplePoints.push([lon, bbox.south]) // Bottom edge
-      samplePoints.push([lon, bbox.north]) // Top edge
-      samplePoints.push([bbox.west, lat]) // Left edge
-      samplePoints.push([bbox.east, lat]) // Right edge
-    }
-
-    let minX = Infinity
-    let maxX = -Infinity
-    let minY = Infinity
-    let maxY = -Infinity
-
-    for (const [lon, lat] of samplePoints) {
-      const [srcX, srcY] = transformer.forward(lon, lat)
-      if (!isFinite(srcX) || !isFinite(srcY)) continue
-
-      const [xPixel, yPixel] = sourceCRSToPixel(
-        srcX,
-        srcY,
-        sourceBounds,
-        width,
-        height,
-        latIsAscending
-      )
-      minX = Math.min(minX, xPixel)
-      maxX = Math.max(maxX, xPixel)
-      minY = Math.min(minY, yPixel)
-      maxY = Math.max(maxY, yPixel)
-    }
-
-    // Check if any valid samples were found
+    const [xPixel, yPixel] = point
     if (
-      !isFinite(minX) ||
-      !isFinite(maxX) ||
-      !isFinite(minY) ||
-      !isFinite(maxY)
+      !isFinite(xPixel) ||
+      !isFinite(yPixel) ||
+      xPixel < 0 ||
+      xPixel > width ||
+      yPixel < 0 ||
+      yPixel > height
     ) {
       return null
     }
 
-    // Clamp to valid range
-    // Use floor + 1 to ensure integer maxX/maxY values include that pixel
-    // Clamp start to last pixel so points on the max edge map to the last pixel
-    const xStart = Math.min(Math.max(0, Math.floor(minX)), width - 1)
-    const xEnd = Math.min(width, Math.max(Math.floor(maxX) + 1, xStart + 1))
-    const yStart = Math.min(Math.max(0, Math.floor(minY)), height - 1)
-    const yEnd = Math.min(height, Math.max(Math.floor(maxY) + 1, yStart + 1))
-
-    if (xEnd <= xStart || yEnd <= yStart) return null
-
-    return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
+    const xStart = Math.min(Math.max(0, Math.floor(xPixel)), width - 1)
+    const yStart = Math.min(Math.max(0, Math.floor(yPixel)), height - 1)
+    return { minX: xStart, maxX: xStart + 1, minY: yStart, maxY: yStart + 1 }
   }
 
-  // Y pixel range (shared helper for both CRS types)
-  const yRange = computeYPixelRange(
-    bbox.south,
-    bbox.north,
-    bounds,
-    height,
-    crs,
-    latIsAscending
-  )
-  if (!yRange) return null
+  const bbox = computeBoundingBox(geometry)
 
-  // X pixel range (uses mercator norm for both CRS types)
-  const polyX0 = lonToMercatorNorm(bbox.west)
-  const polyX1 = lonToMercatorNorm(bbox.east)
-  const overlapX0 = Math.max(bounds.x0, Math.min(polyX0, polyX1))
-  const overlapX1 = Math.min(bounds.x1, Math.max(polyX0, polyX1))
-  if (overlapX1 < overlapX0) return null
+  // Sample points along bbox edges to capture curved projections
+  // (corners alone can miss extrema for conic/polar projections).
+  const numSamples = 5
+  const samplePoints: [number, number][] = []
+  for (let i = 0; i <= numSamples; i++) {
+    const t = i / numSamples
+    const lon = bbox.west + t * (bbox.east - bbox.west)
+    const lat = bbox.south + t * (bbox.north - bbox.south)
+    samplePoints.push([lon, bbox.south])
+    samplePoints.push([lon, bbox.north])
+    samplePoints.push([bbox.west, lat])
+    samplePoints.push([bbox.east, lat])
+  }
 
-  const rawMinX = ((overlapX0 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-  const rawMaxX = ((overlapX1 - bounds.x0) / (bounds.x1 - bounds.x0)) * width
-  const xStart = Math.min(Math.max(0, Math.floor(rawMinX)), width - 1)
-  const xEnd = Math.min(width, Math.max(Math.ceil(rawMaxX), xStart + 1))
-  if (xEnd <= xStart) return null
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
 
-  return { minX: xStart, maxX: xEnd, minY: yRange.yStart, maxY: yRange.yEnd }
+  for (const [lon, lat] of samplePoints) {
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+    const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
+    if (!isFinite(srcX) || !isFinite(srcY)) continue
+
+    const [xPixel, yPixel] = sourceCRSToPixel(
+      srcX,
+      srcY,
+      sourceBounds,
+      width,
+      height,
+      latIsAscending
+    )
+    minX = Math.min(minX, xPixel)
+    maxX = Math.max(maxX, xPixel)
+    minY = Math.min(minY, yPixel)
+    maxY = Math.max(maxY, yPixel)
+  }
+
+  if (
+    !isFinite(minX) ||
+    !isFinite(maxX) ||
+    !isFinite(minY) ||
+    !isFinite(maxY)
+  ) {
+    return null
+  }
+
+  const xStart = Math.min(Math.max(0, Math.floor(minX)), width - 1)
+  const xEnd = Math.min(width, Math.max(Math.floor(maxX) + 1, xStart + 1))
+  const yStart = Math.min(Math.max(0, Math.floor(minY)), height - 1)
+  const yEnd = Math.min(height, Math.max(Math.floor(maxY) + 1, yStart + 1))
+
+  if (xEnd <= xStart || yEnd <= yStart) return null
+
+  return { minX: xStart, maxX: xEnd, minY: yStart, maxY: yEnd }
 }
 
-import {
-  DEFAULT_QUERY_DENSIFY_MAX_ERROR,
-  MERCATOR_LAT_LIMIT,
-} from '../constants'
+import { DEFAULT_QUERY_DENSIFY_MAX_ERROR } from '../constants'
 
 /** Max recursion depth for adaptive subdivision */
 const DENSIFY_MAX_DEPTH = 10
@@ -511,8 +342,8 @@ function densifyAndTransformRing(
 
 /**
  * Transform a query geometry from WGS84 lon/lat into pixel-space coordinates.
- * For proj4 projections: forward-transforms vertices, then converts source CRS → pixel.
- * For standard CRS: uses mercator/equirect math → pixel.
+ * For source-projected data: forward-transforms vertices, then converts source
+ * CRS → pixel. Otherwise uses mercator/equirect math → pixel.
  * Densifies edges to preserve curvature under nonlinear projections.
  *
  * Returns a geometry with the same GeoJSON ring structure but in pixel coordinates,
@@ -520,93 +351,59 @@ function densifyAndTransformRing(
  */
 export function transformGeometryToPixelSpace(
   geometry: QueryGeometry,
-  bounds: MercatorBounds,
+  sourceBounds: Bounds,
   width: number,
   height: number,
-  crs: CRS,
+  proj4def: string,
   latIsAscending?: boolean,
-  proj4def?: string | null,
-  sourceBounds?: Bounds | null,
   cachedTransformer?: CachedTransformer
 ): QueryGeometry | null {
+  const transformer =
+    cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+
   if (geometry.type === 'Point') {
     const [lon, lat] = geometry.coordinates
     const px = lonLatToPixel(
       lon,
       lat,
-      bounds,
+      sourceBounds,
       width,
       height,
-      crs,
-      latIsAscending,
       proj4def,
-      sourceBounds,
-      cachedTransformer
+      latIsAscending,
+      transformer
     )
     if (!px) return null
     return { type: 'Point', coordinates: [px[0], px[1]] }
   }
 
-  // Build the vertex transform function
   const transformVertex = (lon: number, lat: number): [number, number] => {
     const px = lonLatToPixel(
       lon,
       lat,
-      bounds,
+      sourceBounds,
       width,
       height,
-      crs,
-      latIsAscending,
       proj4def,
-      sourceBounds,
-      cachedTransformer
+      latIsAscending,
+      transformer
     )
     return px ?? [NaN, NaN]
   }
 
-  // Densify for any nonlinear CRS. EPSG:3857 uses latToMercatorNorm (nonlinear in Y).
-  // EPSG:4326 with lat bounds is linear and doesn't need densification.
-  const isLinear4326 =
-    crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-  const needsDensification =
-    !!proj4def || (!isLinear4326 && crs !== 'EPSG:4326')
-
-  const transformRing = (ring: number[][]): number[][] => {
-    if (needsDensification) {
-      return densifyAndTransformRing(ring, transformVertex)
-    }
-    // For linear projections, just transform vertices directly
-    const result: number[][] = []
-    for (const [lon, lat] of ring) {
-      const pt = transformVertex(lon, lat)
-      if (isFinite(pt[0]) && isFinite(pt[1])) {
-        result.push(pt as number[])
-      }
-    }
-    // Ensure ring is closed
-    if (
-      result.length > 1 &&
-      (result[0][0] !== result[result.length - 1][0] ||
-        result[0][1] !== result[result.length - 1][1])
-    ) {
-      result.push([result[0][0], result[0][1]])
-    }
-    return result
-  }
+  // Source-CRS forward transforms can be nonlinear, so always densify edges.
+  const transformRing = (ring: number[][]): number[][] =>
+    densifyAndTransformRing(ring, transformVertex)
 
   if (geometry.type === 'Polygon') {
     const coords = geometry.coordinates.map(transformRing)
-    if (coords[0].length < 4) return null // Need at least a triangle
+    if (coords[0].length < 4) return null
     return { type: 'Polygon', coordinates: coords }
   }
 
-  // MultiPolygon
   const coords = geometry.coordinates.map((polygon) =>
     polygon.map(transformRing)
   )
-  // Filter out degenerate polygons
   const valid = coords.filter((poly) => poly[0].length >= 4)
   if (valid.length === 0) return null
   return { type: 'MultiPolygon', coordinates: valid }
@@ -625,13 +422,9 @@ export function transformGeometryToTilePixelSpace(
   xyLimits: XYLimits
 ): QueryGeometry | null {
   const transformVertex = (lon: number, lat: number): [number, number] => {
-    // Clamp latitude to Mercator limits to avoid infinities at the poles
-    const clampedLat =
-      crs !== 'EPSG:4326'
-        ? Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, lat))
-        : lat
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, crs)
     const { fracX, fracY } = geoToTileFraction(
-      lon,
+      clampedLon,
       clampedLat,
       tile,
       crs,
@@ -686,59 +479,31 @@ export function transformGeometryToTilePixelSpace(
 }
 
 /**
- * Convert a single lon/lat point to pixel coordinates.
- * Handles proj4, EPSG:4326, and EPSG:3857.
+ * Convert a single WGS84 lon/lat to source-CRS pixel coordinates.
  */
 function lonLatToPixel(
   lon: number,
   lat: number,
-  bounds: MercatorBounds,
+  sourceBounds: Bounds,
   width: number,
   height: number,
-  crs: CRS,
+  proj4def: string,
   latIsAscending?: boolean,
-  proj4def?: string | null,
-  sourceBounds?: Bounds | null,
   cachedTransformer?: CachedTransformer
 ): [number, number] | null {
-  if (proj4def && sourceBounds) {
-    const transformer =
-      cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
-    const [srcX, srcY] = transformer.forward(lon, lat)
-    if (!isFinite(srcX) || !isFinite(srcY)) return null
-    return sourceCRSToPixel(
-      srcX,
-      srcY,
-      sourceBounds,
-      width,
-      height,
-      latIsAscending
-    )
-  }
-
-  // Standard CRS: convert to mercator normalized, then to pixel.
-  // No bounds clamping — polygon vertices can legitimately lie far outside
-  // the raster extent (e.g. when the polygon fully contains a small raster).
-  const normX = lonToMercatorNorm(lon)
-  const xFrac = (normX - bounds.x0) / (bounds.x1 - bounds.x0)
-
-  let yFrac: number
-  if (
-    crs === 'EPSG:4326' &&
-    bounds.latMin !== undefined &&
-    bounds.latMax !== undefined
-  ) {
-    const latRange = bounds.latMax - bounds.latMin
-    if (latRange === 0) return null
-    yFrac = latIsAscending
-      ? (lat - bounds.latMin) / latRange
-      : (bounds.latMax - lat) / latRange
-  } else {
-    const normY = latToMercatorNorm(lat)
-    yFrac = (normY - bounds.y0) / (bounds.y1 - bounds.y0)
-  }
-
-  return [xFrac * width, yFrac * height]
+  const transformer =
+    cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
+  const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+  const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
+  if (!isFinite(srcX) || !isFinite(srcY)) return null
+  return sourceCRSToPixel(
+    srcX,
+    srcY,
+    sourceBounds,
+    width,
+    height,
+    latIsAscending
+  )
 }
 
 /**
@@ -1293,7 +1058,9 @@ function alignMultiPolygonMembers(members: number[][][][]): number[][][][] {
  * For Polygon/MultiPolygon: normalizes ring longitudes, computes a
  * WrappedBoundingBox, and clips at ±180 if crossing. For Point: returns as-is.
  *
- * Standard CRS only (EPSG:3857, EPSG:4326). Proj4 callers should skip this.
+ * The normalized geometry is only valid for CRSes that share WGS84 wrapped
+ * longitude semantics (EPSG:3857, EPSG:4326). Generic proj4 callers may still
+ * use the returned bbox to detect unsupported crossings.
  */
 export function preprocessQueryGeometry(geometry: QueryGeometry): {
   geometry: QueryGeometry
@@ -1392,46 +1159,68 @@ export function preprocessQueryGeometry(geometry: QueryGeometry): {
 }
 
 /**
- * Derive two pixel rectangles from a crossing WrappedBoundingBox.
+ * Derive two pixel rectangles from an antimeridian-crossing WrappedBoundingBox.
  *
- * West strip: [westPx, width)  — covers lon [bbox.west, 180]
- * East strip: [0, eastPx)      — covers lon [-180, bbox.east]
+ * West strip: covers lon [bbox.west, 180].
+ * East strip: covers lon [-180, bbox.east].
  *
- * Uses standard-CRS floor/ceil/clamp conventions from computePixelBoundsFromGeometry.
- * Only valid for standard CRS (EPSG:3857, EPSG:4326), not proj4.
+ * Both strips share the same pixel-Y range. All conversions go through the
+ * source CRS via the supplied proj4 transformer, so the math is linear in the
+ * raster's own coordinate space regardless of CRS.
  */
 export function wrappedBboxToPixelSpans(
   bbox: WrappedBoundingBox,
-  bounds: MercatorBounds,
+  sourceBounds: Bounds,
   width: number,
   height: number,
-  crs: CRS,
-  latIsAscending?: boolean
+  proj4def: string,
+  latIsAscending?: boolean,
+  cachedTransformer?: CachedTransformer
 ): { west?: PixelRect; east?: PixelRect } {
-  // Y range shared by both strips
-  const yRange = computeYPixelRange(
-    bbox.south,
-    bbox.north,
-    bounds,
-    height,
-    crs,
-    latIsAscending
-  )
-  if (!yRange) return {}
-  const { yStart, yEnd } = yRange
+  const transformer =
+    cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
 
-  const xRange = bounds.x1 - bounds.x0
+  const toPixel = (lon: number, lat: number): [number, number] | null => {
+    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, proj4def)
+    const [srcX, srcY] = transformer.forward(clampedLon, clampedLat)
+    if (!isFinite(srcX) || !isFinite(srcY)) return null
+    return sourceCRSToPixel(
+      srcX,
+      srcY,
+      sourceBounds,
+      width,
+      height,
+      latIsAscending
+    )
+  }
+
+  // Y range shared by both strips. Sample both lat extremes at lon=0 — for the
+  // CRSes that take this path (EPSG:4326/3857 without a consumer proj4 prop)
+  // the source-CRS Y is independent of lon.
+  const yPixels: number[] = []
+  for (const lat of [bbox.south, bbox.north]) {
+    const px = toPixel(0, lat)
+    if (px) yPixels.push(px[1])
+  }
+  if (yPixels.length === 0) return {}
+  const yMinPx = Math.min(...yPixels)
+  const yMaxPx = Math.max(...yPixels)
+  const yStart = Math.min(Math.max(0, Math.floor(yMinPx)), height - 1)
+  const yEnd = Math.min(height, Math.max(Math.ceil(yMaxPx), yStart + 1))
+  if (yEnd <= yStart) return {}
 
   const computeStrip = (
-    normMin: number,
-    normMax: number
+    lonMin: number,
+    lonMax: number
   ): PixelRect | undefined => {
-    const xFracMin = (normMin - bounds.x0) / xRange
-    const xFracMax = (normMax - bounds.x0) / xRange
-    // Raw pixel range before clamping
-    const rawMinX = Math.floor(xFracMin * width)
-    const rawMaxX = Math.ceil(xFracMax * width)
-    // Check for actual overlap with [0, width) before clamping
+    const xPixels: number[] = []
+    for (const lon of [lonMin, lonMax]) {
+      const px = toPixel(lon, 0)
+      if (px) xPixels.push(px[0])
+    }
+    if (xPixels.length === 0) return undefined
+    const rawMinX = Math.floor(Math.min(...xPixels))
+    const rawMaxX = Math.ceil(Math.max(...xPixels))
     if (rawMaxX <= 0 || rawMinX >= width) return undefined
     const minX = Math.max(0, rawMinX)
     const maxX = Math.min(width, rawMaxX)
@@ -1439,18 +1228,10 @@ export function wrappedBboxToPixelSpans(
     return { minX, maxX, minY: yStart, maxY: yEnd }
   }
 
-  // West strip: [bbox.west, 180]
-  const westNormMin = lonToMercatorNorm(bbox.west)
-  const westNormMax = lonToMercatorNorm(180)
-  // East strip: [-180, bbox.east]
-  const eastNormMin = lonToMercatorNorm(-180)
-  const eastNormMax = lonToMercatorNorm(bbox.east)
-
   const result: { west?: PixelRect; east?: PixelRect } = {}
-
-  const westStrip = computeStrip(westNormMin, westNormMax)
+  const westStrip = computeStrip(bbox.west, 180)
   if (westStrip) result.west = westStrip
-  const eastStrip = computeStrip(eastNormMin, eastNormMax)
+  const eastStrip = computeStrip(-180, bbox.east)
   if (eastStrip) result.east = eastStrip
 
   return result

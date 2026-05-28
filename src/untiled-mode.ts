@@ -13,7 +13,7 @@ import {
   WEB_MERCATOR_EXTENT,
   MIN_SUBDIVISIONS,
   MAX_SUBDIVISIONS,
-  MERCATOR_SUBDIVISIONS,
+  MERCATOR_LAT_LIMIT,
 } from './constants'
 import type {
   ZarrMode,
@@ -34,27 +34,19 @@ import type {
   NormalizedSelector,
   Selector,
   CRS,
+  Bounds,
   DimIndicesProps,
   UntiledLevel,
 } from './types'
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
-  flipTexCoordV,
-  latToMercatorNorm,
-  latToWgs84Norm,
-  lonToMercatorNorm,
-  mercatorNormToLat,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
 } from './map-utils'
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
-import {
-  createSubdividedQuad,
-  interleaveBands,
-  normalizeDataForTexture,
-} from './webgl-utils'
+import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-tile-renderer'
@@ -116,7 +108,7 @@ interface RegionState {
   useIndexedMesh: boolean // Whether to use indexed triangles (adaptive mesh)
   // Mercator bounds for this region (for shader uniforms)
   mercatorBounds: MercatorBounds | null
-  // WGS84 bounds for vertex shader positioning (proj4 datasets, ECEF globe)
+  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
   wgs84Bounds: Wgs84Bounds | null
   // Data orientation: true = row 0 is south
   latIsAscending: boolean
@@ -127,7 +119,7 @@ interface RegionState {
   bandTextures: Map<string, WebGLTexture>
   bandTexturesUploaded: Set<string>
   bandTexturesConfigured: Set<string>
-  // Level-specific dimensions for correct geometry rebuild across projection changes.
+  // Level-specific dimensions for region geometry bounds.
   // Set from LevelSnapshot during fetch to avoid races with level switching.
   levelMeta: LevelMeta | null
 }
@@ -141,6 +133,8 @@ type LevelMeta = {
   // TODO: If heterogeneous pyramids with per-level bounds are needed,
   // add xyLimits here and store per-region.
 }
+
+type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4'
 
 /** Maximum number of regions to keep in cache (LRU eviction) */
 const MAX_CACHED_REGIONS = 128
@@ -229,6 +223,8 @@ export class UntiledMode implements ZarrMode {
   // Multi-level support
   private levels: UntiledLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
+  private projectionKind: ProjectionKind = 'epsg4326'
+  // Transformer definition: EPSG code for built-ins, supplied string for custom proj4.
   private proj4def: string | null = null
 
   // Cached transformers for proj4 reprojection (created once, reused everywhere)
@@ -275,13 +271,8 @@ export class UntiledMode implements ZarrMode {
 
   // Cached WebGL context for use in setSelector
   private cachedGl: WebGL2RenderingContext | null = null
-  // Track current projection for subdivision optimization
+  // Track current projection for Mapbox's direct globe render path.
   private isGlobeProjection: boolean = false
-  // Deferred geometry rebuild: when globe→flat transition starts, onProjectionChange(false)
-  // fires before projectionTransition reaches 0. Rebuilding geometry immediately would drop
-  // subdivisions to 1 while the ECEF shader is still rendering on the globe.
-  // This flag defers the rebuild until projectionTransition reaches 0.
-  private pendingGeometryRebuild: boolean = false
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
 
@@ -310,13 +301,8 @@ export class UntiledMode implements ZarrMode {
       this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
-      // proj4js ships with EPSG:4326 and EPSG:3857 pre-registered, so we
-      // can pass the EPSG code itself as a proj4 def for those CRSes when
-      // the consumer didn't supply a string. Lets `getVisibleRegions` use
-      // the proj4-aware path uniformly for supported CRSes. (#59)
-      const proj4jsHasBuiltinDef =
-        desc.crs === 'EPSG:4326' || desc.crs === 'EPSG:3857'
-      this.proj4def = desc.proj4 ?? (proj4jsHasBuiltinDef ? desc.crs : null)
+      this.projectionKind = resolveProjectionKind(desc.crs, desc.proj4)
+      this.proj4def = resolveProjectionDef(desc.crs, desc.proj4)
 
       // Cache transformers once for reuse (major performance optimization)
       if (this.proj4def && this.xyLimits) {
@@ -326,10 +312,25 @@ export class UntiledMode implements ZarrMode {
           this.xyLimits.xMax,
           this.xyLimits.yMax,
         ]
-        this.cachedMercatorTransformer = createTransformer(
-          this.proj4def,
-          bounds
-        )
+        const rawMercatorTransformer = createTransformer(this.proj4def, bounds)
+        // Wrap the source→3857 forward so lat=±90° inputs (common for global
+        // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
+        // sees them. Without this, `sampleEdgesToMercatorBounds` silently
+        // drops the polar edge samples and produces too-tight mercator bounds.
+        this.cachedMercatorTransformer =
+          this.projectionKind === 'epsg4326'
+            ? {
+                ...rawMercatorTransformer,
+                forward: (x, y) =>
+                  rawMercatorTransformer.forward(
+                    x,
+                    Math.max(
+                      -MERCATOR_LAT_LIMIT,
+                      Math.min(MERCATOR_LAT_LIMIT, y)
+                    )
+                  ),
+              }
+            : rawMercatorTransformer
         this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
           this.proj4def
         )
@@ -337,12 +338,6 @@ export class UntiledMode implements ZarrMode {
         this.cached4326Transformer = createTransformerTo4326(
           this.proj4def,
           bounds
-        )
-      }
-
-      if (this.crs !== 'EPSG:4326' && this.crs !== 'EPSG:3857') {
-        console.warn(
-          `Unsupported CRS "${this.crs}" - rendering may be incorrect. Supported: EPSG:4326, EPSG:3857`
         )
       }
 
@@ -364,11 +359,8 @@ export class UntiledMode implements ZarrMode {
       }
 
       if (this.xyLimits) {
-        // For proj4, compute mercator bounds by transforming corners
         if (this.proj4def) {
           this.mercatorBounds = this.computeMercatorBoundsFromProjection()
-        } else {
-          this.mercatorBounds = boundsToMercatorNorm(this.xyLimits, this.crs)
         }
       } else {
         console.warn('UntiledMode: No XY limits found')
@@ -1018,12 +1010,7 @@ export class UntiledMode implements ZarrMode {
 
   /**
    * Create geometry (vertex positions and tex coords) for a region.
-   * Uses subdivided geometry for smooth globe rendering.
-   *
-   * Three geometry paths based on CRS (GPU projection chosen at render time):
-   * - Proj4 datasets: Adaptive mesh with WGS84 vertices (GPU: → Mercator or → ECEF)
-   * - EPSG:4326: Subdivided quad in Mercator space (GPU: fragment reprojection or ECEF direct)
-   * - EPSG:3857: Subdivided quad with linear texture coords (data already in Mercator)
+   * Uses the source-projected adaptive mesh path for all supported untiled CRSes.
    */
   private createRegionGeometry(
     regionX: number,
@@ -1034,125 +1021,62 @@ export class UntiledMode implements ZarrMode {
     // Guard: can't create geometry without dimension info
     if (!region.levelMeta) return
 
-    // Defensive reset: wgs84Bounds is only set by the proj4 branch below.
-    // Ensures it's not stale after projection toggle or geometry rebuild.
+    // Defensive reset: wgs84Bounds is only set by the source-projected branch.
+    // Ensures it's not stale if geometry is recreated.
     region.wgs84Bounds = null
     region.indexArr = null
     region.useIndexedMesh = false
 
+    if (
+      !this.proj4def ||
+      !this.cached4326Transformer ||
+      !this.cachedMercatorTransformer
+    ) {
+      return
+    }
+
     const geoBounds = this.getRegionBounds(regionX, regionY, region.levelMeta)
 
-    // Use cached mercatorBounds if set (from fetchRegion's resampling path),
-    // otherwise compute from geoBounds (for non-resampling cases like EPSG:3857)
-    const mercBounds =
-      region.mercatorBounds ?? boundsToMercatorNorm(geoBounds, this.crs)
-    region.mercatorBounds = mercBounds
-
-    if (this.proj4def && this.cached4326Transformer) {
-      // Proj4 datasets: compute WGS84 vertex positions via proj4.
-      // CPU: transform vertices from source CRS to WGS84.
-      // GPU: transform WGS84 → Mercator (flat) or WGS84 → ECEF (globe).
-
-      // Calculate subdivisions based on latSpan.
-      // For polar projections, the pole is at the CENTER, not corners, so sample
-      // the center point to get the true latitude span.
-      const centerX = (geoBounds.xMin + geoBounds.xMax) / 2
-      const centerY = (geoBounds.yMin + geoBounds.yMax) / 2
-      const samplePoints = [
-        this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMin),
-        this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMin),
-        this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMax),
-        this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMax),
-        this.cached4326Transformer.forward(centerX, centerY), // Center point (pole for polar projections)
-      ]
-      const validLats = samplePoints
-        .map((p) => p[1])
-        .filter((lat) => isFinite(lat))
-      const latSpan =
-        validLats.length > 0
-          ? Math.max(...validLats) - Math.min(...validLats)
-          : 0
-      const meshSubdivisions = Math.max(
-        MIN_SUBDIVISIONS,
-        Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
-      )
-
-      // Always use hybrid mesh (adaptive + uniform grid) for proj4 data.
-      const meshResult = createHybridMesh({
-        geoBounds,
-        width: region.width,
-        height: region.height,
-        subdivisions: meshSubdivisions,
-        transformer: this.cached4326Transformer!,
-        latIsAscending: this.latIsAscending,
-      })
-      region.vertexArr = meshResult.positions
-      region.pixCoordArr = meshResult.texCoords
-      region.indexArr = meshResult.indices
-      region.wgs84Bounds = meshResult.wgs84Bounds
-      region.useIndexedMesh = true
-      region.vertexCount = region.indexArr!.length
-    } else {
-      // Non-proj4 paths: EPSG:4326 and EPSG:3857
-      // Compute subdivisions once based on CRS
-
-      // Subdivisions: high for globe (smooth curvature), minimal for mercator (flat)
-      // Use latitude span in degrees - lat is the primary driver of globe curvature
-      let latSpanDegrees: number
-      if (this.crs === 'EPSG:3857') {
-        // 3857 bounds are in meters - convert to degrees
-        const yMinNorm = 0.5 - geoBounds.yMin / (2 * WEB_MERCATOR_EXTENT)
-        const yMaxNorm = 0.5 - geoBounds.yMax / (2 * WEB_MERCATOR_EXTENT)
-        latSpanDegrees = Math.abs(
-          mercatorNormToLat(yMaxNorm) - mercatorNormToLat(yMinNorm)
-        )
-      } else {
-        // 4326 bounds are already in degrees
-        latSpanDegrees = Math.abs(geoBounds.yMax - geoBounds.yMin)
-      }
-      const subdivisions = this.isGlobeProjection
-        ? Math.max(
-            MIN_SUBDIVISIONS,
-            Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpanDegrees))
-          )
-        : MERCATOR_SUBDIVISIONS
-
-      if (this.crs === 'EPSG:4326') {
-        // EPSG:4326 datasets: use fragment shader reprojection
-        // Mesh is in Mercator space, fragment shader inverts Mercator → lat for texture lookup
-        const subdivided = createSubdividedQuad(subdivisions)
-        region.vertexArr = subdivided.vertexArr
-        region.pixCoordArr = subdivided.texCoordArr
-        region.vertexCount = subdivided.vertexArr.length / 2
-
-        // Compute Mercator bounds for vertex positioning
-        // geoBounds for 4326 data: xMin/xMax = lon, yMin/yMax = lat
-        const latMin = geoBounds.yMin
-        const latMax = geoBounds.yMax
-        region.mercatorBounds = {
-          x0: lonToMercatorNorm(geoBounds.xMin),
-          x1: lonToMercatorNorm(geoBounds.xMax),
-          y0: latToMercatorNorm(latMax),
-          y1: latToMercatorNorm(latMin),
-          // Include lat bounds for fragment shader reprojection
-          latMin,
-          latMax,
-        }
-
-        // Store data orientation for fragment shader
-        region.latIsAscending = this.latIsAscending
-      } else {
-        const subdivided = createSubdividedQuad(subdivisions)
-        region.vertexArr = subdivided.vertexArr
-        region.vertexCount = subdivided.vertexArr.length / 2
-
-        // EPSG:3857 and other Mercator-compatible CRS
-        // Texture coords need V-flip if latitude is ascending
-        region.pixCoordArr = this.latIsAscending
-          ? flipTexCoordV(subdivided.texCoordArr)
-          : subdivided.texCoordArr
-      }
+    if (!region.mercatorBounds) {
+      region.mercatorBounds = this.computeRegionMercatorBounds(geoBounds)
     }
+
+    // Compute WGS84 vertex positions via proj4.
+    // CPU: transform vertices from source CRS to WGS84.
+    // GPU: transform WGS84 → Mercator (flat) or WGS84 → ECEF (globe).
+    const centerX = (geoBounds.xMin + geoBounds.xMax) / 2
+    const centerY = (geoBounds.yMin + geoBounds.yMax) / 2
+    const samplePoints = [
+      this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMin),
+      this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMin),
+      this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMax),
+      this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMax),
+      this.cached4326Transformer.forward(centerX, centerY),
+    ]
+    const validLats = samplePoints
+      .map((p) => p[1])
+      .filter((lat) => isFinite(lat))
+    const latSpan =
+      validLats.length > 0 ? Math.max(...validLats) - Math.min(...validLats) : 0
+    const meshSubdivisions = Math.max(
+      MIN_SUBDIVISIONS,
+      Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
+    )
+
+    const meshResult = createHybridMesh({
+      geoBounds,
+      width: region.width,
+      height: region.height,
+      subdivisions: meshSubdivisions,
+      transformer: this.cached4326Transformer,
+      latIsAscending: this.latIsAscending,
+    })
+    region.vertexArr = meshResult.positions
+    region.pixCoordArr = meshResult.texCoords
+    region.indexArr = meshResult.indices
+    region.wgs84Bounds = meshResult.wgs84Bounds
+    region.useIndexedMesh = true
+    region.vertexCount = region.indexArr.length
 
     // Create/update buffers
     if (!region.vertexBuffer) {
@@ -1636,11 +1560,8 @@ export class UntiledMode implements ZarrMode {
       // Update region's selector version
       region.selectorVersion = fetchSelectorVersion
 
-      // Resample bands to Mercator space if needed (EPSG:4326 or custom projection)
-      // For non-EPSG:3857 datasets: GPU handles reprojection
-      // - Proj4 datasets: adaptive mesh (CRS→4326), GPU projects to Mercator or ECEF
-      // - EPSG:4326 datasets: subdivided quad, GPU reprojects via fragment or ECEF
-      // No CPU resampling needed - mercatorBounds computed in createRegionGeometry
+      // GPU handles reprojection. Source-projected data uses an adaptive mesh
+      // (source CRS → WGS84), then the GPU projects to Mercator or ECEF.
       const needsProj4MercBounds =
         this.proj4def && this.cachedMercatorTransformer
 
@@ -1713,7 +1634,7 @@ export class UntiledMode implements ZarrMode {
       region.channels = numChannels
       region.loading = false
 
-      // Store level-specific dimensions from snapshot for geometry rebuild.
+      // Store level-specific dimensions from snapshot for geometry creation.
       // Must use snapshot (not this.*) to avoid races with level switching.
       // Set before createRegionGeometry is called below.
       region.levelMeta = {
@@ -1937,8 +1858,21 @@ export class UntiledMode implements ZarrMode {
 
     // Calculate what fraction of the world the data covers, accounting for CRS
     let worldFraction: number
-    if (this.proj4def && this.cachedMercatorTransformer) {
-      // Custom projection: transform bounds corners to mercator
+    if (this.projectionKind === 'epsg4326') {
+      // proj4's adjust_lon folds inputs outside [-180, 180] back into range
+      // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
+      // distorts the width for 0-360° stores and antimeridian-crossing
+      // extents. Use the source longitude span for level selection because
+      // render bounds may conservatively expand antimeridian-crossing regions
+      // to full-world X for tile intersection.
+      worldFraction = longitudeWorldFraction(this.xyLimits)
+    } else if (this.projectionKind === 'epsg3857') {
+      // Web Mercator: full world is ~40,075,016 meters
+      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
+      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
+      worldFraction = dataWidth / fullWorldMeters
+    } else if (this.proj4def && this.cachedMercatorTransformer) {
+      // Source-projected data: transform bounds corners to mercator
       const [minMercX] = this.cachedMercatorTransformer.forward(
         this.xyLimits.xMin,
         this.xyLimits.yMin
@@ -1950,13 +1884,7 @@ export class UntiledMode implements ZarrMode {
       const dataWidthMeters = Math.abs(maxMercX - minMercX)
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidthMeters / fullWorldMeters
-    } else if (this.crs === 'EPSG:3857') {
-      // Web Mercator: full world is ~40,075,016 meters
-      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
-      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidth / fullWorldMeters
     } else {
-      // EPSG:4326: full world is 360 degrees
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
     }
@@ -1992,8 +1920,7 @@ export class UntiledMode implements ZarrMode {
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
     const useMapbox = !!context.mapbox
-    // Use wgs84 shader only for proj4 datasets (vertex shader reprojection)
-    // EPSG:4326 uses fragment shader reprojection instead
+    // Use the WGS84 vertex path when the source projection is resolved via proj4.
     const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
 
     // MapLibre globe exposes a projectionTransition value in the shader prelude.
@@ -2013,21 +1940,9 @@ export class UntiledMode implements ZarrMode {
     // can momentarily diverge.
     const hasMapboxDirectGlobePath =
       hasMapboxGlobe && context.mapbox?.directGlobePathActive === true
-    const ecefEligible = useWgs84 || this.crs === 'EPSG:4326'
     const useDirectEcef = useMapbox
-      ? hasMapboxDirectGlobePath && ecefEligible
-      : hasMaplibreGlobeTransition && ecefEligible
-
-    // Flush deferred geometry rebuild once transition completes.
-    // proj4 uses hybrid mesh which is projection-independent, so skip rebuilds.
-    if (this.pendingGeometryRebuild) {
-      if (useWgs84) {
-        this.pendingGeometryRebuild = false
-      } else if (!hasMaplibreGlobeTransition && !hasMapboxGlobe) {
-        this.pendingGeometryRebuild = false
-        this.rebuildAllGeometry()
-      }
-    }
+      ? hasMapboxDirectGlobePath && useWgs84
+      : hasMaplibreGlobeTransition && useWgs84
 
     const shaderProgram = renderer.getProgram(
       context.shaderData,
@@ -2067,9 +1982,9 @@ export class UntiledMode implements ZarrMode {
 
   /**
    * Convert a RegionState to a RenderableRegion for unified rendering.
-   * When useDirectEcef is true, computes WGS84 bounds and sets positionSpace/sampleMode
-   * for the ECEF vertex shader path. These fields are computed at render time,
-   * never cached on RegionState, so projection toggles have no stale state.
+   * When useDirectEcef is true, uses the region's precomputed WGS84 mesh bounds
+   * for the ECEF vertex shader path. Render-only fields are set here instead of
+   * cached on RegionState, so projection toggles have no stale state.
    */
   private regionToRenderable(
     region: RegionState,
@@ -2095,26 +2010,6 @@ export class UntiledMode implements ZarrMode {
       height: region.height,
     }
 
-    // Globe ECEF for EPSG:4326: compute WGS84 bounds on the fly from unclamped lat bounds
-    if (
-      useDirectEcef &&
-      this.crs === 'EPSG:4326' &&
-      region.mercatorBounds?.latMin != null &&
-      region.mercatorBounds?.latMax != null
-    ) {
-      const mb = region.mercatorBounds!
-      base.wgs84Bounds = {
-        lon0: mb.x0, // lon mapping is linear, same as Mercator X
-        lat0: latToWgs84Norm(mb.latMin!),
-        lon1: mb.x1,
-        lat1: latToWgs84Norm(mb.latMax!),
-      }
-      base.positionSpace = 'wgs84-ecef'
-      base.sampleMode = 'wgs84-lookup'
-      return base
-    }
-
-    // Globe ECEF for proj4: wgs84Bounds already set by createHybridMesh
     if (useDirectEcef && region.wgs84Bounds) {
       base.positionSpace = 'wgs84-ecef'
       base.sampleMode = 'linear'
@@ -2175,30 +2070,6 @@ export class UntiledMode implements ZarrMode {
   onProjectionChange(isGlobe: boolean): void {
     if (this.isGlobeProjection === isGlobe) return
     this.isGlobeProjection = isGlobe
-
-    // proj4 uses hybrid mesh which is projection-independent — no rebuild needed.
-    if (this.proj4def) return
-
-    if (!isGlobe) {
-      // Globe→flat: defer geometry rebuild until projectionTransition reaches 0.
-      // Rebuilding now would drop subdivisions to 1 while the ECEF shader is still
-      // rendering on the globe, causing severe faceting during the transition.
-      this.pendingGeometryRebuild = true
-      return
-    }
-
-    // Flat→globe: rebuild immediately with high subdivisions for smooth globe rendering
-    this.rebuildAllGeometry()
-  }
-
-  private rebuildAllGeometry(): void {
-    const gl = this.cachedGl
-    if (!gl) return
-    for (const region of this.regionCache.values()) {
-      if (!region.data) continue
-      this.createRegionGeometry(region.regionX, region.regionY, gl, region)
-    }
-    this.invalidate()
   }
 
   getTiledState() {
@@ -2267,7 +2138,16 @@ export class UntiledMode implements ZarrMode {
    * Compute mercator bounds from proj4 by sampling edge points.
    */
   private computeMercatorBoundsFromProjection(): MercatorBounds {
-    if (!this.proj4def || !this.xyLimits || !this.cachedMercatorTransformer) {
+    if (!this.xyLimits) {
+      return { x0: 0, y0: 0, x1: 1, y1: 1 }
+    }
+    if (this.projectionKind === 'epsg4326') {
+      return boundsToMercatorNorm(this.xyLimits, 'EPSG:4326')
+    }
+    if (this.projectionKind === 'epsg3857') {
+      return boundsToMercatorNorm(this.xyLimits, 'EPSG:3857')
+    }
+    if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     const result = sampleEdgesToMercatorBounds(
@@ -2293,6 +2173,12 @@ export class UntiledMode implements ZarrMode {
     yMin: number
     yMax: number
   }): MercatorBounds {
+    if (this.projectionKind === 'epsg4326') {
+      return boundsToMercatorNorm(bounds, 'EPSG:4326')
+    }
+    if (this.projectionKind === 'epsg3857') {
+      return boundsToMercatorNorm(bounds, 'EPSG:3857')
+    }
     if (!this.proj4def || !this.cachedMercatorTransformer) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
@@ -2500,42 +2386,6 @@ export class UntiledMode implements ZarrMode {
   }
 
   /**
-   * Compute subset bounds from pixel bounds against the full mercator bounds.
-   */
-  private computeSubsetBounds(
-    pixelBounds: PixelRect,
-    level: QueryLevelSnapshot
-  ): MercatorBounds {
-    const { minX, maxX, minY, maxY } = pixelBounds
-    const xRange = this.mercatorBounds!.x1 - this.mercatorBounds!.x0
-    const yRange = this.mercatorBounds!.y1 - this.mercatorBounds!.y0
-    const subsetBounds: MercatorBounds = {
-      x0: this.mercatorBounds!.x0 + (minX / level.width) * xRange,
-      x1: this.mercatorBounds!.x0 + (maxX / level.width) * xRange,
-      y0: this.mercatorBounds!.y0 + (minY / level.height) * yRange,
-      y1: this.mercatorBounds!.y0 + (maxY / level.height) * yRange,
-    }
-    if (
-      this.mercatorBounds!.latMin !== undefined &&
-      this.mercatorBounds!.latMax !== undefined
-    ) {
-      const latRange = this.mercatorBounds!.latMax - this.mercatorBounds!.latMin
-      if (this.latIsAscending) {
-        subsetBounds.latMin =
-          this.mercatorBounds!.latMin + (minY / level.height) * latRange
-        subsetBounds.latMax =
-          this.mercatorBounds!.latMin + (maxY / level.height) * latRange
-      } else {
-        subsetBounds.latMax =
-          this.mercatorBounds!.latMax - (minY / level.height) * latRange
-        subsetBounds.latMin =
-          this.mercatorBounds!.latMax - (maxY / level.height) * latRange
-      }
-    }
-    return subsetBounds
-  }
-
-  /**
    * Query data for point or region geometries.
    */
   async queryData(
@@ -2543,14 +2393,33 @@ export class UntiledMode implements ZarrMode {
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
+    const desc = this.zarrStore.describe()
+    const sourceBounds: [number, number, number, number] | null = this.xyLimits
+      ? [
+          this.xyLimits.xMin,
+          this.xyLimits.yMin,
+          this.xyLimits.xMax,
+          this.xyLimits.yMax,
+        ]
+      : null
+    const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
+      desc.dimensions,
+      desc.dimIndices
+    )
     const emptyResult = (): QueryResult => ({
       [this.variable]: [],
       dimensions: [],
-      coordinates: { lat: [], lon: [] },
+      coordinates: { [emptyYDim]: [], [emptyXDim]: [] },
     })
 
     const activeLevel = this.activeLevel
-    if (!this.mercatorBounds || !activeLevel) return emptyResult()
+    if (!this.mercatorBounds || !activeLevel || !sourceBounds) {
+      return emptyResult()
+    }
+    const projectionDef = this.proj4def
+    if (!projectionDef) {
+      return emptyResult()
+    }
 
     const level: QueryLevelSnapshot = {
       index: activeLevel.index,
@@ -2563,21 +2432,12 @@ export class UntiledMode implements ZarrMode {
       ? normalizeSelector(selector)
       : this.selector
 
-    const desc = this.zarrStore.describe()
     const currentLevel = this.levels[level.index]
     const transforms = {
       scaleFactor: currentLevel?.scaleFactor ?? desc.scaleFactor,
       addOffset: currentLevel?.addOffset ?? desc.addOffset,
       fillValue: currentLevel?.fillValue ?? desc.fill_value,
     }
-    const sourceBounds: [number, number, number, number] | null = this.xyLimits
-      ? [
-          this.xyLimits.xMin,
-          this.xyLimits.yMin,
-          this.xyLimits.xMax,
-          this.xyLimits.yMax,
-        ]
-      : null
 
     // Closure for running a single pixel-bounds strip query.
     // Captures request-scoped locals (not instance state) to avoid races
@@ -2595,34 +2455,29 @@ export class UntiledMode implements ZarrMode {
       )
       if (!fetched) return null
 
-      const subsetBounds = this.computeSubsetBounds(pixelBounds, level)
-
-      let subsetSourceBounds: [number, number, number, number] | null = null
-      if (this.proj4def && sourceBounds) {
-        const { minX, minY, maxX, maxY } = pixelBounds
-        const [xMin, yMin] = pixelToSourceCRS(
-          minX,
-          minY,
-          sourceBounds,
-          level.width,
-          level.height,
-          this.latIsAscending
-        )
-        const [xMax, yMax] = pixelToSourceCRS(
-          maxX,
-          maxY,
-          sourceBounds,
-          level.width,
-          level.height,
-          this.latIsAscending
-        )
-        subsetSourceBounds = [
-          Math.min(xMin, xMax),
-          Math.min(yMin, yMax),
-          Math.max(xMin, xMax),
-          Math.max(yMin, yMax),
-        ]
-      }
+      const { minX, minY, maxX, maxY } = pixelBounds
+      const [xMin0, yMin0] = pixelToSourceCRS(
+        minX,
+        minY,
+        sourceBounds,
+        level.width,
+        level.height,
+        this.latIsAscending
+      )
+      const [xMax0, yMax0] = pixelToSourceCRS(
+        maxX,
+        maxY,
+        sourceBounds,
+        level.width,
+        level.height,
+        this.latIsAscending
+      )
+      const subsetSourceBounds: Bounds = [
+        Math.min(xMin0, xMax0),
+        Math.min(yMin0, yMax0),
+        Math.max(xMin0, xMax0),
+        Math.max(yMin0, yMax0),
+      ]
 
       return queryRegionUntiled(
         this.variable,
@@ -2631,33 +2486,29 @@ export class UntiledMode implements ZarrMode {
         fetched.data,
         fetched.width,
         fetched.height,
-        subsetBounds,
-        this.crs ?? 'EPSG:4326',
         desc.dimensions,
         desc.coordinates,
+        subsetSourceBounds,
+        projectionDef,
         fetched.channels,
         fetched.channelLabels,
         fetched.multiValueDimNames,
         this.latIsAscending,
         transforms,
-        this.proj4def,
-        subsetSourceBounds,
         opts,
-        desc.dimIndices
+        desc.dimIndices,
+        this.cachedWGS84Transformer ?? undefined
       )
     }
 
-    // Helper for the single-fetch path shared by proj4 and non-crossing cases
     const singleFetch = async (geom: QueryGeometry): Promise<QueryResult> => {
       const pixelBounds = computePixelBoundsFromGeometry(
         geom,
-        this.mercatorBounds!,
+        sourceBounds,
         level.width,
         level.height,
-        this.crs ?? 'EPSG:4326',
+        projectionDef,
         this.latIsAscending,
-        this.proj4def,
-        sourceBounds,
         this.cachedWGS84Transformer ?? undefined
       )
       if (!pixelBounds) return emptyResult()
@@ -2665,35 +2516,33 @@ export class UntiledMode implements ZarrMode {
       return result ?? emptyResult()
     }
 
-    // Proj4: no antimeridian preprocessing, just warn and use original geometry.
-    // Run preprocessQueryGeometry only for the bbox check — it correctly
-    // distinguishes true crossings from explicit-but-non-crossing coords
-    // (e.g., rect(200, 210) canonicalizes to [-160, -150], no crossing).
-    if (this.proj4def) {
-      const { bbox } = preprocessQueryGeometry(geometry)
-      if (bbox.crossesAntimeridian) {
-        if (!this._antimeridianWarnings.has('proj4-crossing')) {
-          this._antimeridianWarnings.add('proj4-crossing')
-          console.warn(
-            'Antimeridian-crossing polygon queries are not supported for proj4 projections; results may be incorrect'
-          )
-        }
-      }
-      return singleFetch(geometry)
-    }
-
-    // Standard CRS: preprocess (normalize, canonicalize, maybe clip)
     const { geometry: processedGeometry, bbox: wrappedBbox } =
       preprocessQueryGeometry(geometry)
 
-    // Non-crossing: use processedGeometry (may be canonicalized, e.g. [200,210] → [-160,-150])
+    const supportsWrappedLongitude =
+      this.projectionKind === 'epsg4326' || this.projectionKind === 'epsg3857'
+    const queryGeometry = supportsWrappedLongitude
+      ? processedGeometry
+      : geometry
+
     if (!wrappedBbox.crossesAntimeridian) {
-      return singleFetch(processedGeometry)
+      return singleFetch(queryGeometry)
+    }
+
+    if (!supportsWrappedLongitude) {
+      if (!this._antimeridianWarnings.has('proj4-crossing')) {
+        this._antimeridianWarnings.add('proj4-crossing')
+        console.warn(
+          'Antimeridian-crossing polygon queries are not supported for proj4 projections; results may be incorrect'
+        )
+      }
+      return singleFetch(queryGeometry)
     }
 
     // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in meters)
     if (
-      rasterExtentCrossesAntimeridian(this.crs ?? 'EPSG:4326', this.xyLimits)
+      this.projectionKind === 'epsg4326' &&
+      rasterExtentCrossesAntimeridian('EPSG:4326', this.xyLimits)
     ) {
       if (!this._antimeridianWarnings.has('raster-extent-crossing')) {
         this._antimeridianWarnings.add('raster-extent-crossing')
@@ -2707,11 +2556,12 @@ export class UntiledMode implements ZarrMode {
     // Crossing: two-strip fetch
     const spans = wrappedBboxToPixelSpans(
       wrappedBbox,
-      this.mercatorBounds,
+      sourceBounds,
       level.width,
       level.height,
-      this.crs ?? 'EPSG:4326',
-      this.latIsAscending
+      projectionDef,
+      this.latIsAscending,
+      this.cachedWGS84Transformer ?? undefined
     )
 
     const westResult = spans.west
@@ -2728,13 +2578,56 @@ export class UntiledMode implements ZarrMode {
     if (!westResult && !eastResult) return emptyResult()
     if (!westResult || !eastResult) return (westResult ?? eastResult)!
 
-    const { yDim, xDim } = findSpatialDimNames(
-      desc.dimensions,
-      false,
-      desc.dimIndices
-    )
+    const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
     return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
+}
+
+function normalizeBuiltinProjectionDef(
+  def: string | null | undefined
+): CRS | null {
+  if (!def) return null
+  const normalized = def.trim().toUpperCase()
+  return normalized === 'EPSG:4326' || normalized === 'EPSG:3857'
+    ? normalized
+    : null
+}
+
+function resolveProjectionKind(
+  crs: CRS,
+  proj4def: string | null
+): ProjectionKind {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) {
+    return builtinProj4Def === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+  }
+  if (proj4def?.trim()) {
+    return 'custom-proj4'
+  }
+  return crs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+}
+
+function resolveProjectionDef(crs: CRS, proj4def: string | null): string {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) return builtinProj4Def
+  const trimmedProj4Def = proj4def?.trim()
+  if (trimmedProj4Def) return trimmedProj4Def
+  return crs
+}
+
+function longitudeWorldFraction(bounds: {
+  xMin: number
+  xMax: number
+}): number {
+  const rawSpan = bounds.xMax - bounds.xMin
+  if (!Number.isFinite(rawSpan) || rawSpan === 0) {
+    return 1
+  }
+  if (Math.abs(rawSpan) >= 360) {
+    return 1
+  }
+  const span = rawSpan > 0 ? rawSpan : rawSpan + 360
+  return Math.max(span / 360, Number.EPSILON)
 }
 
 /**
