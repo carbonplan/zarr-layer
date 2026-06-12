@@ -38,6 +38,39 @@ function formatProj4Error(proj4def: string, err: unknown): string {
 }
 
 /**
+ * Match PROJ's null-transformation semantics for CRS definitions that declare
+ * no datum.
+ *
+ * For a CRS with an unknown/unnamed datum and no explicit transform
+ * (towgs84/nadgrids), PROJ — and therefore the GDAL/rioxarray toolchain that
+ * typically computed the dataset's bounds — applies a null ("ballpark")
+ * transformation to WGS84, passing latitude through unchanged. proj4js
+ * instead round-trips geocentrically between the two ellipsoids, which
+ * reinterprets the latitude: for sphere-based NWP grids (e.g. HRRR's Lambert
+ * Conformal Conic on R=6371229) that places the data ~0.18° (~20 km) north
+ * of where every PROJ-based tool puts it.
+ *
+ * Registering the definition under itself lets the proj4(def, ...) calls in
+ * the factories below pick up the mutated datumCode; 'none' selects proj4js's
+ * PJD_NODATUM path, which skips the geocentric round-trip. Definitions that
+ * name a real datum (e.g. NAD83) or carry explicit transform parameters are
+ * left untouched.
+ */
+function applyNullDatumSemantics(proj4def: string): void {
+  try {
+    if (!proj4.defs(proj4def)) proj4.defs(proj4def, proj4def)
+    const def = proj4.defs(proj4def) as
+      | { datumCode?: string; datum_params?: unknown; nadgrids?: unknown }
+      | undefined
+    if (!def || def.datum_params || def.nadgrids) return
+    const code = (def.datumCode ?? '').toLowerCase()
+    if (code === '' || code === 'unknown') def.datumCode = 'none'
+  } catch {
+    // Unparseable def — let the factories' own error handling report it.
+  }
+}
+
+/**
  * A transformer for converting coordinates between source CRS and Web Mercator.
  */
 export interface ProjectionTransformer {
@@ -56,6 +89,7 @@ export function createTransformer(
   proj4def: string,
   bounds: Bounds
 ): ProjectionTransformer {
+  applyNullDatumSemantics(proj4def)
   let converter: proj4.Converter
   try {
     converter = proj4(proj4def, 'EPSG:3857')
@@ -92,6 +126,7 @@ export function createTransformerTo4326(
   proj4def: string,
   bounds: Bounds
 ): Wgs84Transformer {
+  applyNullDatumSemantics(proj4def)
   let converter: proj4.Converter
   try {
     converter = proj4(proj4def, 'EPSG:4326')
@@ -209,6 +244,7 @@ export function createWGS84ToSourceTransformer(proj4def: string): {
   forward: (lon: number, lat: number) => [number, number]
   inverse: (x: number, y: number) => [number, number]
 } {
+  applyNullDatumSemantics(proj4def)
   let converter: proj4.Converter
   try {
     converter = proj4('EPSG:4326', proj4def)
