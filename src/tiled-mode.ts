@@ -374,6 +374,17 @@ export class TiledMode implements ZarrMode {
     this.invalidate()
   }
 
+  setDataScale(scale: number): void {
+    if (scale === this.fixedDataScale) return
+    this.fixedDataScale = scale
+    if (this.tileCache) {
+      this.tileCache.setDataScale(scale)
+      this.selectorVersion++
+      this.tileCache.invalidateAll(this.selectorVersion)
+    }
+    this.invalidate()
+  }
+
   private updateGeometryForProjection(isGlobe: boolean) {
     // Subdivisions are only needed for globe projections (sphere curvature)
     // EPSG:4326 in Mercator view uses fragment shader reprojection (per-pixel)
