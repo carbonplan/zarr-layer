@@ -2242,6 +2242,19 @@ export class UntiledMode implements ZarrMode {
     this.invalidate()
   }
 
+  /**
+   * Adopt a new texture-normalization scale. Bumping selectorVersion marks
+   * every cached region stale (updateVisibleRegions refetches regions whose
+   * selectorVersion doesn't match), so texture data is re-normalized.
+   */
+  setDataScale(scale: number): void {
+    if (scale === this.fixedDataScale) return
+    this.fixedDataScale = scale
+    this.selectorVersion++
+    this.lastViewportHash = ''
+    this.invalidate()
+  }
+
   private emitLoadingState(): void {
     emitLoadingStateUtil(this.loadingManager)
   }

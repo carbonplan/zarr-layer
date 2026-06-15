@@ -593,6 +593,24 @@ export class Tiles {
     }
   }
 
+  /** Adopt a new texture-normalization scale for subsequent tile loads. */
+  setDataScale(scale: number): void {
+    this.fixedDataScale = scale
+  }
+
+  /**
+   * Mark every cached tile stale (e.g. after a data-scale change — unlike a
+   * selector change the selector hash stays the same, so this must cover
+   * off-screen tiles too). `updateTiles` refetches via the decoded-chunk
+   * cache and re-normalizes with the current fixedDataScale.
+   */
+  invalidateAll(version: number): void {
+    for (const tile of this.tiles.values()) {
+      tile.selectorHash = null
+      tile.selectorVersion = version
+    }
+  }
+
   async fetchTile(
     tileTuple: TileTuple,
     selectorHash: string,

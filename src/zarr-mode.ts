@@ -84,6 +84,11 @@ export interface ZarrMode {
   ): boolean
   dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void
   setSelector(selector: NormalizedSelector): Promise<void>
+  /**
+   * Adopt a new texture-normalization scale and re-normalize cached data
+   * (by marking it stale so it refetches via the decoded-chunk cache).
+   */
+  setDataScale(scale: number): void
   onProjectionChange(isGlobe: boolean): void
   setLoadingCallback(callback: LoadingStateCallback | undefined): void
   getCRS(): CRS

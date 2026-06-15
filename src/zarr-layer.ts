@@ -55,6 +55,13 @@ type MapboxInternals = {
   }
 }
 
+/** Scale-mismatch ratio beyond which a locked fixedDataScale is re-derived
+ *  from the clim and cached tiles are re-normalized. Conservative: float32
+ *  texture data only truly degrades several more orders of magnitude out,
+ *  but refetches go through the decoded-chunk cache so an eager threshold
+ *  costs little. */
+const DATA_SCALE_REFRESH_RATIO = 1e6
+
 /** Extract Mapbox's internal expandedFarZ projection matrix and worldSize.
  *  Falls back per-field: transform may exist without the expanded matrix,
  *  while painter.transform carries it (or vice versa across Mapbox versions). */
@@ -386,9 +393,23 @@ export class ZarrLayer {
 
   setClim(clim: [number, number]) {
     this.clim = clim
+    const nextScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
     // Allow fixedDataScale to update until mode captures it
     if (!this.dataScaleLocked) {
-      this.fixedDataScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
+      this.fixedDataScale = nextScale
+    } else if (
+      nextScale * DATA_SCALE_REFRESH_RATIO < this.fixedDataScale ||
+      this.fixedDataScale * DATA_SCALE_REFRESH_RATIO < nextScale
+    ) {
+      // Texture data is normalized by fixedDataScale at upload. When the
+      // locked scale is orders of magnitude off the new clim (e.g. the layer
+      // was created with a dtype-range clim like ±3.4e38 before the caller
+      // knew the data range), normalized values underflow float32 and the
+      // data can never render correctly again. Adopt the new scale and
+      // refetch cached tiles through the decoded-chunk cache so textures
+      // are re-normalized.
+      this.fixedDataScale = nextScale
+      this.mode?.setDataScale(nextScale)
     }
     this.invalidate()
   }
