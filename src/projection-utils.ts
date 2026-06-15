@@ -52,9 +52,16 @@ function formatProj4Error(proj4def: string, err: unknown): string {
  *
  * Registering the definition under itself lets the proj4(def, ...) calls in
  * the factories below pick up the mutated datumCode; 'none' selects proj4js's
- * PJD_NODATUM path, which skips the geocentric round-trip. Definitions that
- * name a real datum (e.g. NAD83) or carry explicit transform parameters are
- * left untouched.
+ * PJD_NODATUM path, which skips the geocentric round-trip.
+ *
+ * The trigger is the absence of a datum transform, not the datum's *name*: an
+ * unknown datum carries no datum_params/nadgrids whatever it's called (GDAL
+ * names HRRR's sphere datum "unknown_based_on_a_sphere_with_radius_6371229_m",
+ * not "unknown"). proj4js resolves a known datum's params from its internal
+ * table at instantiation rather than at defs() time, so instantiate once
+ * before inspecting — otherwise a real datum (NAD83, …) would look paramless
+ * and be wrongly rewritten. Known datums and explicit towgs84/nadgrids keep
+ * their params and are left untouched; WGS84 is already the target.
  */
 function applyNullDatumSemantics(proj4def: string): void {
   try {
@@ -62,9 +69,11 @@ function applyNullDatumSemantics(proj4def: string): void {
     const def = proj4.defs(proj4def) as
       | { datumCode?: string; datum_params?: unknown; nadgrids?: unknown }
       | undefined
-    if (!def || def.datum_params || def.nadgrids) return
-    const code = (def.datumCode ?? '').toLowerCase()
-    if (code === '' || code === 'unknown') def.datumCode = 'none'
+    if (!def) return
+    proj4(proj4def) // resolve a named datum's params from proj4js's table
+    if (def.datum_params || def.nadgrids) return
+    if ((def.datumCode ?? '').toLowerCase() === 'wgs84') return
+    def.datumCode = 'none'
   } catch {
     // Unparseable def — let the factories' own error handling report it.
   }
