@@ -34,6 +34,16 @@ const MAX_ITERATIONS = 1000
  */
 const POLAR_LON_COVERAGE_THRESHOLD = 270
 
+/** Tolerance for coordinates returned just outside WGS84's valid degree range. */
+const WGS84_BOUNDS_EPSILON = 1e-4
+
+/**
+ * Maximum allowed great-circle edge for one mesh triangle. Edges larger than
+ * this are almost always topology left behind after invalid projection-domain
+ * vertices were culled, and draw as ECEF chords through the globe.
+ */
+const MAX_GLOBE_TRIANGLE_EDGE_DEGREES = 120
+
 // ============================================================================
 // Interfaces
 // ============================================================================
@@ -75,6 +85,62 @@ function normalizeLon180(lon: number): number {
   if (!isFinite(lon)) return lon
   // Shift to [0, 360) then back to [-180, 180)
   return ((((lon + 180) % 360) + 360) % 360) - 180
+}
+
+/**
+ * Check whether a source→WGS84 reprojection produced a coordinate that can be
+ * rendered on one globe. Some projections return finite but nonsensical
+ * longitudes near singularities (for example sinusoidal rectangle corners near
+ * the poles), and normalizing those would create false seam triangles.
+ */
+function isRenderableWgs84Position(lon: number, lat: number): boolean {
+  return (
+    isFinite(lon) &&
+    isFinite(lat) &&
+    lon >= -180 - WGS84_BOUNDS_EPSILON &&
+    lon <= 180 + WGS84_BOUNDS_EPSILON &&
+    lat >= -90 - WGS84_BOUNDS_EPSILON &&
+    lat <= 90 + WGS84_BOUNDS_EPSILON
+  )
+}
+
+function angularDistanceDegrees(
+  lon1: number,
+  lat1: number,
+  lon2: number,
+  lat2: number
+): number {
+  const lambda1 = (normalizeLon180(lon1) * Math.PI) / 180
+  const lambda2 = (normalizeLon180(lon2) * Math.PI) / 180
+  const phi1 = (lat1 * Math.PI) / 180
+  const phi2 = (lat2 * Math.PI) / 180
+  const dLambda = lambda2 - lambda1
+  const dPhi = phi2 - phi1
+  const hav =
+    Math.sin(dPhi / 2) ** 2 +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) ** 2
+  return (
+    (2 * Math.atan2(Math.sqrt(hav), Math.sqrt(Math.max(0, 1 - hav))) * 180) /
+    Math.PI
+  )
+}
+
+function triangleHasLongGlobeEdge(
+  lon0: number,
+  lat0: number,
+  lon1: number,
+  lat1: number,
+  lon2: number,
+  lat2: number
+): boolean {
+  return (
+    angularDistanceDegrees(lon0, lat0, lon1, lat1) >
+      MAX_GLOBE_TRIANGLE_EDGE_DEGREES ||
+    angularDistanceDegrees(lon1, lat1, lon2, lat2) >
+      MAX_GLOBE_TRIANGLE_EDGE_DEGREES ||
+    angularDistanceDegrees(lon2, lat2, lon0, lat0) >
+      MAX_GLOBE_TRIANGLE_EDGE_DEGREES
+  )
 }
 
 /**
@@ -220,7 +286,7 @@ interface SplitResult {
 
 /**
  * Process triangles that span the antimeridian by splitting them.
- * Filters out triangles with non-finite coordinates.
+ * Filters out triangles with non-renderable WGS84 coordinates.
  * When canCrossAntimeridian is false, skips crossing checks for better performance.
  */
 function splitAntimeridianTriangles(
@@ -231,12 +297,12 @@ function splitAntimeridianTriangles(
 ): SplitResult {
   const numVerts = wgs84Positions.length / 2
 
-  // Pre-compute which vertices are valid (have finite coords)
+  // Pre-compute which vertices are valid renderable WGS84 positions.
   const validVertex = new Uint8Array(numVerts)
   for (let i = 0; i < numVerts; i++) {
     const lon = wgs84Positions[i * 2]
     const lat = wgs84Positions[i * 2 + 1]
-    validVertex[i] = isFinite(lon) && isFinite(lat) ? 1 : 0
+    validVertex[i] = isRenderableWgs84Position(lon, lat) ? 1 : 0
   }
 
   // Fast path: no crossing possible, just filter invalid triangles
@@ -246,9 +312,19 @@ function splitAntimeridianTriangles(
       const i0 = triangles[i]
       const i1 = triangles[i + 1]
       const i2 = triangles[i + 2]
-      if (validVertex[i0] && validVertex[i1] && validVertex[i2]) {
-        newIndices.push(i0, i1, i2)
+      if (!validVertex[i0] || !validVertex[i1] || !validVertex[i2]) {
+        continue
       }
+      const lon0 = wgs84Positions[i0 * 2]
+      const lat0 = wgs84Positions[i0 * 2 + 1]
+      const lon1 = wgs84Positions[i1 * 2]
+      const lat1 = wgs84Positions[i1 * 2 + 1]
+      const lon2 = wgs84Positions[i2 * 2]
+      const lat2 = wgs84Positions[i2 * 2 + 1]
+      if (triangleHasLongGlobeEdge(lon0, lat0, lon1, lat1, lon2, lat2)) {
+        continue
+      }
+      newIndices.push(i0, i1, i2)
     }
     return {
       positions: wgs84Positions,
@@ -295,6 +371,10 @@ function splitAntimeridianTriangles(
     const lon0 = normalizeLon180(lon0raw)
     const lon1 = normalizeLon180(lon1raw)
     const lon2 = normalizeLon180(lon2raw)
+
+    if (triangleHasLongGlobeEdge(lon0, lat0, lon1, lat1, lon2, lat2)) {
+      continue
+    }
 
     // Check which edges cross the antimeridian
     const cross01 = edgeCrossesAntimeridian(lon0, lon1)
@@ -377,8 +457,10 @@ function splitAntimeridianTriangles(
       newIndices.push(intOther1, other1, other2)
       newIndices.push(intOther1, other2, intOther2)
     } else {
-      // crossCount === 1 or 3: preserve triangle to avoid holes
-      newIndices.push(i0, i1, i2)
+      // One-crossing triangles are ambiguous after source-space Delaunay
+      // triangulation: preserving them creates globe-spanning seam chords.
+      // Dropping them is conservative and avoids drawing false topology.
+      continue
     }
   }
 
@@ -488,7 +570,7 @@ export function createHybridMesh(
     wgs84Positions[i * 2] = lon
     wgs84Positions[i * 2 + 1] = lat
 
-    if (isFinite(lon) && isFinite(lat)) {
+    if (isRenderableWgs84Position(lon, lat)) {
       lons.push(normalizeLon180(lon))
       minLat = Math.min(minLat, lat)
       maxLat = Math.max(maxLat, lat)
