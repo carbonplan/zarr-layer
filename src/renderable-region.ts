@@ -80,9 +80,9 @@ export function renderRegion(
   // Flat projection matrix for the eye-coords path (source-projected 'wgs84'
   // shader only), at the renderer's native precision (NOT pre-cast to Float32 —
   // see the anchor_clip computation below). When provided, anchor_clip is
-  // computed PER REGION from this region's shift, so the eye origin sits near
-  // the on-screen region (not the off-screen layer center): small clip
-  // magnitudes, no pan/zoom jitter.
+  // computed PER WORLD OFFSET as (shiftX + worldOffset, shiftY), so the eye
+  // origin sits near the on-screen region — and near-camera for wrapped copies,
+  // not the off-screen layer center: small clip magnitudes, no pan/zoom jitter.
   eyeMatrix?: number[] | Float32Array | Float64Array | null
 ): boolean {
   // Resolve position space and sample mode from explicit fields or defaults
@@ -116,16 +116,11 @@ export function renderRegion(
   gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
   gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
 
-  // Eye-coords path (MapLibre flat source-projected shader). Upload u_eye_matrix
-  // once here; u_anchor_clip is computed PER WORLD OFFSET in the draw loop below,
-  // so a wrapped copy's anchor is the wrapped origin (near the camera, small,
-  // Float32-precise) rather than the unwrapped origin plus a canceling offset
-  // term. The anchor is computed from the original matrix at the renderer's
-  // native precision (today MapLibre's is Float32; if a renderer ever supplies
-  // Float64 we don't quantize its translation first). Cast to Float32 only for
-  // the GPU upload; deltaClip uses that uploaded matrix but multiplies the small
-  // region-local delta, so any F32/F64 mismatch is sub-pixel. See
-  // VERTEX_TO_WGS84_TO_MERCATOR.
+  // Eye-coords path for flat source-projected shaders (see
+  // VERTEX_TO_WGS84_TO_MERCATOR). Upload u_eye_matrix once; u_anchor_clip is
+  // computed PER WORLD OFFSET in the draw loop below, so a wrapped copy's anchor
+  // is its near-camera wrapped origin (no large-term cancellation). The anchor is
+  // computed from the original (un-cast) matrix; cast to Float32 only for upload.
   const eyeM = eyeMatrix
   const eyeActive = !!(
     eyeM &&

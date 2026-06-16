@@ -37,9 +37,9 @@ uniform float shift_y;
 uniform float u_worldXOffset;
 // Eye-coords uniforms (source-projected FLAT path only). u_eye_matrix is the
 // flat projection matrix (MapLibre mainMatrix / Mapbox matrix); u_anchor_clip
-// is matrix * vec4(regionOrigin, 0, 1) for THIS region, computed per region per
-// frame in JS Float64 (regionOrigin = the region's shift_x/shift_y). A visible
-// region is near the camera, so anchor_clip is small in clip space:
+// is matrix * vec4(regionOrigin + worldXOffset, 0, 1), computed in JS Float64
+// per region per world offset (regionOrigin = the region's shift_x/shift_y).
+// A visible region is near the camera, so anchor_clip is small in clip space:
 // Float32-exact and jitter-free. Unused by other variants (location null).
 uniform mat4 u_eye_matrix;
 uniform vec4 u_anchor_clip;`
@@ -71,24 +71,22 @@ const VERTEX_TO_MERCATOR = `
 
 /**
  * Source-projected FLAT path, eye-coords (render-relative-to-eye) decomposition.
+ * Canonical explanation — other eye-coords sites reference this block.
  *
- * vertex.xy are region-local MERCATOR deltas (pre-projected in JS Float64, see
- * encodeMercDelta); scale/shift would restore the region-anchored
- * mercator value. Instead of forming an absolute world coord in Float32 and
- * multiplying by the high-zoom matrix (which quantizes to ~4 px of jitter at
- * z≈19), decompose, anchored at this region's near-camera origin:
- *
- *   matrix·vec4(anchor + delta, 0, 1)
- *     ≡ matrix·vec4(anchor, 0, 1)  +  matrix·vec4(delta, 0, 0)
- *     ≡ u_anchor_clip (JS Float64, near origin)  +  deltaClip (small)
- *
- * Both terms are small in clip space, so their Float32 sum keeps sub-pixel
- * precision. The world-wrap offset (+/-1 for wrapped copies near the
- * antimeridian) is folded into u_anchor_clip on the CPU (per world offset, in
- * Float64) rather than added here as a separate matrix term — otherwise the
- * anchor and the offset would be two ~one-world clip values that cancel in
- * Float32 for the wrapped copy. `merc` is reconstructed at low precision ONLY
- * for the fragment varyings.
+ * vertex.xy are region-local MERCATOR deltas (Float64-projected on the CPU, see
+ * encodeMercDelta). Forming an absolute world coord in Float32 and multiplying by
+ * the high-zoom matrix quantizes to ~4 px of jitter at z~19, so instead:
+ *   matrix·(anchor + delta)  ==  u_anchor_clip  +  matrix·(delta, 0, 0)
+ * Both terms are small in clip space, so their Float32 sum stays sub-pixel.
+ * u_anchor_clip = matrix·(regionOrigin + worldXOffset), computed per region per
+ * world offset on the CPU from the matrix at its NATIVE precision (passed
+ * uncast). When the renderer's flat matrix is Float64 (as the MapLibre/Mapbox
+ * flat view-proj matrices are in practice) the anchor is full-precision — which
+ * is what keeps high zoom jitter-free; pre-casting the matrix to Float32 before
+ * this multiply would re-quantize the translation and bring the pan/zoom jitter
+ * back. The wrap offset folds in here so a wrapped antimeridian copy doesn't
+ * cancel two ~one-world clip values. `merc` is reconstructed at low precision
+ * ONLY for the fragment varyings.
  */
 const VERTEX_TO_WGS84_TO_MERCATOR = `
   vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
@@ -302,7 +300,7 @@ export function createVertexShader(options: VertexShaderOptions): string {
 
   // Build helper functions
   // FUNC_MERCATOR_Y_TO_LAT (inverts Mercator Y → latitude) is needed by:
-  //  - regular Mapbox globe (PROJECT_MAPBOX_GLOBE), and
+  //  - regular Mapbox globe (projectMapboxGlobe), and
   //  - both ECEF paths, which now reconstruct latitude from mercator-encoded
   //    vertices to preserve polar coverage.
   let helpers = ''
@@ -329,15 +327,11 @@ export function createVertexShader(options: VertexShaderOptions): string {
   } else if (isDirectEcef) {
     projectionOutput = PROJECT_MAPLIBRE_ECEF
   } else if (inputSpace === 'wgs84' && projection === 'maplibre') {
-    // Eye-coords FLAT path. VERTEX_TO_WGS84_TO_MERCATOR produced
-    // deltaClip (matrix * vec4(mercDelta, 0, 0)); u_anchor_clip is the
-    // JS-precomputed matrix * vec4(regionOrigin + worldOffset, 0, 1). Their
-    // Float32 sum is sub-pixel precise. Skip projectTile so we never form an
-    // absolute world coord in Float32.
-    //
-    // Scoped to MapLibre because MapLibre routes ALL globe transition to the
-    // ECEF path above (this branch is only reached when the map is truly flat,
-    // where mainMatrix is a linear world->clip map and the decomposition holds).
+    // Eye-coords flat output (see VERTEX_TO_WGS84_TO_MERCATOR). Emitted directly
+    // here only for MapLibre: it routes ALL globe transition to the ECEF path
+    // above, so this is reached only when the map is truly flat (a linear
+    // world->clip map). Mapbox can't use the bare output — its non-ECEF program
+    // serves the flat<->globe morph (projectMapboxGlobe).
     projectionOutput = `  gl_Position = u_anchor_clip + deltaClip;`
   } else if (projection === 'maplibre') {
     projectionOutput = PROJECT_MAPLIBRE_GLOBE

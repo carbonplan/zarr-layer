@@ -2035,11 +2035,16 @@ export class UntiledMode implements ZarrMode {
     // Rendering at shifted world offsets on the globe produces duplicate renders.
     const worldOffsets = useDirectEcef ? [0] : context.worldOffsets
 
-    // Resolve the flat projection matrix for the eye-coords path (only the flat
-    // MapLibre wgs84 shader consumes it; the ECEF globe and Mapbox paths ignore
-    // it). MapLibre's flat map is mainMatrix; Mapbox passes its matrix directly.
-    // Pass it through at native precision — renderRegion casts to Float32 for the
-    // GPU upload but keeps full precision for the per-region anchor_clip.
+    // Resolve the flat projection matrix for the source-projected eye-coords
+    // path. MapLibre flat uses mainMatrix; Mapbox flat passes its matrix
+    // directly. ECEF/globe paths ignore these uniforms.
+    // Pass it through UN-CAST (number[] | Float32Array | Float64Array) so
+    // renderRegion computes anchor_clip from the highest-precision matrix
+    // representation available. When the flat matrix is Float64 (as it is in
+    // practice) that full-precision anchor is what keeps high-zoom pan/zoom
+    // jitter-free; do NOT pre-cast to Float32 here (it re-quantizes the
+    // translation and the jitter returns). renderRegion casts to Float32 only
+    // for the GPU upload (which drives the small deltaClip).
     let eyeMatrix: number[] | Float32Array | Float64Array | null = null
     if (useWgs84 && !useDirectEcef) {
       const raw = useMapbox
