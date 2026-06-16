@@ -1112,6 +1112,11 @@ export class UntiledMode implements ZarrMode {
       transformer: this.cached4326Transformer,
       latIsAscending: this.latIsAscending,
       allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',
+      // The mesh encodes vertices as deltas from a per-region mercator origin
+      // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
+      // anchor_clip, keeping the eye origin near the on-screen region for
+      // high-zoom precision (no pan/zoom jitter, no seams). See
+      // VERTEX_TO_WGS84_TO_MERCATOR.
     })
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
@@ -2030,12 +2035,28 @@ export class UntiledMode implements ZarrMode {
     // Rendering at shifted world offsets on the globe produces duplicate renders.
     const worldOffsets = useDirectEcef ? [0] : context.worldOffsets
 
+    // Resolve the flat projection matrix for the eye-coords path (only the flat
+    // MapLibre wgs84 shader consumes it; the ECEF globe and Mapbox paths ignore
+    // it). MapLibre's flat map is mainMatrix; Mapbox passes its matrix directly.
+    // Pass it through at native precision — renderRegion casts to Float32 for the
+    // GPU upload but keeps full precision for the per-region anchor_clip.
+    let eyeMatrix: number[] | Float32Array | Float64Array | null = null
+    if (useWgs84 && !useDirectEcef) {
+      const raw = useMapbox
+        ? context.matrix
+        : context.projectionData?.mainMatrix
+      if (raw && raw.length >= 16) {
+        eyeMatrix = raw
+      }
+    }
+
     this.renderRegions(
       renderer,
       shaderProgram,
       worldOffsets,
       context.customShaderConfig,
-      useDirectEcef
+      useDirectEcef,
+      eyeMatrix
     )
   }
 
@@ -2088,7 +2109,8 @@ export class UntiledMode implements ZarrMode {
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
     customShaderConfig?: CustomShaderConfig,
-    useDirectEcef: boolean = false
+    useDirectEcef: boolean = false,
+    eyeMatrix: number[] | Float32Array | Float64Array | null = null
   ): void {
     const gl = renderer.gl
 
@@ -2102,7 +2124,8 @@ export class UntiledMode implements ZarrMode {
         shaderProgram,
         this.regionToRenderable(region, useDirectEcef),
         worldOffsets,
-        customShaderConfig
+        customShaderConfig,
+        eyeMatrix
       )
     }
   }

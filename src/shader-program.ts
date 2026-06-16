@@ -26,6 +26,10 @@ export interface ShaderProgram {
   shiftYLoc: WebGLUniformLocation
   worldXOffsetLoc: WebGLUniformLocation
   matrixLoc: WebGLUniformLocation | null
+  // Eye-coords uniforms — only the source-projected flat (wgs84) shader uses
+  // them; other variants drop them so these resolve to null and uploads no-op.
+  eyeMatrixLoc: WebGLUniformLocation | null
+  anchorClipLoc: WebGLUniformLocation | null
   projMatrixLoc: WebGLUniformLocation | null
   fallbackMatrixLoc: WebGLUniformLocation | null
   tileMercatorCoordsLoc: WebGLUniformLocation | null
@@ -214,10 +218,16 @@ export function createShaderProgram(
     shiftXLoc: mustGetUniformLocation(gl, program, 'shift_x'),
     shiftYLoc: mustGetUniformLocation(gl, program, 'shift_y'),
     worldXOffsetLoc: mustGetUniformLocation(gl, program, 'u_worldXOffset'),
-    // MapLibre modes use projectTile instead of matrix
-    matrixLoc: needsMaplibre
-      ? null
-      : mustGetUniformLocation(gl, program, 'matrix'),
+    // MapLibre modes use projectTile instead of matrix. The Mapbox flat
+    // source-projected (wgs84) shader uses u_eye_matrix, not matrix, so the
+    // compiler drops `matrix` there too — use the non-throwing lookup. All
+    // uploads of matrixLoc are null-guarded (see setMatrix4 in
+    // applyProjectionUniforms).
+    matrixLoc: needsMaplibre ? null : gl.getUniformLocation(program, 'matrix'),
+    // Eye-coords uniforms exist only in the source-projected flat (wgs84)
+    // shader; other variants optimize them out, so use the non-throwing lookup.
+    eyeMatrixLoc: gl.getUniformLocation(program, 'u_eye_matrix'),
+    anchorClipLoc: gl.getUniformLocation(program, 'u_anchor_clip'),
     projMatrixLoc: maplibreUniform('u_projection_matrix'),
     fallbackMatrixLoc: maplibreUniform('u_projection_fallback_matrix'),
     tileMercatorCoordsLoc: maplibreUniform('u_projection_tile_mercator_coords'),

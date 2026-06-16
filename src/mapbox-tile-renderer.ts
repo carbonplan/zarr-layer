@@ -267,7 +267,8 @@ function renderRegionsToTile(
       shaderProgram,
       renderable,
       [0], // Globe tiles don't need world wrapping
-      customShaderConfig
+      customShaderConfig,
+      useWgs84 ? tileMatrix : null
     )
     if (!rendered) {
       // renderRegion returns false when band data is missing

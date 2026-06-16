@@ -164,6 +164,10 @@ export class ZarrRenderer {
         isGlobeTileRender
       )
     }
+    // NOTE: the eye-coords uniforms (u_eye_matrix, u_anchor_clip) for the
+    // source-projected flat path are uploaded PER REGION in renderRegion, where
+    // the per-region mercator origin (shift_x, shift_y) is known. See
+    // VERTEX_TO_WGS84_TO_MERCATOR.
   }
 
   renderTiles(

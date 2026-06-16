@@ -55,21 +55,15 @@ export interface MercatorBounds {
 }
 
 /**
- * Bounds in EPSG:4326 (WGS84) normalized to [0, 1].
- * Used for the two-stage reprojection pipeline.
- * lon: -180 → 0, 180 → 1
- * lat: -90 → 0, 90 → 1
+ * Bounds for the source-projected ("wgs84" inputSpace) mesh path, in normalized
+ * Web Mercator [0, 1] world coords. `y` can exceed [0, 1] for near-polar
+ * vertices. The renderer derives its scale/shift uniforms from these.
  */
 export interface Wgs84Bounds {
-  /** Min longitude normalized [0, 1] where -180 → 0, 180 → 1 */
-  lon0: number
-  /** Min latitude normalized [0, 1] where -90 → 0, 90 → 1 */
-  lat0: number
-  /** Max longitude normalized [0, 1] */
-  lon1: number
-  /** Max latitude normalized [0, 1] */
-  lat1: number
-  /** True if bounds cross the antimeridian (lon0 > lon1 in degrees) */
+  x0: number
+  y0: number
+  x1: number
+  y1: number
   crossesAntimeridian?: boolean
 }
 
