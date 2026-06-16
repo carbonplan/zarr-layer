@@ -1893,9 +1893,26 @@ export class UntiledMode implements ZarrMode {
         this.xyLimits.xMax,
         this.xyLimits.yMax
       )
-      const dataWidthMeters = Math.abs(maxMercX - minMercX)
+      let dataWidthMeters = Math.abs(maxMercX - minMercX)
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidthMeters / fullWorldMeters
+      // worldFraction > 1 means the corner projection failed: for projections
+      // like MODIS sinusoidal the rectangular bbox corners fall outside the
+      // valid CRS domain (near-polar latitudes give out-of-domain longitudes),
+      // yielding a garbage or non-finite width. Fall back to the equatorial
+      // strip (y=0), which stays in-domain for any cylindrical-like projection
+      // and gives the correct horizontal extent.
+      if (!isFinite(dataWidthMeters) || dataWidthMeters > fullWorldMeters) {
+        const [eqMinX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMin,
+          0
+        )
+        const [eqMaxX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMax,
+          0
+        )
+        dataWidthMeters = Math.abs(eqMaxX - eqMinX)
+      }
+      worldFraction = Math.min(1, dataWidthMeters / fullWorldMeters)
     } else {
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
