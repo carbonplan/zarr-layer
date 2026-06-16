@@ -102,6 +102,7 @@ function mapboxGlobeToMercatorTransition(zoom: number): number {
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
   readonly renderingMode: '2d' | '3d'
+  readonly wrapTileId = true
 
   id: string
   private url: string
