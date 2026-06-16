@@ -41,6 +41,7 @@ import type {
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
+  lonRangeOverlaps,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
@@ -635,8 +636,7 @@ export class UntiledMode implements ZarrMode {
       if (!hasValid) continue
 
       if (
-        regEast >= west &&
-        regWest <= east &&
+        lonRangeOverlaps(west, east, regWest, regEast) &&
         regNorth >= south &&
         regSouth <= north
       ) {
@@ -949,6 +949,18 @@ export class UntiledMode implements ZarrMode {
     rXMax = Math.min(numRegionsX - 1, rXMax)
     rYMin = Math.max(0, rYMin)
     rYMax = Math.min(numRegionsY - 1, rYMax)
+
+    // When the viewport straddles the antimeridian, forward-projecting the
+    // sampled longitudes folds source X back on itself (e.g. proj4 adjust_lon),
+    // so the srcX min/max span no longer bounds the visible columns. Treat
+    // every X region as a candidate; the antimeridian-aware overlap check in
+    // getVisibleRegions then keeps only the columns that are actually visible,
+    // so this widens the search without over-fetching the result (issue #64).
+    const crossesAntimeridian = east < west || east > 180 || west < -180
+    if (crossesAntimeridian) {
+      rXMin = 0
+      rXMax = numRegionsX - 1
+    }
 
     const candidates: Array<{ regionX: number; regionY: number }> = []
     for (let ry = rYMin; ry <= rYMax; ry++) {

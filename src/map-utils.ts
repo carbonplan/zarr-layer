@@ -75,9 +75,48 @@ export interface Wgs84Bounds {
 
 /**
  * Converts longitude to tile X coordinate at a given zoom level.
+ *
+ * Intentionally does NOT clamp longitude to [-180, 180]. When the viewport
+ * straddles the antimeridian, `map.getBounds()` can report unwrapped longitudes
+ * (e.g. west=175, east=195) or wrapped ones (west > east). Clamping would
+ * collapse everything past ±180 onto the edge tile and drop the tiles on the
+ * far side of the antimeridian (issue #53). Callers fold the resulting index
+ * back into [0, 2^zoom) with the standard wrap.
  */
 function lonToTile(lon: number, zoom: number): number {
-  return Math.floor(lonToMercatorNorm(lon) * Math.pow(2, zoom))
+  return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom))
+}
+
+/**
+ * Longitude-interval overlap test that is aware of antimeridian wrapping.
+ *
+ * The viewport range [viewWest, viewEast] reported by `map.getBounds()` may be
+ * wrapped (viewWest > viewEast) or unwrapped with values well outside
+ * [-180, 180]: it straddles ±180 (e.g. 175→195), and with renderWorldCopies the
+ * user can pan into a neighbouring world copy, so the whole range can be offset
+ * by any multiple of 360 (e.g. 535→555). The region range [regWest, regEast] is
+ * expressed in the data's own longitude domain (typically [-180, 180] or
+ * [0, 360]).
+ *
+ * A region overlaps the viewport when some world copy of it — shifted by k·360
+ * for integer k — lands inside the viewport:
+ *   regEast + k·360 >= viewWest   AND   regWest + k·360 <= viewEast
+ * Solving each inequality for k yields a closed interval [kMin, kMax]; an
+ * overlapping copy exists iff that interval contains an integer. Testing the
+ * whole interval (rather than a fixed ±360) covers arbitrarily distant world
+ * copies and viewports wider than 360° (issues #53/#64).
+ */
+export function lonRangeOverlaps(
+  viewWest: number,
+  viewEast: number,
+  regWest: number,
+  regEast: number
+): boolean {
+  let east = viewEast
+  if (east < viewWest) east += 360
+  const kMin = Math.ceil((viewWest - regEast) / 360)
+  const kMax = Math.floor((east - regWest) / 360)
+  return kMax >= kMin
 }
 
 /**
@@ -104,7 +143,8 @@ function latToTileMercator(lat: number, zoom: number): number {
 /**
  * Gets all tiles visible at a given zoom level within geographic bounds.
  * Handles world wrap-around by normalizing tile indices to valid range.
- * Handles antimeridian crossing when west > east.
+ * Handles antimeridian crossing whether `map.getBounds()` reports it wrapped
+ * (west > east) or unwrapped (east > 180 / west < -180).
  * @param zoom - Zoom level.
  * @param bounds - Geographic bounds [[west, south], [east, north]].
  * @returns Array of tile tuples [zoom, x, y].
