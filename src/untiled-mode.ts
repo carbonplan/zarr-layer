@@ -1070,16 +1070,45 @@ export class UntiledMode implements ZarrMode {
       .filter((lat) => isFinite(lat))
     const latSpan =
       validLats.length > 0 ? Math.max(...validLats) - Math.min(...validLats) : 0
-    const meshSubdivisions = Math.max(
-      MIN_SUBDIVISIONS,
-      Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
-    )
+
+    // WGS84 longitude span of this chunk, paired with latSpan to size the mesh
+    // below. EPSG:4326's source X is longitude in degrees and a 0-360 store
+    // keeps its unwrapped span there, so use the source span; forward-projecting
+    // would fold it via adjust_lon and understate it. Other projections have no
+    // such direct measure, so use the sampled WGS84 longitudes.
+    let lonSpan: number
+    if (this.projectionKind === 'epsg4326') {
+      lonSpan = Math.min(360, Math.abs(geoBounds.xMax - geoBounds.xMin))
+    } else {
+      const validLons = samplePoints
+        .map((p) => p[0])
+        .filter((lon) => isFinite(lon))
+      lonSpan =
+        validLons.length > 0
+          ? Math.min(360, Math.max(...validLons) - Math.min(...validLons))
+          : 0
+    }
+
+    // Tessellate each axis from its span, addressing two distinct concerns:
+    //  - Wide axis: ceil(span) gives ~1 vertex/degree so the mesh bends around
+    //    the globe. Too-wide cells can't follow the curve and can exceed the
+    //    mesh long-edge cull, dropping triangles entirely (issue #58).
+    //  - Thin axis: the MIN_SUBDIVISIONS floor. A chunk that is a single data
+    //    row spanning tens of degrees has a near-zero short span; without the
+    //    floor, too few vertices there let hard data/nodata edges smear across
+    //    globe-projected triangles.
+    // Handles row and column strip chunks alike (whichever axis is thin).
+    const subdivisionsForSpan = (span: number) =>
+      Math.max(MIN_SUBDIVISIONS, Math.min(MAX_SUBDIVISIONS, Math.ceil(span)))
+    const lonSubdivisions = subdivisionsForSpan(lonSpan)
+    const latSubdivisions = subdivisionsForSpan(latSpan)
 
     const meshResult = createHybridMesh({
       geoBounds,
       width: region.width,
       height: region.height,
-      subdivisions: meshSubdivisions,
+      lonSubdivisions,
+      latSubdivisions,
       transformer: this.cached4326Transformer,
       latIsAscending: this.latIsAscending,
       allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',

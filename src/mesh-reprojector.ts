@@ -14,7 +14,7 @@ import {
   sourceCRSToPixel,
   type ProjectionTransformer,
 } from './projection-utils'
-import { DEFAULT_MESH_MAX_ERROR, MAX_SUBDIVISIONS } from './constants'
+import { DEFAULT_MESH_MAX_ERROR } from './constants'
 
 // ============================================================================
 // Module constants
@@ -44,13 +44,6 @@ const WGS84_BOUNDS_EPSILON = 1e-4
  */
 const MAX_GLOBE_TRIANGLE_EDGE_DEGREES = 120
 
-/**
- * Longitude step target for EPSG:4326 meshes. This is below the long-edge cull
- * threshold so valid wide-but-shallow WGS84 strips are refined before the guard
- * runs, instead of being dropped after triangulation.
- */
-const MAX_WGS84_MESH_LONGITUDE_STEP_DEGREES = 100
-
 // ============================================================================
 // Interfaces
 // ============================================================================
@@ -74,7 +67,14 @@ interface HybridMeshOptions {
   geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
   width: number
   height: number
-  subdivisions: number
+  /**
+   * Uniform-grid vertex counts per axis (cells = subdivisions). Separate axes
+   * let a region that is wide in one dimension and shallow in the other (e.g. a
+   * full-width latitudinal strip chunk) be densely subdivided along its long
+   * axis without wasting vertices on its short axis.
+   */
+  lonSubdivisions: number
+  latSubdivisions: number
   transformer: ProjectionTransformer
   latIsAscending: boolean
   allowUnwrappedLongitudes?: boolean
@@ -114,19 +114,6 @@ function isRenderableWgs84Position(
     lon <= maxLon + WGS84_BOUNDS_EPSILON &&
     lat >= -90 - WGS84_BOUNDS_EPSILON &&
     lat <= 90 + WGS84_BOUNDS_EPSILON
-  )
-}
-
-function getWgs84LongitudeSubdivisions(
-  xMin: number,
-  xMax: number,
-  allowUnwrappedLongitudes: boolean
-): number {
-  if (!allowUnwrappedLongitudes) return 0
-  const lonSpan = Math.min(360, Math.abs(xMax - xMin))
-  return Math.min(
-    MAX_SUBDIVISIONS,
-    Math.ceil(lonSpan / MAX_WGS84_MESH_LONGITUDE_STEP_DEGREES)
   )
 }
 
@@ -525,7 +512,8 @@ export function createHybridMesh(
     geoBounds,
     width,
     height,
-    subdivisions,
+    lonSubdivisions,
+    latSubdivisions,
     transformer,
     latIsAscending,
     allowUnwrappedLongitudes = false,
@@ -564,21 +552,20 @@ export function createHybridMesh(
   const adaptiveUVs = reprojector.uvs // [u0, v0, u1, v1, ...]
 
   // Merge adaptive + uniform grid UVs directly into pre-sized array
-  // (duplicates are harmless for Delaunator)
-  const effectiveSubdivisions = Math.max(
-    1,
-    Math.ceil(subdivisions),
-    getWgs84LongitudeSubdivisions(xMin, xMax, allowUnwrappedLongitudes)
-  )
-  const uniformVertices = (effectiveSubdivisions + 1) ** 2
+  // (duplicates are harmless for Delaunator). The grid is non-square: columns
+  // follow longitude density, rows follow latitude, so a wide-shallow strip
+  // gets many longitudinal cells without a matching blow-up in latitude.
+  const lonCells = Math.max(1, Math.ceil(lonSubdivisions))
+  const latCells = Math.max(1, Math.ceil(latSubdivisions))
+  const uniformVertices = (lonCells + 1) * (latCells + 1)
   const mergedUVs = new Float64Array(adaptiveUVs.length + uniformVertices * 2)
   mergedUVs.set(adaptiveUVs)
 
   let offset = adaptiveUVs.length
-  for (let row = 0; row <= effectiveSubdivisions; row++) {
-    for (let col = 0; col <= effectiveSubdivisions; col++) {
-      mergedUVs[offset++] = col / effectiveSubdivisions
-      mergedUVs[offset++] = row / effectiveSubdivisions
+  for (let row = 0; row <= latCells; row++) {
+    for (let col = 0; col <= lonCells; col++) {
+      mergedUVs[offset++] = col / lonCells
+      mergedUVs[offset++] = row / latCells
     }
   }
 
