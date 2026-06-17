@@ -14,7 +14,7 @@ import {
   sourceCRSToPixel,
   type ProjectionTransformer,
 } from './projection-utils'
-import { DEFAULT_MESH_MAX_ERROR } from './constants'
+import { DEFAULT_MESH_MAX_ERROR, MAX_SUBDIVISIONS } from './constants'
 
 // ============================================================================
 // Module constants
@@ -44,6 +44,13 @@ const WGS84_BOUNDS_EPSILON = 1e-4
  */
 const MAX_GLOBE_TRIANGLE_EDGE_DEGREES = 120
 
+/**
+ * Longitude step target for EPSG:4326 meshes. This is below the long-edge cull
+ * threshold so valid wide-but-shallow WGS84 strips are refined before the guard
+ * runs, instead of being dropped after triangulation.
+ */
+const MAX_WGS84_MESH_LONGITUDE_STEP_DEGREES = 100
+
 // ============================================================================
 // Interfaces
 // ============================================================================
@@ -70,6 +77,7 @@ interface HybridMeshOptions {
   subdivisions: number
   transformer: ProjectionTransformer
   latIsAscending: boolean
+  allowUnwrappedLongitudes?: boolean
   maxError?: number
 }
 
@@ -93,14 +101,32 @@ function normalizeLon180(lon: number): number {
  * longitudes near singularities (for example sinusoidal rectangle corners near
  * the poles), and normalizing those would create false seam triangles.
  */
-function isRenderableWgs84Position(lon: number, lat: number): boolean {
+function isRenderableWgs84Position(
+  lon: number,
+  lat: number,
+  allowUnwrappedLongitudes: boolean = false
+): boolean {
+  const maxLon = allowUnwrappedLongitudes ? 360 : 180
   return (
     isFinite(lon) &&
     isFinite(lat) &&
     lon >= -180 - WGS84_BOUNDS_EPSILON &&
-    lon <= 180 + WGS84_BOUNDS_EPSILON &&
+    lon <= maxLon + WGS84_BOUNDS_EPSILON &&
     lat >= -90 - WGS84_BOUNDS_EPSILON &&
     lat <= 90 + WGS84_BOUNDS_EPSILON
+  )
+}
+
+function getWgs84LongitudeSubdivisions(
+  xMin: number,
+  xMax: number,
+  allowUnwrappedLongitudes: boolean
+): number {
+  if (!allowUnwrappedLongitudes) return 0
+  const lonSpan = Math.min(360, Math.abs(xMax - xMin))
+  return Math.min(
+    MAX_SUBDIVISIONS,
+    Math.ceil(lonSpan / MAX_WGS84_MESH_LONGITUDE_STEP_DEGREES)
   )
 }
 
@@ -293,7 +319,8 @@ function splitAntimeridianTriangles(
   wgs84Positions: Float64Array,
   texCoords: Float64Array,
   triangles: ArrayLike<number>,
-  canCrossAntimeridian: boolean
+  canCrossAntimeridian: boolean,
+  allowUnwrappedLongitudes: boolean
 ): SplitResult {
   const numVerts = wgs84Positions.length / 2
 
@@ -302,7 +329,13 @@ function splitAntimeridianTriangles(
   for (let i = 0; i < numVerts; i++) {
     const lon = wgs84Positions[i * 2]
     const lat = wgs84Positions[i * 2 + 1]
-    validVertex[i] = isRenderableWgs84Position(lon, lat) ? 1 : 0
+    validVertex[i] = isRenderableWgs84Position(
+      lon,
+      lat,
+      allowUnwrappedLongitudes
+    )
+      ? 1
+      : 0
   }
 
   // Fast path: no crossing possible, just filter invalid triangles
@@ -495,6 +528,7 @@ export function createHybridMesh(
     subdivisions,
     transformer,
     latIsAscending,
+    allowUnwrappedLongitudes = false,
     maxError = DEFAULT_MESH_MAX_ERROR,
   } = options
   const { xMin, xMax, yMin, yMax } = geoBounds
@@ -531,15 +565,20 @@ export function createHybridMesh(
 
   // Merge adaptive + uniform grid UVs directly into pre-sized array
   // (duplicates are harmless for Delaunator)
-  const uniformVertices = (subdivisions + 1) ** 2
+  const effectiveSubdivisions = Math.max(
+    1,
+    Math.ceil(subdivisions),
+    getWgs84LongitudeSubdivisions(xMin, xMax, allowUnwrappedLongitudes)
+  )
+  const uniformVertices = (effectiveSubdivisions + 1) ** 2
   const mergedUVs = new Float64Array(adaptiveUVs.length + uniformVertices * 2)
   mergedUVs.set(adaptiveUVs)
 
   let offset = adaptiveUVs.length
-  for (let row = 0; row <= subdivisions; row++) {
-    for (let col = 0; col <= subdivisions; col++) {
-      mergedUVs[offset++] = col / subdivisions
-      mergedUVs[offset++] = row / subdivisions
+  for (let row = 0; row <= effectiveSubdivisions; row++) {
+    for (let col = 0; col <= effectiveSubdivisions; col++) {
+      mergedUVs[offset++] = col / effectiveSubdivisions
+      mergedUVs[offset++] = row / effectiveSubdivisions
     }
   }
 
@@ -570,7 +609,7 @@ export function createHybridMesh(
     wgs84Positions[i * 2] = lon
     wgs84Positions[i * 2 + 1] = lat
 
-    if (isRenderableWgs84Position(lon, lat)) {
+    if (isRenderableWgs84Position(lon, lat, allowUnwrappedLongitudes)) {
       lons.push(normalizeLon180(lon))
       minLat = Math.min(minLat, lat)
       maxLat = Math.max(maxLat, lat)
@@ -634,7 +673,8 @@ export function createHybridMesh(
     wgs84Positions,
     texCoords,
     triangles,
-    canCrossAntimeridian
+    canCrossAntimeridian,
+    allowUnwrappedLongitudes
   )
 
   // Encode as absolute WGS84 coordinates so that shared-edge vertices between

@@ -1082,6 +1082,7 @@ export class UntiledMode implements ZarrMode {
       subdivisions: meshSubdivisions,
       transformer: this.cached4326Transformer,
       latIsAscending: this.latIsAscending,
+      allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',
     })
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
