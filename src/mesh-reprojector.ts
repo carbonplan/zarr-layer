@@ -97,21 +97,32 @@ function normalizeLon180(lon: number): number {
 
 /**
  * Check whether a source→WGS84 reprojection produced a coordinate that can be
- * rendered on one globe. Some projections return finite but nonsensical
- * longitudes near singularities (for example sinusoidal rectangle corners near
- * the poles), and normalizing those would create false seam triangles.
+ * rendered on one globe.
+ *
+ * The longitude bound only guards proj4 reprojection: projections with
+ * singularities (e.g. sinusoidal rectangle corners near the poles) return
+ * finite-but-nonsensical longitudes that, left in, poison the mesh's
+ * antimeridian-crossing detection (see the `lons` collection in
+ * `createHybridMesh`) and draw seams across the globe. Valid proj4 output never
+ * exceeds [-180, 180], so that bound cleanly separates garbage.
+ *
+ * EPSG:4326 (allowUnwrappedLongitudes) has no such singularity — `forward` is
+ * ~identity — so any finite longitude is legitimate. Bounding it there only
+ * drops valid data whose domain sits in another world copy ([-360, 0], a
+ * half-cell past 360, etc.), so we skip the longitude bound on that path.
  */
 function isRenderableWgs84Position(
   lon: number,
   lat: number,
   allowUnwrappedLongitudes: boolean = false
 ): boolean {
-  const maxLon = allowUnwrappedLongitudes ? 360 : 180
+  const lonInRange =
+    allowUnwrappedLongitudes ||
+    (lon >= -180 - WGS84_BOUNDS_EPSILON && lon <= 180 + WGS84_BOUNDS_EPSILON)
   return (
     isFinite(lon) &&
     isFinite(lat) &&
-    lon >= -180 - WGS84_BOUNDS_EPSILON &&
-    lon <= maxLon + WGS84_BOUNDS_EPSILON &&
+    lonInRange &&
     lat >= -90 - WGS84_BOUNDS_EPSILON &&
     lat <= 90 + WGS84_BOUNDS_EPSILON
   )
