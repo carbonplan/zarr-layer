@@ -235,7 +235,7 @@ export class UntiledMode implements ZarrMode {
   private cachedWGS84Transformer: ReturnType<
     typeof createWGS84ToSourceTransformer
   > | null = null
-  // Transformer: source CRS → EPSG:4326 (for WGS84 vertex positions and ECEF projection)
+  // Transformer: source CRS → EPSG:4326 (input to source-projected mesh generation)
   private cached4326Transformer: ReturnType<
     typeof createTransformerTo4326
   > | null = null
@@ -1053,9 +1053,8 @@ export class UntiledMode implements ZarrMode {
       region.mercatorBounds = this.computeRegionMercatorBounds(geoBounds)
     }
 
-    // Compute WGS84 vertex positions via proj4.
-    // CPU: transform vertices from source CRS to WGS84.
-    // GPU: transform WGS84 → Mercator (flat) or WGS84 → ECEF (globe).
+    // Generate a source-projected mesh via proj4. CPU transforms source CRS to
+    // WGS84, then encodes region-local Mercator deltas for the shader.
     const centerX = (geoBounds.xMin + geoBounds.xMax) / 2
     const centerY = (geoBounds.yMin + geoBounds.yMax) / 2
     const samplePoints = [
@@ -1984,7 +1983,7 @@ export class UntiledMode implements ZarrMode {
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
     const useMapbox = !!context.mapbox
-    // Use the WGS84 vertex path when the source projection is resolved via proj4.
+    // Use the source-projected mesh path when the CRS is resolved via proj4.
     const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
 
     // MapLibre globe exposes a projectionTransition value in the shader prelude.

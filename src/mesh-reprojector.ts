@@ -57,7 +57,7 @@ interface ReprojectorConfig {
 }
 
 interface AdaptiveMeshResult {
-  positions: Float32Array // Normalized 4326 coords [-1,1] for shader
+  positions: Float32Array // Region-local Mercator deltas for shader
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
   wgs84Bounds: Wgs84Bounds
