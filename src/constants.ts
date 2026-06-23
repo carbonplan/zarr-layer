@@ -9,10 +9,15 @@ export const DEFAULT_MESH_MAX_ERROR = 0.125
 /** Default maximum error for query polygon edge densification (in pixels) */
 export const DEFAULT_QUERY_DENSIFY_MAX_ERROR = DEFAULT_MESH_MAX_ERROR
 
-/** Minimum subdivisions for region geometry tessellation (globe projection) */
-export const MIN_SUBDIVISIONS = 2
+/**
+ * Minimum subdivisions per axis for region geometry tessellation (globe
+ * projection). 8 (not 2) so a thin strip chunk — e.g. a single data row
+ * spanning many degrees — still gets enough vertices across its short axis to
+ * keep hard data/nodata edges from smearing on the globe.
+ */
+export const MIN_SUBDIVISIONS = 8
 
-/** Maximum subdivisions for region geometry tessellation (globe projection) */
+/** Maximum subdivisions per axis for region geometry tessellation (globe projection) */
 export const MAX_SUBDIVISIONS = 128
 
 /** Web Mercator world extent in meters (half of full world width) */

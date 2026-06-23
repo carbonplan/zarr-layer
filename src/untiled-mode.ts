@@ -41,6 +41,7 @@ import type {
 import { ZarrStore } from './zarr-store'
 import {
   boundsToMercatorNorm,
+  lonRangeOverlaps,
   type MercatorBounds,
   type XYLimits,
   type Wgs84Bounds,
@@ -635,8 +636,7 @@ export class UntiledMode implements ZarrMode {
       if (!hasValid) continue
 
       if (
-        regEast >= west &&
-        regWest <= east &&
+        lonRangeOverlaps(west, east, regWest, regEast) &&
         regNorth >= south &&
         regSouth <= north
       ) {
@@ -950,6 +950,18 @@ export class UntiledMode implements ZarrMode {
     rYMin = Math.max(0, rYMin)
     rYMax = Math.min(numRegionsY - 1, rYMax)
 
+    // When the viewport straddles the antimeridian, forward-projecting the
+    // sampled longitudes folds source X back on itself (e.g. proj4 adjust_lon),
+    // so the srcX min/max span no longer bounds the visible columns. Treat
+    // every X region as a candidate; the antimeridian-aware overlap check in
+    // getVisibleRegions then keeps only the columns that are actually visible,
+    // so this widens the search without over-fetching the result (issue #64).
+    const crossesAntimeridian = east < west || east > 180 || west < -180
+    if (crossesAntimeridian) {
+      rXMin = 0
+      rXMax = numRegionsX - 1
+    }
+
     const candidates: Array<{ regionX: number; regionY: number }> = []
     for (let ry = rYMin; ry <= rYMax; ry++) {
       for (let rx = rXMin; rx <= rXMax; rx++) {
@@ -1058,18 +1070,48 @@ export class UntiledMode implements ZarrMode {
       .filter((lat) => isFinite(lat))
     const latSpan =
       validLats.length > 0 ? Math.max(...validLats) - Math.min(...validLats) : 0
-    const meshSubdivisions = Math.max(
-      MIN_SUBDIVISIONS,
-      Math.min(MAX_SUBDIVISIONS, Math.ceil(latSpan))
-    )
+
+    // WGS84 longitude span of this chunk, paired with latSpan to size the mesh
+    // below. EPSG:4326's source X is longitude in degrees and a 0-360 store
+    // keeps its unwrapped span there, so use the source span; forward-projecting
+    // would fold it via adjust_lon and understate it. Other projections have no
+    // such direct measure, so use the sampled WGS84 longitudes.
+    let lonSpan: number
+    if (this.projectionKind === 'epsg4326') {
+      lonSpan = Math.min(360, Math.abs(geoBounds.xMax - geoBounds.xMin))
+    } else {
+      const validLons = samplePoints
+        .map((p) => p[0])
+        .filter((lon) => isFinite(lon))
+      lonSpan =
+        validLons.length > 0
+          ? Math.min(360, Math.max(...validLons) - Math.min(...validLons))
+          : 0
+    }
+
+    // Tessellate each axis from its span, addressing two distinct concerns:
+    //  - Wide axis: ceil(span) gives ~1 vertex/degree so the mesh bends around
+    //    the globe. Too-wide cells can't follow the curve and can exceed the
+    //    mesh long-edge cull, dropping triangles entirely (issue #58).
+    //  - Thin axis: the MIN_SUBDIVISIONS floor. A chunk that is a single data
+    //    row spanning tens of degrees has a near-zero short span; without the
+    //    floor, too few vertices there let hard data/nodata edges smear across
+    //    globe-projected triangles.
+    // Handles row and column strip chunks alike (whichever axis is thin).
+    const subdivisionsForSpan = (span: number) =>
+      Math.max(MIN_SUBDIVISIONS, Math.min(MAX_SUBDIVISIONS, Math.ceil(span)))
+    const lonSubdivisions = subdivisionsForSpan(lonSpan)
+    const latSubdivisions = subdivisionsForSpan(latSpan)
 
     const meshResult = createHybridMesh({
       geoBounds,
       width: region.width,
       height: region.height,
-      subdivisions: meshSubdivisions,
+      lonSubdivisions,
+      latSubdivisions,
       transformer: this.cached4326Transformer,
       latIsAscending: this.latIsAscending,
+      allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',
     })
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
@@ -1881,9 +1923,26 @@ export class UntiledMode implements ZarrMode {
         this.xyLimits.xMax,
         this.xyLimits.yMax
       )
-      const dataWidthMeters = Math.abs(maxMercX - minMercX)
+      let dataWidthMeters = Math.abs(maxMercX - minMercX)
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidthMeters / fullWorldMeters
+      // worldFraction > 1 means the corner projection failed: for projections
+      // like MODIS sinusoidal the rectangular bbox corners fall outside the
+      // valid CRS domain (near-polar latitudes give out-of-domain longitudes),
+      // yielding a garbage or non-finite width. Fall back to the equatorial
+      // strip (y=0), which stays in-domain for any cylindrical-like projection
+      // and gives the correct horizontal extent.
+      if (!isFinite(dataWidthMeters) || dataWidthMeters > fullWorldMeters) {
+        const [eqMinX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMin,
+          0
+        )
+        const [eqMaxX] = this.cachedMercatorTransformer.forward(
+          this.xyLimits.xMax,
+          0
+        )
+        dataWidthMeters = Math.abs(eqMaxX - eqMinX)
+      }
+      worldFraction = Math.min(1, dataWidthMeters / fullWorldMeters)
     } else {
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       worldFraction = dataWidth / 360
