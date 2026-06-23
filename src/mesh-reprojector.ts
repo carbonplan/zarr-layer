@@ -246,7 +246,18 @@ function lonLatToMerc(lon: number, lat: number): [number, number] {
  * vertex jitter — see VERTEX_TO_WGS84_TO_MERCATOR). Adjacent regions sharing a
  * corner produce deterministically equal mercator values; even though each uses
  * its own origin, the shader's per-region Float64 anchor_clip reconstructs the
- * shared corner to the same sub-pixel clip position → no boundary seams.
+ * shared corner to the same sub-pixel clip position → sub-pixel boundary
+ * alignment (with a bounded residual; see below).
+ *
+ * Residual seam: the shared corner matches only to Float32 precision after the
+ * delta cast, so a boundary gap of `≈ 6e-8 × chunk_onscreen_px` survives. It is
+ * sub-pixel on any real dataset (512px / sub-meter chunks measure ~0.0002px)
+ * and only becomes visible under pathological over-zoom — e.g. a 2000 km/pixel
+ * custom-CRS (LCC) store at z24 yields ~1px. If a visible seam is ever reported
+ * on real data, the proportionate fix is to subdivide the untiled mesh by
+ * on-screen extent (extend subdivisionsForSpan in untiled-mode.ts) so each
+ * region's rendered size — and thus the gap — stays bounded. The tiled path's
+ * updateGeometryForProjection subdivision does NOT cover this (untiled) path.
  *
  * Values may fall outside [-1, 1] for vertices beyond the region's nominal
  * extent (e.g. polar data past the 85° flat limit); that is intentional and
