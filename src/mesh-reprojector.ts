@@ -488,10 +488,11 @@ function splitAntimeridianTriangles(
       newIndices.push(intOther1, other1, other2)
       newIndices.push(intOther1, other2, intOther2)
     } else {
-      // One-crossing triangles are ambiguous after source-space Delaunay
-      // triangulation: preserving them creates globe-spanning seam chords.
-      // Dropping them is conservative and avoids drawing false topology.
-      continue
+      // crossCount 1 (or 3): the triangle encloses a pole (its boundary winds
+      // around it, crossing the antimeridian an odd number of times). Keep it —
+      // the long-edge cull above already dropped the globe-spanning chords, so
+      // these are valid polar-cap triangles and dropping them holes the pole.
+      newIndices.push(i0, i1, i2)
     }
   }
 
