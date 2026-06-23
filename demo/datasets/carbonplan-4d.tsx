@@ -13,6 +13,7 @@ const ALL_MONTHS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 const combinedBandsCustomFrag = `
   // custom fragment shader w/ uniform example
   uniform float u_precipWeight;
+  if (isnan(prec)) { discard; }
   float combined = prec * u_precipWeight;
   float norm = (combined - clim.x) / (clim.y - clim.x);
   float cla = clamp(norm, 0.0, 1.0);
@@ -27,13 +28,15 @@ const monthRangeAverageFrag = `
   float count = 0.0;
   ${ALL_MONTHS.map(
     (month) => `
+  float valid_${month} = isnan(month_${month}) ? 0.0 : 1.0;
   float inRange_${month} = step(u_monthStart, ${month.toFixed(
       1
-    )}) * step(${month.toFixed(1)}, u_monthEnd);
-  sum += month_${month} * inRange_${month};
+    )}) * step(${month.toFixed(1)}, u_monthEnd) * valid_${month};
+  sum += (isnan(month_${month}) ? 0.0 : month_${month}) * inRange_${month};
   count += inRange_${month};`
   ).join('')}
-  float average = sum / max(count, 1.0);
+  if (count < 0.5) { discard; }
+  float average = sum / count;
   float rescaled = (average - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
   fragColor = vec4(c.r, c.g, c.b, opacity);
