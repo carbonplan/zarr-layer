@@ -302,11 +302,17 @@ function encodeMercDelta(
  * Per-region mercator origin: center + half-extent of this mesh's own mercator
  * extent. Vertices are encoded as deltas from it (encodeMercDelta); the shader's
  * per-region Float64 anchor_clip keeps shared edges between regions seam-free.
+ *
+ * Only renderable vertices contribute, or culled proj4-singularity vertices left
+ * in `positions` would inflate the half-extent and cost the valid ones Float32
+ * precision. Filter the RAW longitude (before normalizeLon180 wraps it into
+ * range) to match how splitAntimeridianTriangles classifies the same vertices.
  */
 function deriveLocalMercAnchor(
   positions: ArrayLike<number>,
   minLon: number,
-  crossesAntimeridian: boolean
+  crossesAntimeridian: boolean,
+  allowUnwrappedLongitudes: boolean
 ): { x: number; y: number; halfX: number; halfY: number } {
   let minX = Infinity
   let minY = Infinity
@@ -314,10 +320,13 @@ function deriveLocalMercAnchor(
   let maxY = -Infinity
   const n = positions.length / 2
   for (let i = 0; i < n; i++) {
-    let lon = normalizeLon180(positions[i * 2])
+    const rawLon = positions[i * 2]
     const lat = positions[i * 2 + 1]
+    if (!isRenderableWgs84Position(rawLon, lat, allowUnwrappedLongitudes)) {
+      continue
+    }
+    let lon = normalizeLon180(rawLon)
     if (crossesAntimeridian && lon < minLon) lon += 360
-    if (!isFinite(lon) || !isFinite(lat)) continue
     const [mx, my] = lonLatToMerc(lon, lat)
     minX = Math.min(minX, mx)
     maxX = Math.max(maxX, mx)
@@ -763,7 +772,8 @@ export function createHybridMesh(
   const anchor = deriveLocalMercAnchor(
     splitResult.positions,
     minLon,
-    crossesAntimeridian
+    crossesAntimeridian,
+    allowUnwrappedLongitudes
   )
 
   const positions = encodeMercDelta(
