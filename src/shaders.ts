@@ -34,7 +34,15 @@ uniform float scale_x;
 uniform float scale_y;
 uniform float shift_x;
 uniform float shift_y;
-uniform float u_worldXOffset;`
+uniform float u_worldXOffset;
+// Eye-coords uniforms (source-projected FLAT path only). u_eye_matrix is the
+// flat projection matrix (MapLibre mainMatrix / Mapbox matrix); u_anchor_clip
+// is matrix * vec4(regionOrigin + worldXOffset, 0, 1), computed in JS Float64
+// per region per world offset (regionOrigin = the region's shift_x/shift_y).
+// A visible region is near the camera, so anchor_clip is small in clip space:
+// Float32-exact and jitter-free. Unused by other variants (location null).
+uniform mat4 u_eye_matrix;
+uniform vec4 u_anchor_clip;`
 
 /** Additional uniforms for Mapbox globe projection */
 const UNIFORMS_MAPBOX_GLOBE = `
@@ -61,29 +69,32 @@ const SCALE_HANDLING = `
 const VERTEX_TO_MERCATOR = `
   vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);`
 
-/** Transform vertex from local space to normalized WGS84, then to Mercator */
+/**
+ * Source-projected FLAT path, eye-coords (render-relative-to-eye) decomposition.
+ * Canonical explanation — other eye-coords sites reference this block.
+ *
+ * vertex.xy are region-local MERCATOR deltas (Float64-projected on the CPU, see
+ * encodeMercDelta). Forming an absolute world coord in Float32 and multiplying by
+ * the high-zoom matrix quantizes to ~4 px of jitter at z~19, so instead:
+ *   matrix·(anchor + delta)  ==  u_anchor_clip  +  matrix·(delta, 0, 0)
+ * Both terms are small in clip space, so their Float32 sum stays sub-pixel.
+ * u_anchor_clip = matrix·(regionOrigin + worldXOffset), computed per region per
+ * world offset on the CPU from the matrix at its NATIVE precision (passed
+ * uncast). When the renderer's flat matrix is Float64 (as the MapLibre/Mapbox
+ * flat view-proj matrices are in practice) the anchor is full-precision — which
+ * is what keeps high zoom jitter-free; pre-casting the matrix to Float32 before
+ * this multiply would re-quantize the translation and bring the pan/zoom jitter
+ * back. The wrap offset folds in here so a wrapped antimeridian copy doesn't
+ * cancel two ~one-world clip values. `merc` is reconstructed at low precision
+ * ONLY for the fragment varyings.
+ */
 const VERTEX_TO_WGS84_TO_MERCATOR = `
-  // vertex.xy are in local [-1, 1] space for this region
-  // scale/shift transform to absolute normalized 4326 [0,1] on world
-  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
-  float normLat = vertex.y * sy + shift_y;
-
-  // Convert normalized [0,1] to degrees
-  float lon = normLon * 360.0 - 180.0;
-  float lat = normLat * 180.0 - 90.0;
-
-  // Clamp latitude to Mercator limits to avoid infinity at poles
-  lat = clamp(lat, -MERCATOR_LAT_LIMIT, MERCATOR_LAT_LIMIT);
-
-  // Mercator projection
-  float lambda = radians(lon);
-  float phi = radians(lat);
-  float mercY_raw = log(tan((PI / 2.0 + phi) / 2.0));
-
-  // Normalize mercator output to [0,1]
-  float mercX = (lambda / PI + 1.0) / 2.0;
-  float mercY = (1.0 - mercY_raw / PI) / 2.0;
-  vec2 merc = vec2(mercX, mercY);`
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  vec4 deltaClip = u_eye_matrix * vec4(mercDelta, 0.0, 0.0);
+  vec2 merc = vec2(
+    shift_x + mercDelta.x + u_worldXOffset,
+    shift_y + mercDelta.y
+  );`
 
 /** Individual shader constants (composed as needed) */
 const CONST_PI = `const float PI = 3.14159265358979323846;`
@@ -101,12 +112,32 @@ float mercatorYToLatRad(float y) {
 const PROJECT_MAPLIBRE_GLOBE = `
   gl_Position = projectTile(merc);`
 
-/** Mapbox globe projection output (handles tile render vs globe render) */
-const PROJECT_MAPBOX_GLOBE = `
+/**
+ * Mapbox globe projection output (handles tile render vs globe render).
+ *
+ * For source-projected `wgs84` input, the linear flat/tile endpoint uses the
+ * eye-coords sum (u_anchor_clip + deltaClip), which is sub-pixel precise at
+ * high zoom. During the globe morph, keep Mapbox's existing absolute Mercator
+ * path because the ECEF blend is nonlinear and only active at low/mid zoom.
+ */
+const projectMapboxGlobe = (eyeCoords: boolean): string => {
+  const flatClip = eyeCoords
+    ? 'u_anchor_clip + deltaClip'
+    : 'matrix * vec4(merc, 0.0, 1.0)'
+  const mercClip = eyeCoords ? 'matrix * vec4(merc, 0.0, 1.0)' : flatClip
+  const flatEndpoint = eyeCoords
+    ? `
+  } else if (u_globe_transition >= 0.999999) {
+    vec4 flatClip = ${flatClip};
+    flatClip /= flatClip.w;
+    gl_Position = flatClip;`
+    : ''
+  return `
   if (u_tile_render == 1) {
-    gl_Position = matrix * vec4(merc, 0.0, 1.0);
+    gl_Position = ${flatClip};
+${flatEndpoint}
   } else {
-    vec4 mercClip = matrix * vec4(merc, 0.0, 1.0);
+    vec4 mercClip = ${mercClip};
     mercClip /= mercClip.w;
 
     float lonRad = (merc.x - 0.5) * 2.0 * PI;
@@ -123,36 +154,43 @@ const PROJECT_MAPBOX_GLOBE = `
 
     gl_Position = mix(globeClip, mercClip, clamp(u_globe_transition, 0.0, 1.0));
   }`
+}
 
-/** Transform vertex from local space to WGS84 normalized coords, then compute ECEF + Mercator fallback */
+/**
+ * ECEF globe path (MapLibre Y-UP). vertex.xy are layer-anchored MERCATOR deltas;
+ * restore absolute mercator (the globe is only active at low/mid zoom, where
+ * Float32 absolute coords are ample) and invert mercator-Y → latitude. The
+ * inverse gudermannian is defined for all finite mercY, so polar vertices
+ * (mercY outside [0,1]) reconstruct their true latitude → poles preserved.
+ */
 const VERTEX_WGS84_TO_ECEF = `
-  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
-  float normLat = vertex.y * sy + shift_y;
+  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
+  float mercY = vertex.y * sy + shift_y;
 
-  // WGS84 normalized [0,1] to radians
-  float lonRad = (normLon - 0.5) * 2.0 * PI;
-  float latDeg = normLat * 180.0 - 90.0;
-  float latRad = latDeg * PI / 180.0;
+  float lonRad = (mercX - 0.5) * 2.0 * PI;
+  float latRad = mercatorYToLatRad(mercY);
 
   // ECEF unit sphere (MapLibre Y-UP convention)
   float cosLat = cos(latRad);
   vec3 ecef = vec3(sin(lonRad) * cosLat, sin(latRad), cos(lonRad) * cosLat);
 
-  // Clamped Mercator fallback for flat-map transition
-  float clampedLatDeg = clamp(latDeg, -MERCATOR_LAT_LIMIT, MERCATOR_LAT_LIMIT);
-  float clampedLatRad = clampedLatDeg * PI / 180.0;
-  float mercY_raw = log(tan((PI / 2.0 + clampedLatRad) / 2.0));
-  vec2 merc = vec2(normLon, (1.0 - mercY_raw / PI) / 2.0);`
+  // Flat-map fallback for the globe->mercator transition: mercator coords direct.
+  vec2 merc = vec2(mercX, mercY);
 
-/** Transform vertex from local space to WGS84 normalized coords, then compute ECEF (Mapbox Y-DOWN + radius) */
+  // Geographic normalized coords for the wgs84-lookup fragment path.
+  float normLon = mercX;
+  float normLat = latRad / PI + 0.5;`
+
+/**
+ * ECEF globe path (Mapbox Y-DOWN + radius). Same mercator-delta input and
+ * merc→lat inversion as VERTEX_WGS84_TO_ECEF (see there).
+ */
 const VERTEX_WGS84_TO_ECEF_MAPBOX = `
-  float normLon = vertex.x * sx + shift_x + u_worldXOffset;
-  float normLat = vertex.y * sy + shift_y;
+  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
+  float mercY = vertex.y * sy + shift_y;
 
-  // WGS84 normalized [0,1] to radians
-  float lonRad = (normLon - 0.5) * 2.0 * PI;
-  float latDeg = normLat * 180.0 - 90.0;
-  float latRad = latDeg * PI / 180.0;
+  float lonRad = (mercX - 0.5) * 2.0 * PI;
+  float latRad = mercatorYToLatRad(mercY);
 
   // Mapbox ECEF: Y-DOWN with explicit radius
   float cosLat = cos(latRad);
@@ -160,7 +198,11 @@ const VERTEX_WGS84_TO_ECEF_MAPBOX = `
     GLOBE_RADIUS * cosLat * sin(lonRad),
     -GLOBE_RADIUS * sin(latRad),
     GLOBE_RADIUS * cosLat * cos(lonRad)
-  );`
+  );
+
+  // Geographic normalized coords for the wgs84-lookup fragment path.
+  float normLon = mercX;
+  float normLat = latRad / PI + 0.5;`
 
 /** Mapbox ECEF projection output for the direct untiled globe path. */
 const PROJECT_MAPBOX_ECEF = `
@@ -257,10 +299,12 @@ export function createVertexShader(options: VertexShaderOptions): string {
     .join('\n')
 
   // Build helper functions
-  // FUNC_MERCATOR_Y_TO_LAT only needed for regular Mapbox globe (inverts Mercator Y to lat).
-  // Mapbox ECEF gets latitude directly from WGS84 input, so it doesn't need this helper.
+  // FUNC_MERCATOR_Y_TO_LAT (inverts Mercator Y → latitude) is needed by:
+  //  - regular Mapbox globe (projectMapboxGlobe), and
+  //  - both ECEF paths, which now reconstruct latitude from mercator-encoded
+  //    vertices to preserve polar coverage.
   let helpers = ''
-  if (projection === 'mapbox' && !isDirectEcef) {
+  if (isDirectEcef || projection === 'mapbox') {
     helpers = FUNC_MERCATOR_Y_TO_LAT
   }
 
@@ -282,10 +326,19 @@ export function createVertexShader(options: VertexShaderOptions): string {
     projectionOutput = PROJECT_MAPBOX_ECEF
   } else if (isDirectEcef) {
     projectionOutput = PROJECT_MAPLIBRE_ECEF
+  } else if (inputSpace === 'wgs84' && projection === 'maplibre') {
+    // Eye-coords flat output (see VERTEX_TO_WGS84_TO_MERCATOR). Emitted directly
+    // here only for MapLibre: it routes ALL globe transition to the ECEF path
+    // above, so this is reached only when the map is truly flat (a linear
+    // world->clip map). Mapbox can't use the bare output — its non-ECEF program
+    // serves the flat<->globe morph (projectMapboxGlobe).
+    projectionOutput = `  gl_Position = u_anchor_clip + deltaClip;`
   } else if (projection === 'maplibre') {
     projectionOutput = PROJECT_MAPLIBRE_GLOBE
   } else {
-    projectionOutput = PROJECT_MAPBOX_GLOBE
+    // Mapbox flat + globe morph. For the source-projected path, the flat/tile
+    // endpoint uses eye-coords; the globe morph keeps absolute mercator.
+    projectionOutput = projectMapboxGlobe(inputSpace === 'wgs84')
   }
 
   // Set v_wgs84Pos: meaningful for direct ECEF, zero for other paths

@@ -200,7 +200,7 @@ function renderRegionsToTile(
   // Determine if we're in globe mode (default true for backwards compatibility)
   const isGlobe = context.isGlobe ?? true
 
-  // Check if any untiled region uses WGS84 vertex positions.
+  // Check if any untiled region uses source-projected mesh positions.
   const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
 
   // Always use Mapbox globe shader for tile rendering - it handles both globe and mercator
@@ -232,12 +232,11 @@ function renderRegionsToTile(
 
   let needsMoreData = false
   for (const region of regions) {
-    // Use mercatorBounds for tile intersection — always set and has accurate
-    // per-region extent. (wgs84Bounds may be identity for absolute encoding.)
+    // Use mercatorBounds for tile intersection — always set and has the actual
+    // per-region extent. wgs84Bounds carries the source-projected mesh anchor.
     if (!boundsIntersect(region.mercatorBounds, tileBounds)) continue
 
-    // Source-projected regions use WGS84 vertex positions and may use an
-    // indexed adaptive mesh.
+    // Source-projected regions may use an indexed adaptive mesh.
     const useIndexedMesh = !!region.useIndexedMesh && !!region.indexBuffer
 
     const renderable: RenderableRegion = {
@@ -257,7 +256,7 @@ function renderRegionsToTile(
       // Include indexed mesh fields for adaptive source-projected meshes.
       indexBuffer: useIndexedMesh ? region.indexBuffer : undefined,
       useIndexedMesh: useIndexedMesh,
-      // Include wgs84Bounds for WGS84 vertex positioning.
+      // Include wgs84Bounds for source-projected mesh scale/anchor uniforms.
       wgs84Bounds: region.wgs84Bounds,
       latIsAscending: region.latIsAscending,
     }
@@ -267,7 +266,8 @@ function renderRegionsToTile(
       shaderProgram,
       renderable,
       [0], // Globe tiles don't need world wrapping
-      customShaderConfig
+      customShaderConfig,
+      useWgs84 ? tileMatrix : null
     )
     if (!rendered) {
       // renderRegion returns false when band data is missing

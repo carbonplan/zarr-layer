@@ -76,7 +76,14 @@ export function renderRegion(
   shaderProgram: ShaderProgram,
   region: RenderableRegion,
   worldOffsets: number[],
-  customShaderConfig?: CustomShaderConfig
+  customShaderConfig?: CustomShaderConfig,
+  // Flat projection matrix for the eye-coords path (source-projected 'wgs84'
+  // shader only), at the renderer's native precision (NOT pre-cast to Float32 —
+  // see the anchor_clip computation below). When provided, anchor_clip is
+  // computed PER WORLD OFFSET as (shiftX + worldOffset, shiftY), so the eye
+  // origin sits near the on-screen region — and near-camera for wrapped copies,
+  // not the off-screen layer center: small clip magnitudes, no pan/zoom jitter.
+  eyeMatrix?: number[] | Float32Array | Float64Array | null
 ): boolean {
   // Resolve position space and sample mode from explicit fields or defaults
   const wgs84Bounds = region.wgs84Bounds ?? null
@@ -97,10 +104,10 @@ export function renderRegion(
   } else {
     // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift
     if (!wgs84Bounds) return false
-    scaleX = (wgs84Bounds.lon1 - wgs84Bounds.lon0) / 2
-    scaleY = (wgs84Bounds.lat1 - wgs84Bounds.lat0) / 2
-    shiftX = (wgs84Bounds.lon0 + wgs84Bounds.lon1) / 2
-    shiftY = (wgs84Bounds.lat0 + wgs84Bounds.lat1) / 2
+    scaleX = (wgs84Bounds.x1 - wgs84Bounds.x0) / 2
+    scaleY = (wgs84Bounds.y1 - wgs84Bounds.y0) / 2
+    shiftX = (wgs84Bounds.x0 + wgs84Bounds.x1) / 2
+    shiftY = (wgs84Bounds.y0 + wgs84Bounds.y1) / 2
   }
 
   gl.uniform1f(shaderProgram.scaleLoc, 0)
@@ -108,6 +115,26 @@ export function renderRegion(
   gl.uniform1f(shaderProgram.scaleYLoc, scaleY)
   gl.uniform1f(shaderProgram.shiftXLoc, shiftX)
   gl.uniform1f(shaderProgram.shiftYLoc, shiftY)
+
+  // Eye-coords path for flat source-projected shaders (see
+  // VERTEX_TO_WGS84_TO_MERCATOR). Upload u_eye_matrix once; u_anchor_clip is
+  // computed PER WORLD OFFSET in the draw loop below, so a wrapped copy's anchor
+  // is its near-camera wrapped origin (no large-term cancellation). The anchor is
+  // computed from the original (un-cast) matrix; cast to Float32 only for upload.
+  const eyeM = eyeMatrix
+  const eyeActive = !!(
+    eyeM &&
+    eyeM.length >= 16 &&
+    shaderProgram.eyeMatrixLoc &&
+    shaderProgram.anchorClipLoc
+  )
+  if (eyeActive && eyeM) {
+    gl.uniformMatrix4fv(
+      shaderProgram.eyeMatrixLoc,
+      false,
+      eyeM instanceof Float32Array ? eyeM : new Float32Array(eyeM)
+    )
+  }
 
   // Set texture transform (for parent tile fallback)
   const texScale = region.texScale ?? [1, 1]
@@ -181,6 +208,20 @@ export function renderRegion(
   // Draw for each world offset (map wrapping)
   for (const worldOffset of worldOffsets) {
     gl.uniform1f(shaderProgram.worldXOffsetLoc, worldOffset)
+    if (eyeActive && eyeM) {
+      // u_anchor_clip = M * vec4(shiftX + worldOffset, shiftY, 0, 1), in Float64
+      // then cast by uniform4f. Folding the offset in here (vs. a separate shader
+      // term) keeps a wrapped copy's anchor near the camera — no large-term
+      // cancellation. Column-major: result[i] = m[i]*x + m[4+i]*y + m[12+i].
+      const ax = shiftX + worldOffset
+      gl.uniform4f(
+        shaderProgram.anchorClipLoc,
+        eyeM[0] * ax + eyeM[4] * shiftY + eyeM[12],
+        eyeM[1] * ax + eyeM[5] * shiftY + eyeM[13],
+        eyeM[2] * ax + eyeM[6] * shiftY + eyeM[14],
+        eyeM[3] * ax + eyeM[7] * shiftY + eyeM[15]
+      )
+    }
     if (region.useIndexedMesh && region.indexBuffer) {
       gl.drawElements(gl.TRIANGLES, region.vertexCount, gl.UNSIGNED_INT, 0)
     } else {

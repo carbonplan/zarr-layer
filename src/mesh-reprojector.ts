@@ -57,7 +57,7 @@ interface ReprojectorConfig {
 }
 
 interface AdaptiveMeshResult {
-  positions: Float32Array // Normalized 4326 coords [-1,1] for shader
+  positions: Float32Array // Region-local Mercator deltas for shader
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
   wgs84Bounds: Wgs84Bounds
@@ -215,30 +215,71 @@ function createReprojector(config: ReprojectorConfig): RasterReprojector {
 }
 
 /**
- * Encode WGS84 lon/lat positions as absolute normalized coordinates in [-1, 1].
+ * Mercator-normalized [0,1] coords for a lon/lat in degrees.
  *
- * Uses global WGS84 range (lon: [-180,180] → [0,1], lat: [-90,90] → [0,1])
- * then maps [0,1] to [-1,1] for the shader's scale/shift convention.
- *
- * This ensures adjacent regions' shared-edge vertices produce identical Float32
- * values, eliminating seams caused by per-region bounding box normalization.
- * The companion identity wgs84Bounds ({0,0,1,1}) maps [-1,1] back to [0,1]
- * in the shader via vertex * 0.5 + 0.5.
+ * Unlike `latToMercatorNorm` in map-utils (which clamps to ±85.05°, the Web
+ * Mercator *tile* limit), this clamps only just shy of the singular pole to keep
+ * mercY finite (mercY → ±∞ exactly at ±90°). Latitudes between 85° and ~90°
+ * therefore map to mercY values outside [0,1] — which is correct: on a flat map
+ * they project off-screen, and on the globe the ECEF shader inverts mercY back
+ * to the true latitude, preserving polar coverage. The residual gap at the exact
+ * pole is ~0.1 m, well below a pixel at any globe zoom.
  */
-function encodeAbsoluteWgs84(
+const MERC_POLE_LIMIT_RAD = (89.999999 * Math.PI) / 180
+function lonLatToMerc(lon: number, lat: number): [number, number] {
+  const mercX = (lon + 180) / 360
+  const phi = Math.max(
+    -MERC_POLE_LIMIT_RAD,
+    Math.min(MERC_POLE_LIMIT_RAD, (lat * Math.PI) / 180)
+  )
+  const mercY = (1 - Math.log(Math.tan(Math.PI / 4 + phi / 2)) / Math.PI) / 2
+  return [mercX, mercY]
+}
+
+/**
+ * Encode WGS84 lon/lat vertex positions as region-local mercator deltas:
+ * `(mercX − anchor.x) / anchor.halfX`, `(mercY − anchor.y) / anchor.halfY`.
+ *
+ * Each vertex is pre-projected to mercator in Float64 and the region origin is
+ * subtracted BEFORE the Float32 cast, so the stored delta keeps full precision
+ * even where the absolute mercator coordinate would not (the fix for high-zoom
+ * vertex jitter — see VERTEX_TO_WGS84_TO_MERCATOR). Adjacent regions sharing a
+ * corner produce deterministically equal mercator values; even though each uses
+ * its own origin, the shader's per-region Float64 anchor_clip reconstructs the
+ * shared corner to the same sub-pixel clip position → sub-pixel boundary
+ * alignment (with a bounded residual; see below).
+ *
+ * Residual seam: the shared corner matches only to Float32 precision after the
+ * delta cast, so a boundary gap of `≈ 6e-8 × chunk_onscreen_px` survives. It is
+ * sub-pixel on any real dataset (512px / sub-meter chunks measure ~0.0002px)
+ * and only becomes visible under pathological over-zoom — e.g. a 2000 km/pixel
+ * custom-CRS (LCC) store at z24 yields ~1px. If a visible seam is ever reported
+ * on real data, the proportionate fix is to subdivide the untiled mesh by
+ * on-screen extent (extend subdivisionsForSpan in untiled-mode.ts) so each
+ * region's rendered size — and thus the gap — stays bounded. The tiled path's
+ * updateGeometryForProjection subdivision does NOT cover this (untiled) path.
+ *
+ * Values may fall outside [-1, 1] for vertices beyond the region's nominal
+ * extent (e.g. polar data past the 85° flat limit); that is intentional and
+ * round-trips exactly through the shader's `vertex * scale + shift`.
+ */
+function encodeMercDelta(
   positions: ArrayLike<number>,
   minLon: number,
-  crossesAntimeridian: boolean
+  crossesAntimeridian: boolean,
+  anchor: { x: number; y: number; halfX: number; halfY: number }
 ): Float32Array {
   const numVerts = positions.length / 2
   const encoded = new Float32Array(numVerts * 2)
+  const safeHalfX = anchor.halfX > 0 ? anchor.halfX : 0.5
+  const safeHalfY = anchor.halfY > 0 ? anchor.halfY : 0.5
 
   for (let i = 0; i < numVerts; i++) {
     let lon = normalizeLon180(positions[i * 2])
     const lat = positions[i * 2 + 1]
 
-    // For antimeridian crossing, shift negative longitudes up by 360
-    // so they're in a continuous range with positive longitudes
+    // For antimeridian crossing, shift negative longitudes up by 360 so they're
+    // in a continuous range with positive longitudes (mercX may exceed 1).
     if (crossesAntimeridian && lon < minLon) {
       lon += 360
     }
@@ -249,12 +290,56 @@ function encodeAbsoluteWgs84(
       continue
     }
 
-    // Absolute WGS84 [0,1] encoded as [-1,1]
-    encoded[i * 2] = ((lon + 180) / 360) * 2 - 1
-    encoded[i * 2 + 1] = ((lat + 90) / 180) * 2 - 1
+    const [mercX, mercY] = lonLatToMerc(lon, lat)
+    encoded[i * 2] = (mercX - anchor.x) / safeHalfX
+    encoded[i * 2 + 1] = (mercY - anchor.y) / safeHalfY
   }
 
   return encoded
+}
+
+/**
+ * Per-region mercator origin: center + half-extent of this mesh's own mercator
+ * extent. Vertices are encoded as deltas from it (encodeMercDelta); the shader's
+ * per-region Float64 anchor_clip keeps shared edges between regions seam-free.
+ *
+ * Only renderable vertices contribute, or culled proj4-singularity vertices left
+ * in `positions` would inflate the half-extent and cost the valid ones Float32
+ * precision. Filter the RAW longitude (before normalizeLon180 wraps it into
+ * range) to match how splitAntimeridianTriangles classifies the same vertices.
+ */
+function deriveLocalMercAnchor(
+  positions: ArrayLike<number>,
+  minLon: number,
+  crossesAntimeridian: boolean,
+  allowUnwrappedLongitudes: boolean
+): { x: number; y: number; halfX: number; halfY: number } {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const n = positions.length / 2
+  for (let i = 0; i < n; i++) {
+    const rawLon = positions[i * 2]
+    const lat = positions[i * 2 + 1]
+    if (!isRenderableWgs84Position(rawLon, lat, allowUnwrappedLongitudes)) {
+      continue
+    }
+    let lon = normalizeLon180(rawLon)
+    if (crossesAntimeridian && lon < minLon) lon += 360
+    const [mx, my] = lonLatToMerc(lon, lat)
+    minX = Math.min(minX, mx)
+    maxX = Math.max(maxX, mx)
+    minY = Math.min(minY, my)
+    maxY = Math.max(maxY, my)
+  }
+  if (!isFinite(minX)) return { x: 0.5, y: 0.5, halfX: 0.5, halfY: 0.5 }
+  return {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2,
+    halfX: Math.max((maxX - minX) / 2, 1e-12),
+    halfY: Math.max((maxY - minY) / 2, 1e-12),
+  }
 }
 
 // ============================================================================
@@ -676,16 +761,36 @@ export function createHybridMesh(
     allowUnwrappedLongitudes
   )
 
-  // Encode as absolute WGS84 coordinates so that shared-edge vertices between
-  // adjacent regions produce identical Float32 values (eliminates seams).
-  const positions = encodeAbsoluteWgs84(
+  // Eye-coords path: encode each vertex as a region-local mercator delta
+  // (Float64 → Float32) relative to this region's own mercator origin. A visible
+  // region is near the camera, so the matching per-region anchor_clip computed
+  // in renderRegion stays small in clip space → sub-pixel precision at high zoom
+  // with no pan/zoom jitter. Shared edges between regions stay gapless because
+  // each region's Float64 anchor_clip reproduces the exact world→clip map and
+  // the small magnitudes keep the residual well below a pixel. See
+  // VERTEX_TO_WGS84_TO_MERCATOR and the ECEF transforms.
+  const anchor = deriveLocalMercAnchor(
     splitResult.positions,
     minLon,
-    crossesAntimeridian
+    crossesAntimeridian,
+    allowUnwrappedLongitudes
   )
 
-  // Identity bounds: shader maps [-1,1] → [0,1] via vertex * 0.5 + 0.5
-  const wgs84Bounds: Wgs84Bounds = { lon0: 0, lat0: 0, lon1: 1, lat1: 1 }
+  const positions = encodeMercDelta(
+    splitResult.positions,
+    minLon,
+    crossesAntimeridian,
+    anchor
+  )
+
+  // Mercator anchor +/- half-extent (normalized mercator world coords); the
+  // renderer derives scale/shift from these. See the Wgs84Bounds doc in map-utils.
+  const wgs84Bounds: Wgs84Bounds = {
+    x0: anchor.x - anchor.halfX,
+    y0: anchor.y - anchor.halfY,
+    x1: anchor.x + anchor.halfX,
+    y1: anchor.y + anchor.halfY,
+  }
 
   return {
     positions,

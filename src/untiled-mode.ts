@@ -235,7 +235,7 @@ export class UntiledMode implements ZarrMode {
   private cachedWGS84Transformer: ReturnType<
     typeof createWGS84ToSourceTransformer
   > | null = null
-  // Transformer: source CRS → EPSG:4326 (for WGS84 vertex positions and ECEF projection)
+  // Transformer: source CRS → EPSG:4326 (input to source-projected mesh generation)
   private cached4326Transformer: ReturnType<
     typeof createTransformerTo4326
   > | null = null
@@ -1053,9 +1053,8 @@ export class UntiledMode implements ZarrMode {
       region.mercatorBounds = this.computeRegionMercatorBounds(geoBounds)
     }
 
-    // Compute WGS84 vertex positions via proj4.
-    // CPU: transform vertices from source CRS to WGS84.
-    // GPU: transform WGS84 → Mercator (flat) or WGS84 → ECEF (globe).
+    // Generate a source-projected mesh via proj4. CPU transforms source CRS to
+    // WGS84, then encodes region-local Mercator deltas for the shader.
     const centerX = (geoBounds.xMin + geoBounds.xMax) / 2
     const centerY = (geoBounds.yMin + geoBounds.yMax) / 2
     const samplePoints = [
@@ -1112,6 +1111,11 @@ export class UntiledMode implements ZarrMode {
       transformer: this.cached4326Transformer,
       latIsAscending: this.latIsAscending,
       allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',
+      // The mesh encodes vertices as deltas from a per-region mercator origin
+      // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
+      // anchor_clip, keeping the eye origin near the on-screen region for
+      // high-zoom precision (no pan/zoom jitter, no seams). See
+      // VERTEX_TO_WGS84_TO_MERCATOR.
     })
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
@@ -1979,7 +1983,7 @@ export class UntiledMode implements ZarrMode {
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
     const useMapbox = !!context.mapbox
-    // Use the WGS84 vertex path when the source projection is resolved via proj4.
+    // Use the source-projected mesh path when the CRS is resolved via proj4.
     const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
 
     // MapLibre globe exposes a projectionTransition value in the shader prelude.
@@ -2030,12 +2034,33 @@ export class UntiledMode implements ZarrMode {
     // Rendering at shifted world offsets on the globe produces duplicate renders.
     const worldOffsets = useDirectEcef ? [0] : context.worldOffsets
 
+    // Resolve the flat projection matrix for the source-projected eye-coords
+    // path. MapLibre flat uses mainMatrix; Mapbox flat passes its matrix
+    // directly. ECEF/globe paths ignore these uniforms.
+    // Pass it through UN-CAST (number[] | Float32Array | Float64Array) so
+    // renderRegion computes anchor_clip from the highest-precision matrix
+    // representation available. When the flat matrix is Float64 (as it is in
+    // practice) that full-precision anchor is what keeps high-zoom pan/zoom
+    // jitter-free; do NOT pre-cast to Float32 here (it re-quantizes the
+    // translation and the jitter returns). renderRegion casts to Float32 only
+    // for the GPU upload (which drives the small deltaClip).
+    let eyeMatrix: number[] | Float32Array | Float64Array | null = null
+    if (useWgs84 && !useDirectEcef) {
+      const raw = useMapbox
+        ? context.matrix
+        : context.projectionData?.mainMatrix
+      if (raw && raw.length >= 16) {
+        eyeMatrix = raw
+      }
+    }
+
     this.renderRegions(
       renderer,
       shaderProgram,
       worldOffsets,
       context.customShaderConfig,
-      useDirectEcef
+      useDirectEcef,
+      eyeMatrix
     )
   }
 
@@ -2088,7 +2113,8 @@ export class UntiledMode implements ZarrMode {
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
     customShaderConfig?: CustomShaderConfig,
-    useDirectEcef: boolean = false
+    useDirectEcef: boolean = false,
+    eyeMatrix: number[] | Float32Array | Float64Array | null = null
   ): void {
     const gl = renderer.gl
 
@@ -2102,7 +2128,8 @@ export class UntiledMode implements ZarrMode {
         shaderProgram,
         this.regionToRenderable(region, useDirectEcef),
         worldOffsets,
-        customShaderConfig
+        customShaderConfig,
+        eyeMatrix
       )
     }
   }
