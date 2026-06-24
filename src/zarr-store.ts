@@ -866,7 +866,7 @@ export class ZarrStore {
         this.multiscaleType = 'tiled'
         // A tiled pyramid is a chunked multiscale where each level is a single
         // array chunked at `pixels_per_tile`. Expose it as untiledLevels so the
-        // unified region renderer (UntiledMode) consumes the slippy tiles as
+        // unified region renderer (RegionRenderer) consumes the slippy tiles as
         // chunk-sized regions. `multiscaleType` stays 'tiled' to drive the
         // slippy-map metadata defaults in `_loadSpatialMetadata` (global extent,
         // latIsAscending=false, no coordinate-array reads).
@@ -877,7 +877,7 @@ export class ZarrStore {
         }))
         return { levels, maxLevelIndex, tileSize, crs }
       }
-      // Multi-level but not tiled - use UntiledMode
+      // Multi-level but not tiled - same RegionRenderer path
       this.untiledLevels = levels.map((level) => ({
         asset: level,
         scale: [1.0, 1.0] as [number, number],

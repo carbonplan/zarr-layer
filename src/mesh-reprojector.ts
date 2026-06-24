@@ -255,9 +255,8 @@ function lonLatToMerc(lon: number, lat: number): [number, number] {
  * and only becomes visible under pathological over-zoom — e.g. a 2000 km/pixel
  * custom-CRS (LCC) store at z24 yields ~1px. If a visible seam is ever reported
  * on real data, the proportionate fix is to subdivide the untiled mesh by
- * on-screen extent (extend subdivisionsForSpan in untiled-mode.ts) so each
- * region's rendered size — and thus the gap — stays bounded. The tiled path's
- * updateGeometryForProjection subdivision does NOT cover this (untiled) path.
+ * on-screen extent (extend subdivisionsForSpan in region-renderer.ts) so each
+ * region's rendered size — and thus the gap — stays bounded.
  *
  * Values may fall outside [-1, 1] for vertices beyond the region's nominal
  * extent (e.g. polar data past the 85° flat limit); that is intentional and

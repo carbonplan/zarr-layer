@@ -1,7 +1,7 @@
 /**
- * @module mode-utils
+ * @module region-utils
  *
- * Shared utilities for the ZarrMode implementation (UntiledMode).
+ * Shared utilities for the region renderer (RegionRenderer).
  * Provides common patterns for throttling, request cancellation, and loading state management.
  */
 
