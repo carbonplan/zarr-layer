@@ -11,10 +11,6 @@ import type {
   MapboxParams,
   RendererUniforms,
 } from './renderer-types'
-import { renderTiles } from './tile-renderer'
-import type { TileTuple, MercatorBounds } from './map-utils'
-import type { Tiles } from './tiles'
-
 export { type ShaderProgram } from './shader-program'
 
 export class ZarrRenderer {
@@ -168,42 +164,6 @@ export class ZarrRenderer {
     // source-projected flat path are uploaded PER REGION in renderRegion, where
     // the per-region mercator origin (shift_x, shift_y) is known. See
     // VERTEX_TO_WGS84_TO_MERCATOR.
-  }
-
-  renderTiles(
-    shaderProgram: ShaderProgram,
-    visibleTiles: TileTuple[],
-    worldOffsets: number[],
-    tileCache: Tiles,
-    tileSize: number,
-    vertexArr: Float32Array,
-    pixCoordArr: Float32Array,
-    tileBounds?: Record<string, MercatorBounds>,
-    customShaderConfig?: CustomShaderConfig,
-    isGlobeTileRender: boolean = false,
-    datasetMaxZoom?: number,
-    tileTexOverrides?: Record<
-      string,
-      { texScale: [number, number]; texOffset: [number, number] }
-    >,
-    latIsAscending: boolean = true
-  ): void {
-    renderTiles(
-      this.gl,
-      shaderProgram,
-      visibleTiles,
-      worldOffsets,
-      tileCache,
-      tileSize,
-      vertexArr,
-      pixCoordArr,
-      tileBounds,
-      customShaderConfig,
-      isGlobeTileRender,
-      datasetMaxZoom,
-      tileTexOverrides,
-      latIsAscending
-    )
   }
 
   dispose() {

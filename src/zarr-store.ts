@@ -10,7 +10,7 @@ import type {
   TransformRequest,
 } from './types'
 import type { XYLimits } from './map-utils'
-import { DEFAULT_TILE_SIZE } from './constants'
+import { DEFAULT_TILE_SIZE, WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
 
 interface PyramidMetadata {
@@ -577,10 +577,20 @@ export class ZarrStore {
       this.xyLimits = { xMin: west, xMax: east, yMin: south, yMax: north }
     }
 
-    // Tiled pyramids: use standard global extent if no explicit bounds
+    // Tiled pyramids: use the standard global slippy-map extent if no explicit
+    // bounds. The extent units depend on CRS — EPSG:3857 covers the full square
+    // Web Mercator world in meters, EPSG:4326 the full lon/lat range in degrees.
     if (this.multiscaleType === 'tiled') {
       if (!this.xyLimits) {
-        this.xyLimits = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
+        this.xyLimits =
+          this.crs === 'EPSG:3857'
+            ? {
+                xMin: -WEB_MERCATOR_EXTENT,
+                xMax: WEB_MERCATOR_EXTENT,
+                yMin: -WEB_MERCATOR_EXTENT,
+                yMax: WEB_MERCATOR_EXTENT,
+              }
+            : { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
       }
       if (!this._latIsAscendingUserSet) {
         this.latIsAscending = false // Tiled pyramids: row 0 = north
@@ -854,6 +864,17 @@ export class ZarrStore {
       // Otherwise, treat as untiled multi-level (each level is a complete image).
       if (tileSize) {
         this.multiscaleType = 'tiled'
+        // A tiled pyramid is a chunked multiscale where each level is a single
+        // array chunked at `pixels_per_tile`. Expose it as untiledLevels so the
+        // unified region renderer (UntiledMode) consumes the slippy tiles as
+        // chunk-sized regions. `multiscaleType` stays 'tiled' to drive the
+        // slippy-map metadata defaults in `_loadSpatialMetadata` (global extent,
+        // latIsAscending=false, no coordinate-array reads).
+        this.untiledLevels = levels.map((level) => ({
+          asset: level,
+          scale: [1.0, 1.0] as [number, number],
+          translation: [0.0, 0.0] as [number, number],
+        }))
         return { levels, maxLevelIndex, tileSize, crs }
       }
       // Multi-level but not tiled - use UntiledMode

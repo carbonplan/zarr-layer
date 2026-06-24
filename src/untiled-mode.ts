@@ -2143,7 +2143,6 @@ export class UntiledMode implements ZarrMode {
     // untiled ECEF path disables renderToTile at the layer level.
     return renderMapboxTile({
       renderer,
-      mode: this,
       tileId,
       context: {
         ...context,
@@ -2156,10 +2155,6 @@ export class UntiledMode implements ZarrMode {
   onProjectionChange(isGlobe: boolean): void {
     if (this.isGlobeProjection === isGlobe) return
     this.isGlobeProjection = isGlobe
-  }
-
-  getTiledState() {
-    return null
   }
 
   /**
@@ -2359,6 +2354,27 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
+    if (typeof value !== 'number' && typeof value !== 'string') {
+      return 0
+    }
+
+    // Multiscale pyramids (tiled and untiled alike) keep their non-spatial
+    // coordinate arrays inside each level directory (e.g. "0/month"), not at
+    // the store root. ZarrStore preloads those from the level-0 directory into
+    // `coordinates`, so prefer them — opening the same arrays at the root (as
+    // the fallback below does) would 404. The fallback covers single-level
+    // datasets, whose coordinate arrays live at the root and aren't preloaded.
+    const storeCoords = this.zarrStore.coordinates[dimName] as
+      | (number | string)[]
+      | undefined
+    if (storeCoords && storeCoords.length > 0) {
+      const idx = storeCoords.indexOf(value)
+      if (idx >= 0) return idx
+      // Value not present in the preloaded coordinate array: treat a numeric
+      // selector as a direct index, matching the previous tiled behavior.
+      return typeof value === 'number' ? value : 0
+    }
+
     if (!this.zarrStore.root) {
       return typeof value === 'number' ? value : 0
     }
@@ -2398,17 +2414,15 @@ export class UntiledMode implements ZarrMode {
       )
       this.dimensionValues[dimName] = coords
 
-      if (typeof value === 'number' || typeof value === 'string') {
-        const coordIdx = (coords as (number | string)[]).indexOf(value)
-        if (coordIdx >= 0) return coordIdx
-        throw new Error(
-          `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
-            `Available values: [${(coords as (number | string)[])
-              .slice(0, 10)
-              .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
-            `Use { selected: <index>, type: 'index' } to select by array index instead.`
-        )
-      }
+      const coordIdx = (coords as (number | string)[]).indexOf(value)
+      if (coordIdx >= 0) return coordIdx
+      throw new Error(
+        `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
+          `Available values: [${(coords as (number | string)[])
+            .slice(0, 10)
+            .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
+          `Use { selected: <index>, type: 'index' } to select by array index instead.`
+      )
     } catch (err) {
       console.debug(`Could not resolve coordinate for '${dimName}':`, err)
     }

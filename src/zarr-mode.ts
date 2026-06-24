@@ -1,6 +1,5 @@
-import type { MercatorBounds, TileTuple, XYLimits } from './map-utils'
+import type { MercatorBounds, XYLimits } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
-import type { Tiles } from './tiles'
 import type {
   CRS,
   LoadingStateCallback,
@@ -33,16 +32,6 @@ export interface TileId {
   z: number
   x: number
   y: number
-}
-
-export interface TiledRenderState {
-  tileCache: Tiles
-  visibleTiles: TileTuple[]
-  tileSize: number
-  vertexArr: Float32Array
-  pixCoordArr: Float32Array
-  tileBounds?: Record<string, MercatorBounds>
-  latIsAscending: boolean
 }
 
 export interface RegionRenderState {
@@ -95,7 +84,6 @@ export interface ZarrMode {
   getXYLimits(): XYLimits | null
   getMaxLevelIndex(): number
   getLevels(): string[]
-  getTiledState?(): TiledRenderState | null
 
   // Query methods (optional)
   queryData?(

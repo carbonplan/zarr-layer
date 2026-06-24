@@ -38,17 +38,6 @@ export interface QueryResult {
 }
 
 /**
- * Internal structure for point values during region iteration.
- * Used to build nested result structures.
- */
-export interface PointValueEntry {
-  /** Dimension keys for nested placement (empty for flat results) */
-  keys: (string | number)[]
-  /** The data value */
-  value: number
-}
-
-/**
  * Bounding box for a geographic region.
  */
 export interface BoundingBox {

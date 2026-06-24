@@ -1,9 +1,9 @@
 /**
  * @module renderable-region
  *
- * Unified rendering abstraction for both tiles and regions.
- * Both TiledMode and UntiledMode convert their data to this interface
- * for a single render path.
+ * Unified rendering abstraction for data regions.
+ * UntiledMode (flat/globe direct rendering) and the Mapbox tile renderer
+ * convert their regions to this interface for a single render path.
  */
 
 import type { MercatorBounds, Wgs84Bounds } from './map-utils'
