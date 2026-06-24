@@ -2363,10 +2363,35 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
+    // Multiscale pyramids keep per-dimension coordinate arrays under per-level
+    // paths (e.g. `0/band/c/0`), not at the root. Passing `null` here resolves
+    // the coordinate array from the root, which 404s for those datasets; the
+    // catch below then falls back to index 0 for every selector value. An RGB
+    // selection (red/green/blue by name) therefore collapses all three channels
+    // to band 0 and renders greyscale. Resolve the in-flight level's path
+    // instead, gated on `isMultiscale` so single-level datasets (coordinates at
+    // root) are unaffected. `loadLevel` calls `buildSliceArgsForSelector`
+    // (and so this) before committing `activeLevel`, so fall through
+    // activeLevel.index -> loadingLevelIndex -> desiredLevelIndex -> 0 to use
+    // the level the in-flight load is actually targeting.
+    let levelInfo: string | null = null
+    if (this.isMultiscale && this.levels.length > 0) {
+      const rawLevelIndex =
+        this.activeLevel?.index ??
+        this.loadingLevelIndex ??
+        this.desiredLevelIndex ??
+        0
+      const safeIdx = Math.max(
+        0,
+        Math.min(rawLevelIndex, this.levels.length - 1)
+      )
+      levelInfo = this.levels[safeIdx]?.asset ?? null
+    }
+
     try {
       const coords = await loadDimensionValues(
         this.dimensionValues,
-        null,
+        levelInfo,
         dimInfo,
         this.zarrStore.root,
         this.zarrStore.version
