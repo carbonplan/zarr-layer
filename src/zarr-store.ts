@@ -10,13 +10,12 @@ import type {
   TransformRequest,
 } from './types'
 import type { XYLimits } from './map-utils'
-import { DEFAULT_TILE_SIZE, WEB_MERCATOR_EXTENT } from './constants'
+import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
 
 interface PyramidMetadata {
   levels: string[]
   maxLevelIndex: number
-  tileSize: number
   crs: CRS
 }
 
@@ -76,7 +75,6 @@ interface StoreDescription {
   dtype: string | null
   levels: string[]
   maxLevelIndex: number
-  tileSize: number
   crs: CRS
   multiscaleType: 'tiled' | 'untiled' | 'none'
   untiledLevels: UntiledLevel[]
@@ -152,7 +150,6 @@ export class ZarrStore {
   dtype: string | null = null
   levels: string[] = []
   maxLevelIndex: number = 0
-  tileSize: number = DEFAULT_TILE_SIZE
   crs: CRS = 'EPSG:4326'
   multiscaleType: 'tiled' | 'untiled' | 'none' = 'none'
   untiledLevels: UntiledLevel[] = []
@@ -166,18 +163,6 @@ export class ZarrStore {
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
-
-  /**
-   * Returns the coarsest (lowest resolution) level path.
-   * - Tiled pyramids: level 0 is coarsest
-   * - Untiled multiscale: last level (maxLevelIndex) is coarsest
-   */
-  get coarsestLevel(): string | undefined {
-    if (this.levels.length === 0) return undefined
-    return this.multiscaleType === 'untiled'
-      ? this.levels[this.maxLevelIndex]
-      : this.levels[0]
-  }
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -330,7 +315,6 @@ export class ZarrStore {
       dtype: this.dtype,
       levels: this.levels,
       maxLevelIndex: this.maxLevelIndex,
-      tileSize: this.tileSize,
       crs: this.crs,
       multiscaleType: this.multiscaleType,
       untiledLevels: this.untiledLevels,
@@ -462,7 +446,6 @@ export class ZarrStore {
       )
       this.levels = pyramid.levels
       this.maxLevelIndex = pyramid.maxLevelIndex
-      this.tileSize = pyramid.tileSize
       if (!this._crsOverride) {
         this.crs = pyramid.crs
       }
@@ -836,7 +819,6 @@ export class ZarrStore {
       return {
         levels: [],
         maxLevelIndex: 0,
-        tileSize: DEFAULT_TILE_SIZE,
         crs: this.crs,
       }
     }
@@ -855,36 +837,24 @@ export class ZarrStore {
       const datasets = multiscales[0].datasets
       const levels = datasets.map((dataset) => String(dataset.path))
       const maxLevelIndex = levels.length - 1
-      const tileSize = datasets[0].pixels_per_tile
+      const pixelsPerTile = datasets[0].pixels_per_tile
       // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
       const crs: CRS =
         (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
 
-      // If pixels_per_tile is present, this is a tiled pyramid (slippy map tiles).
-      // Otherwise, treat as untiled multi-level (each level is a complete image).
-      if (tileSize) {
-        this.multiscaleType = 'tiled'
-        // A tiled pyramid is a chunked multiscale where each level is a single
-        // array chunked at `pixels_per_tile`. Expose it as untiledLevels so the
-        // unified region renderer (RegionRenderer) consumes the slippy tiles as
-        // chunk-sized regions. `multiscaleType` stays 'tiled' to drive the
-        // slippy-map metadata defaults in `_loadSpatialMetadata` (global extent,
-        // latIsAscending=false, no coordinate-array reads).
-        this.untiledLevels = levels.map((level) => ({
-          asset: level,
-          scale: [1.0, 1.0] as [number, number],
-          translation: [0.0, 0.0] as [number, number],
-        }))
-        return { levels, maxLevelIndex, tileSize, crs }
-      }
-      // Multi-level but not tiled - same RegionRenderer path
+      // Every level is a single array, so both shapes expose their levels as
+      // untiledLevels for the unified region renderer. A tiled pyramid
+      // (pixels_per_tile present) is just a multiscale chunked at the tile size;
+      // the 'tiled' classification is retained only to drive slippy-map metadata
+      // defaults in `_loadSpatialMetadata` (global extent, latIsAscending=false,
+      // no coordinate-array reads).
+      this.multiscaleType = pixelsPerTile ? 'tiled' : 'untiled'
       this.untiledLevels = levels.map((level) => ({
         asset: level,
         scale: [1.0, 1.0] as [number, number],
         translation: [0.0, 0.0] as [number, number],
       }))
-      this.multiscaleType = 'untiled'
-      return { levels, maxLevelIndex, tileSize: DEFAULT_TILE_SIZE, crs }
+      return { levels, maxLevelIndex, crs }
     }
 
     return singleLevelUntiled()
@@ -940,7 +910,6 @@ export class ZarrStore {
     return {
       levels,
       maxLevelIndex,
-      tileSize: DEFAULT_TILE_SIZE, // Will be overridden by chunk shape
       crs,
     }
   }

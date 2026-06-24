@@ -75,7 +75,6 @@ export interface RegionRenderState {
   mercatorBounds: MercatorBounds
   width: number
   height: number
-  channels: number
   /** Data orientation: true = row 0 is south */
   latIsAscending: boolean
   /** Band textures for multi-band custom shaders */

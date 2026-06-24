@@ -190,8 +190,6 @@ type QueryLevelSnapshot = Pick<
 export class RegionRenderer {
   isMultiscale: boolean = false
 
-  private channels: number = 1
-
   // The single committed snapshot. All per-level state (array, dims, slice
   // args) is swapped atomically through `loadLevel()`; nothing else mutates
   // these fields.
@@ -2175,7 +2173,6 @@ export class RegionRenderer {
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
-      channels: this.channels,
       bandData: region.bandData,
       bandTextures: region.bandTextures,
       bandTexturesUploaded: region.bandTexturesUploaded,
@@ -2206,14 +2203,6 @@ export class RegionRenderer {
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
     setLoadingCallbackUtil(this.loadingManager, callback)
-  }
-
-  getCRS(): CRS {
-    return this.crs
-  }
-
-  getXYLimits(): XYLimits | null {
-    return this.xyLimits
   }
 
   /**
@@ -2274,14 +2263,6 @@ export class RegionRenderer {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     return result
-  }
-
-  getMaxLevelIndex(): number {
-    return this.levels.length > 0 ? this.levels.length - 1 : 0
-  }
-
-  getLevels(): string[] {
-    return this.levels.map((l) => l.asset)
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {

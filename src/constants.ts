@@ -1,4 +1,3 @@
-export const DEFAULT_TILE_SIZE = 128
 export const MERCATOR_LAT_LIMIT = 85.05112878
 
 /** Default maximum error threshold for adaptive mesh refinement (in pixels) */
