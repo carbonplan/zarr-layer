@@ -6,8 +6,7 @@
  * Matches carbonplan/maps structure and behavior.
  */
 
-import type { ZarrStore } from '../zarr-store'
-import type { Bounds, CRS, DimIndicesProps, Selector } from '../types'
+import type { Bounds, DimIndicesProps, Selector } from '../types'
 import { pixelToSourceCRS } from '../projection-utils'
 import type {
   QueryGeometry,

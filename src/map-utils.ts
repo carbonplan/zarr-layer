@@ -174,29 +174,6 @@ function lonToMercatorNormWrapped(lon: number): number {
   return (wrapped + 180) / 360
 }
 
-// === Geometry & projection utilities ===
-
-/**
- * Convert a geographic coordinate to an array index.
- * Used for mapping viewport bounds to array pixel coordinates.
- * @param geo - Geographic coordinate value (lon or lat).
- * @param geoMin - Minimum geographic extent.
- * @param geoMax - Maximum geographic extent.
- * @param arraySize - Size of the array in this dimension.
- * @returns Array index (integer).
- */
-export function geoToArrayIndex(
-  geo: number,
-  geoMin: number,
-  geoMax: number,
-  arraySize: number
-): number {
-  const normalized = (geo - geoMin) / (geoMax - geoMin)
-  return Math.floor(
-    Math.max(0, Math.min(arraySize - 1, normalized * arraySize))
-  )
-}
-
 // === Projection utilities ===
 
 /**

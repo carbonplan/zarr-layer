@@ -217,7 +217,6 @@ export class RegionRenderer {
   private invalidate: () => void
   private dimIndices: DimIndicesProps = {}
   private xyLimits: XYLimits | null = null
-  private crs: CRS = 'EPSG:4326'
   private latIsAscending: boolean = true
 
   // Multi-level support
@@ -298,7 +297,6 @@ export class RegionRenderer {
     try {
       const desc = this.zarrStore.describe()
       this.dimIndices = desc.dimIndices
-      this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
       this.projectionKind = resolveProjectionKind(desc.crs, desc.proj4)

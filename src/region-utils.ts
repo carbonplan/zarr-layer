@@ -24,21 +24,6 @@ export function createRequestCanceller(): RequestCanceller {
 }
 
 /**
- * Cancel all requests older than the completed version.
- */
-export function cancelOlderRequests(
-  canceller: RequestCanceller,
-  completedVersion: number
-): void {
-  for (const [version, controller] of canceller.controllers) {
-    if (version < completedVersion) {
-      controller.abort()
-      canceller.controllers.delete(version)
-    }
-  }
-}
-
-/**
  * Cancel all pending requests.
  */
 export function cancelAllRequests(canceller: RequestCanceller): void {

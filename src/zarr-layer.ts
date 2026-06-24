@@ -14,7 +14,7 @@ import {
   hashSelector,
 } from './zarr-utils'
 import { ZarrStore } from './zarr-store'
-import { maplibreFragmentShaderSource, type ShaderData } from './shaders'
+import { maplibreFragmentShaderSource } from './shaders'
 import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
