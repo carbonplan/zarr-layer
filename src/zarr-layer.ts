@@ -30,8 +30,8 @@ import type {
   ZarrLayerOptions,
   TransformRequest,
 } from './types'
-import type { ZarrMode, RenderContext } from './zarr-mode'
-import { UntiledMode } from './untiled-mode'
+import type { RenderContext } from './renderer-types'
+import { RegionRenderer } from './region-renderer'
 import {
   computeWorldOffsets,
   resolveProjectionParams,
@@ -131,7 +131,7 @@ export class ZarrLayer {
   private gl: WebGL2RenderingContext | undefined
   private map: MapLike | null = null
   private renderer: ZarrRenderer | null = null
-  private mode: ZarrMode | null = null
+  private regionRenderer: RegionRenderer | null = null
   private tileNeedsRender: boolean = true
 
   private projectionChangeHandler: (() => void) | null = null
@@ -208,9 +208,8 @@ export class ZarrLayer {
   }
 
   private configureMapboxRenderPath(): void {
-    if (!this.map || !this.mode) return
+    if (!this.map || !this.regionRenderer) return
 
-    const isUntiled = this.mode instanceof UntiledMode
     const resolvedProj4 = this.zarrStore?.proj4 ?? this.proj4
     const resolvedCrs = this.zarrStore?.crs ?? this.crs
     const isEcefEligible = !!resolvedProj4 || resolvedCrs === 'EPSG:4326'
@@ -220,8 +219,8 @@ export class ZarrLayer {
         ? mapboxGlobeToMercatorTransition(this.map.getZoom())
         : 1
     // FRAGILE: Mapbox classifies a custom layer as draped whenever renderToTile
-    // exists. We use the direct globe path only for untiled, terrain-off,
-    // ECEF-eligible datasets at the fully-globe endpoint. During the zoom morph,
+    // exists. We use the direct globe path only for terrain-off, ECEF-eligible
+    // datasets at the fully-globe endpoint. During the zoom morph,
     // restore the draped path so Mapbox handles the transition itself with its
     // internal globe/mercator matrices. This means polar coverage can snap back
     // to the draped path near the 5-6 zoom morph window; that is intentional,
@@ -231,7 +230,6 @@ export class ZarrLayer {
     // doubles as the Mapbox discriminator — MapLibre will never pass this gate.
     const shouldUseDirectGlobePath =
       this.renderPoles &&
-      isUntiled &&
       isEcefEligible &&
       !this.map.getTerrain?.() &&
       isGlobe &&
@@ -270,7 +268,7 @@ export class ZarrLayer {
   private syncProjectionState(): boolean {
     const isGlobe = this.isGlobeProjection()
     if (this.lastIsGlobe !== null && this.lastIsGlobe !== isGlobe) {
-      this.mode?.onProjectionChange(isGlobe)
+      this.regionRenderer?.onProjectionChange(isGlobe)
     }
     this.lastIsGlobe = isGlobe
     return isGlobe
@@ -409,7 +407,7 @@ export class ZarrLayer {
       // refetch cached tiles through the decoded-chunk cache so textures
       // are re-normalized.
       this.fixedDataScale = nextScale
-      this.mode?.setDataScale(nextScale)
+      this.regionRenderer?.setDataScale(nextScale)
     }
     this.invalidate()
   }
@@ -458,14 +456,14 @@ export class ZarrLayer {
         1
       )
       await this.initialize()
-      await this.initializeMode()
+      await this.initializeRenderer()
       this.invalidate()
     } catch (err) {
       this.initError = err instanceof Error ? err : new Error(String(err))
       console.error('[zarr-layer] Failed to reset:', this.initError.message)
-      if (this.mode && this.gl) {
-        this.mode.dispose(this.gl)
-        this.mode = null
+      if (this.regionRenderer && this.gl) {
+        this.regionRenderer.dispose(this.gl)
+        this.regionRenderer = null
       }
       if (this.zarrStore) {
         this.zarrStore.cleanup()
@@ -498,8 +496,8 @@ export class ZarrLayer {
       this.customShaderConfig = null
     }
 
-    if (this.mode) {
-      await this.mode.setSelector(this.normalizedSelector)
+    if (this.regionRenderer) {
+      await this.regionRenderer.setSelector(this.normalizedSelector)
     }
     this.invalidate()
   }
@@ -537,7 +535,7 @@ export class ZarrLayer {
       this.projectionChangeHandler = () => {
         const isGlobe = this.isGlobeProjection()
         if (this.lastIsGlobe !== isGlobe) {
-          this.mode?.onProjectionChange(isGlobe)
+          this.regionRenderer?.onProjectionChange(isGlobe)
           this.lastIsGlobe = isGlobe
         }
         this.configureMapboxRenderPath()
@@ -549,14 +547,14 @@ export class ZarrLayer {
       }
 
       await this.initialize()
-      await this.initializeMode()
+      await this.initializeRenderer()
       this.configureMapboxRenderPath()
 
       const isGlobe = this.isGlobeProjection()
       this.lastIsGlobe = isGlobe
-      this.mode?.onProjectionChange(isGlobe)
+      this.regionRenderer?.onProjectionChange(isGlobe)
 
-      this.mode?.update(this.map, this.gl!)
+      this.regionRenderer?.update(this.map, this.gl!)
     } catch (err) {
       this.initError = err instanceof Error ? err : new Error(String(err))
       console.error(
@@ -574,19 +572,19 @@ export class ZarrLayer {
     }
   }
 
-  private async initializeMode() {
+  private async initializeRenderer() {
     if (!this.zarrStore || !this.gl) return
 
-    if (this.mode) {
-      this.mode.dispose(this.gl)
+    if (this.regionRenderer) {
+      this.regionRenderer.dispose(this.gl)
     }
 
     // Every dataset renders through the unified region renderer. Tiled
     // pyramids, untiled multiscales, and single-level datasets all reach
-    // UntiledMode: a tiled pyramid is just a multiscale whose levels are
+    // RegionRenderer: a tiled pyramid is just a multiscale whose levels are
     // single arrays chunked at the tile size, surfaced as `untiledLevels`
     // (see ZarrStore._getPyramidMetadata).
-    this.mode = new UntiledMode(
+    this.regionRenderer = new RegionRenderer(
       this.zarrStore,
       this.variable,
       this.normalizedSelector,
@@ -594,14 +592,14 @@ export class ZarrLayer {
       this.fixedDataScale
     )
 
-    // Lock immediately after mode captures the value, before async initialize()
+    // Lock immediately after the renderer captures the value, before async initialize()
     this.dataScaleLocked = true
 
-    this.mode.setLoadingCallback(this.handleChunkLoadingChange)
-    await this.mode.initialize()
+    this.regionRenderer.setLoadingCallback(this.handleChunkLoadingChange)
+    await this.regionRenderer.initialize()
 
     if (this.map && this.gl) {
-      this.mode.update(this.map, this.gl)
+      this.regionRenderer.update(this.map, this.gl)
     }
   }
 
@@ -705,11 +703,11 @@ export class ZarrLayer {
     _gl: WebGL2RenderingContext | WebGLRenderingContext,
     _params: unknown
   ) {
-    if (this.isRemoved || !this.gl || !this.mode || !this.map) return
+    if (this.isRemoved || !this.gl || !this.regionRenderer || !this.map) return
     if (!this.isZoomInRange()) return
 
     this.syncProjectionState()
-    this.mode.update(this.map, this.gl)
+    this.regionRenderer.update(this.map, this.gl)
   }
 
   render(
@@ -725,7 +723,7 @@ export class ZarrLayer {
       this.isRemoved ||
       !this.renderer ||
       !this.gl ||
-      !this.mode ||
+      !this.regionRenderer ||
       !this.map
     ) {
       return
@@ -807,7 +805,7 @@ export class ZarrLayer {
         : legacyMapboxFallback,
     }
 
-    this.mode.render(this.renderer, context)
+    this.regionRenderer.render(this.renderer, context)
 
     this.tileNeedsRender = false
   }
@@ -820,7 +818,7 @@ export class ZarrLayer {
       this.isRemoved ||
       !this.renderer ||
       !this.gl ||
-      !this.mode ||
+      !this.regionRenderer ||
       !this.map
     ) {
       return
@@ -829,7 +827,7 @@ export class ZarrLayer {
     this.configureMapboxRenderPath()
 
     const isGlobe = this.syncProjectionState()
-    this.mode.update(this.map, this.gl)
+    this.regionRenderer.update(this.map, this.gl)
 
     const colormapTexture = this.colormap.ensureTexture(this.gl)
 
@@ -850,8 +848,11 @@ export class ZarrLayer {
       isGlobe,
     }
 
-    this.tileNeedsRender =
-      this.mode.renderToTile?.(this.renderer, tileId, context) ?? false
+    this.tileNeedsRender = this.regionRenderer.renderToTile(
+      this.renderer,
+      tileId,
+      context
+    )
   }
 
   // Mapbox specific custom layer method required to trigger rerender on eg dataset update.
@@ -875,8 +876,8 @@ export class ZarrLayer {
 
     this.colormap.dispose(gl)
 
-    this.mode?.dispose(gl)
-    this.mode = null
+    this.regionRenderer?.dispose(gl)
+    this.regionRenderer = null
 
     if (this.zarrStore) {
       this.zarrStore.cleanup()
@@ -912,13 +913,13 @@ export class ZarrLayer {
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
-    if (!this.mode?.queryData) {
+    if (!this.regionRenderer) {
       return {
         [this.variable]: [],
         dimensions: [],
         coordinates: {},
       }
     }
-    return this.mode.queryData(geometry, selector, options)
+    return this.regionRenderer.queryData(geometry, selector, options)
   }
 }

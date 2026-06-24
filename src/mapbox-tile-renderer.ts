@@ -12,7 +12,7 @@
  */
 
 import type { ZarrRenderer } from './zarr-renderer'
-import type { RenderContext, TileId, RegionRenderState } from './zarr-mode'
+import type { RenderContext, TileId, RegionRenderState } from './renderer-types'
 import { setupBandTextureUniforms } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 import {

@@ -1,11 +1,13 @@
 /**
- * @module untiled-mode
+ * @module region-renderer
  *
- * Unified mode for non-tiled Zarr datasets.
- * Handles both single-level datasets and multi-level datasets following
- * the zarr-conventions/multiscales standard. Loads full images at each
- * resolution level (not slippy map tiles) with automatic level selection
- * based on map zoom.
+ * The unified renderer for every Zarr dataset. Reads the visible region of a
+ * resolution level as chunk-sized sub-rectangles, reprojects each onto an
+ * adaptive source→WGS84 mesh, and lets the GPU project to Mercator or ECEF.
+ * Handles single-level datasets, untiled multiscale pyramids, and tiled
+ * (slippy-map) pyramids alike — a tiled pyramid is just a multiscale whose
+ * levels are arrays chunked at the tile size (see ZarrStore). Automatic level
+ * selection is driven by map zoom.
  */
 
 import * as zarr from 'zarrita'
@@ -16,11 +18,11 @@ import {
   MERCATOR_LAT_LIMIT,
 } from './constants'
 import type {
-  ZarrMode,
   RenderContext,
   TileId,
   RegionRenderState,
-} from './zarr-mode'
+  CustomShaderConfig,
+} from './renderer-types'
 import type {
   QueryGeometry,
   QueryOptions,
@@ -49,7 +51,6 @@ import {
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
-import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-tile-renderer'
 import { queryRegionUntiled, findSpatialDimNames } from './query/region-query'
 import {
@@ -78,7 +79,7 @@ import {
   hasActiveRequests,
   setLoadingCallback as setLoadingCallbackUtil,
   emitLoadingState as emitLoadingStateUtil,
-} from './mode-utils'
+} from './region-utils'
 import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 
@@ -163,7 +164,7 @@ interface LevelSnapshot {
  * `_initialize`, and `setSelector` — any of which was one `await` away from
  * a half-commit race.
  *
- * `UntiledMode.activeLevel` is either `null` (nothing loaded) or a fully-
+ * `RegionRenderer.activeLevel` is either `null` (nothing loaded) or a fully-
  * formed runtime; readers never see a partial level.
  */
 interface LevelRuntime {
@@ -186,7 +187,7 @@ type QueryLevelSnapshot = Pick<
   'index' | 'zarrArray' | 'width' | 'height'
 >
 
-export class UntiledMode implements ZarrMode {
+export class RegionRenderer {
   isMultiscale: boolean = false
 
   private channels: number = 1
@@ -364,7 +365,7 @@ export class UntiledMode implements ZarrMode {
           this.mercatorBounds = this.computeMercatorBoundsFromProjection()
         }
       } else {
-        console.warn('UntiledMode: No XY limits found')
+        console.warn('RegionRenderer: No XY limits found')
       }
     } finally {
       this.loadingManager.metadataLoading = false

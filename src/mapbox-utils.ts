@@ -5,7 +5,7 @@
  * These are NOT used by MapLibre, which uses projectTile() in the shader.
  */
 
-import type { TileId } from './zarr-mode'
+import type { TileId } from './renderer-types'
 
 /** Identity matrix for Mapbox tile rendering (no additional transformation) */
 export const MAPBOX_IDENTITY_MATRIX = new Float32Array([

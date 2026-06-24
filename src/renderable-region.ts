@@ -2,7 +2,7 @@
  * @module renderable-region
  *
  * Unified rendering abstraction for data regions.
- * UntiledMode (flat/globe direct rendering) and the Mapbox tile renderer
+ * RegionRenderer (flat/globe direct rendering) and the Mapbox tile renderer
  * convert their regions to this interface for a single render path.
  */
 
