@@ -174,7 +174,7 @@ function lonToMercatorNormWrapped(lon: number): number {
   return (wrapped + 180) / 360
 }
 
-// === Untiled mode utilities ===
+// === Geometry & projection utilities ===
 
 /**
  * Convert a geographic coordinate to an array index.

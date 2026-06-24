@@ -73,7 +73,7 @@ function renderRegionsToTile(
   // Determine if we're in globe mode (default true for backwards compatibility)
   const isGlobe = context.isGlobe ?? true
 
-  // Check if any untiled region uses source-projected mesh positions.
+  // Check if any region uses source-projected mesh positions.
   const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
 
   // Always use Mapbox globe shader for tile rendering - it handles both globe and mercator

@@ -1963,7 +1963,7 @@ export class RegionRenderer {
       levelResolutions.push({ index: i, effectivePixels })
     }
 
-    // If no levels have shape data yet, return last index (lowest res for untiled)
+    // If no levels have shape data yet, fall back to the last level index
     if (levelResolutions.length === 0) return this.levels.length - 1
 
     // Sort by resolution ascending (lowest res first)
@@ -2139,7 +2139,7 @@ export class RegionRenderer {
     context: RenderContext
   ): boolean {
     // This method is only used for draped Mapbox rendering. The direct
-    // untiled ECEF path disables renderToTile at the layer level.
+    // ECEF path disables renderToTile at the layer level.
     return renderMapboxTile({
       renderer,
       tileId,
@@ -2353,7 +2353,7 @@ export class RegionRenderer {
       const idx = storeCoords.indexOf(value)
       if (idx >= 0) return idx
       // Value not present in the preloaded coordinate array: treat a numeric
-      // selector as a direct index, matching the previous tiled behavior.
+      // selector as a direct index.
       return typeof value === 'number' ? value : 0
     }
 

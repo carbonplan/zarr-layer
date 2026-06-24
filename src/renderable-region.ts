@@ -35,7 +35,7 @@ export interface RenderableRegion {
   // Resolved by ZarrStore during init
   latIsAscending: boolean
 
-  // Render-time mode fields (computed in regionToRenderable, not cached on RegionState)
+  // Render-time fields (computed in regionToRenderable, not cached on RegionState)
   // Defaults when unset: positionSpace = wgs84Bounds ? 'wgs84' : 'mercator'
   //                      sampleMode = 'linear'
   positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
@@ -51,10 +51,6 @@ export interface RenderableRegion {
   bandTexturesConfigured: Set<string>
   width: number
   height: number
-
-  // Texture transform (for parent tile fallback, defaults to identity)
-  texScale?: [number, number]
-  texOffset?: [number, number]
 
   // Callbacks for lazy resource creation
   ensureBandTexture?: (bandName: string) => WebGLTexture | null
@@ -135,12 +131,6 @@ export function renderRegion(
       eyeM instanceof Float32Array ? eyeM : new Float32Array(eyeM)
     )
   }
-
-  // Set texture transform (for parent tile fallback)
-  const texScale = region.texScale ?? [1, 1]
-  const texOffset = region.texOffset ?? [0, 0]
-  gl.uniform2f(shaderProgram.texScaleLoc, texScale[0], texScale[1])
-  gl.uniform2f(shaderProgram.texOffsetLoc, texOffset[0], texOffset[1])
 
   // Set fragment shader reprojection uniforms based on sample mode
   const needsLatLookup =

@@ -842,12 +842,11 @@ export class ZarrStore {
       const crs: CRS =
         (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
 
-      // Every level is a single array, so both shapes expose their levels as
-      // untiledLevels for the unified region renderer. A tiled pyramid
-      // (pixels_per_tile present) is just a multiscale chunked at the tile size;
-      // the 'tiled' classification is retained only to drive slippy-map metadata
-      // defaults in `_loadSpatialMetadata` (global extent, latIsAscending=false,
-      // no coordinate-array reads).
+      // Both shapes expose their levels as untiledLevels; only the
+      // classification differs. `pixels_per_tile` marks a slippy-map pyramid,
+      // kept as 'tiled' purely to drive its metadata defaults in
+      // `_loadSpatialMetadata` (global extent, latIsAscending=false, no
+      // coordinate-array reads).
       this.multiscaleType = pixelsPerTile ? 'tiled' : 'untiled'
       this.untiledLevels = levels.map((level) => ({
         asset: level,

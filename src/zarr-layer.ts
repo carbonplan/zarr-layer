@@ -125,7 +125,7 @@ export class ZarrLayer {
   private scaleFactor: number = 1
   private offset: number = 0
   private fixedDataScale: number
-  // Once true, fixedDataScale is locked (mode has captured it)
+  // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
   private gl: WebGL2RenderingContext | undefined
@@ -392,7 +392,7 @@ export class ZarrLayer {
   setClim(clim: [number, number]) {
     this.clim = clim
     const nextScale = Math.max(Math.abs(clim[0]), Math.abs(clim[1]), 1)
-    // Allow fixedDataScale to update until mode captures it
+    // Allow fixedDataScale to update until the renderer captures it
     if (!this.dataScaleLocked) {
       this.fixedDataScale = nextScale
     } else if (
@@ -448,7 +448,7 @@ export class ZarrLayer {
       }
       this.dimensionValues = {}
       this._fillValue = null
-      // Reset and recompute fixedDataScale from current clim for new mode
+      // Reset and recompute fixedDataScale from current clim for the new dataset
       this.dataScaleLocked = false
       this.fixedDataScale = Math.max(
         Math.abs(this.clim[0]),
@@ -579,11 +579,9 @@ export class ZarrLayer {
       this.regionRenderer.dispose(this.gl)
     }
 
-    // Every dataset renders through the unified region renderer. Tiled
-    // pyramids, untiled multiscales, and single-level datasets all reach
-    // RegionRenderer: a tiled pyramid is just a multiscale whose levels are
-    // single arrays chunked at the tile size, surfaced as `untiledLevels`
-    // (see ZarrStore._getPyramidMetadata).
+    // One renderer for every dataset — no per-type branching. A tiled pyramid
+    // reaches it as a multiscale whose levels are arrays chunked at the tile
+    // size, surfaced as `untiledLevels` by ZarrStore.
     this.regionRenderer = new RegionRenderer(
       this.zarrStore,
       this.variable,
