@@ -31,7 +31,6 @@ import type {
   TransformRequest,
 } from './types'
 import type { ZarrMode, RenderContext } from './zarr-mode'
-import { TiledMode } from './tiled-mode'
 import { UntiledMode } from './untiled-mode'
 import {
   computeWorldOffsets,
@@ -582,30 +581,18 @@ export class ZarrLayer {
       this.mode.dispose(this.gl)
     }
 
-    const desc = this.zarrStore.describe()
-
-    // Mode selection based on auto-detected metadata format:
-    // - 'tiled' = OME-NGFF style with slippy map tile convention
-    // - 'untiled' = zarr-conventions/multiscales format or single-level
-    // - 'none' = single-level dataset (also uses UntiledMode)
-    if (desc.multiscaleType === 'tiled') {
-      this.mode = new TiledMode(
-        this.zarrStore,
-        this.variable,
-        this.normalizedSelector,
-        this.invalidate,
-        this.fixedDataScale
-      )
-    } else {
-      // Use UntiledMode for untiled multiscales and single-level datasets
-      this.mode = new UntiledMode(
-        this.zarrStore,
-        this.variable,
-        this.normalizedSelector,
-        this.invalidate,
-        this.fixedDataScale
-      )
-    }
+    // Every dataset renders through the unified region renderer. Tiled
+    // pyramids, untiled multiscales, and single-level datasets all reach
+    // UntiledMode: a tiled pyramid is just a multiscale whose levels are
+    // single arrays chunked at the tile size, surfaced as `untiledLevels`
+    // (see ZarrStore._getPyramidMetadata).
+    this.mode = new UntiledMode(
+      this.zarrStore,
+      this.variable,
+      this.normalizedSelector,
+      this.invalidate,
+      this.fixedDataScale
+    )
 
     // Lock immediately after mode captures the value, before async initialize()
     this.dataScaleLocked = true

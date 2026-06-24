@@ -5,14 +5,7 @@
  * mercator corrections, and point-in-polygon tests.
  */
 
-import {
-  getTilesAtZoom,
-  getTilesAtZoomEquirect,
-  lonToMercatorNorm,
-  type TileTuple,
-  type XYLimits,
-} from '../map-utils'
-import { WEB_MERCATOR_EXTENT } from '../constants'
+import type { XYLimits } from '../map-utils'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
 import {
@@ -47,75 +40,6 @@ export function rasterExtentCrossesAntimeridian(
 export type CachedTransformer = ReturnType<
   typeof createWGS84ToSourceTransformer
 >
-
-/**
- * Computes fractional position within a tile for a geographic point.
- * Returns values in [0, 1] representing position within the tile.
- */
-function geoToTileFraction(
-  lng: number,
-  lat: number,
-  tile: TileTuple,
-  crs: CRS,
-  xyLimits: XYLimits
-): { fracX: number; fracY: number } {
-  const [z, x, y] = tile
-  const z2 = Math.pow(2, z)
-
-  if (crs === 'EPSG:4326') {
-    const { xMin, xMax, yMin, yMax } = xyLimits
-    const xSpan = xMax - xMin
-    const ySpan = yMax - yMin
-
-    const globalFracX = (lng - xMin) / xSpan
-    const globalFracY = (yMax - lat) / ySpan
-
-    const fracX = globalFracX * z2 - x
-    const fracY = globalFracY * z2 - y
-
-    return { fracX, fracY }
-  }
-
-  const globalFracX = lonToMercatorNorm(lng)
-  const sin = Math.sin((lat * Math.PI) / 180)
-  const globalFracY = 0.5 - (0.25 * Math.log((1 + sin) / (1 - sin))) / Math.PI
-
-  const fracX = globalFracX * z2 - x
-  const fracY = globalFracY * z2 - y
-
-  return { fracX, fracY }
-}
-
-/**
- * Converts a tile-pixel position to source-CRS coordinates [x, y].
- *
- * EPSG:4326 tile pyramids: returns [lon, lat] in degrees, against xyLimits.
- * EPSG:3857 tile pyramids: returns [x, y] in Web Mercator meters.
- */
-export function tilePixelToSourceCRS(
-  tile: TileTuple,
-  pixelX: number,
-  pixelY: number,
-  tileSize: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): [number, number] {
-  const [z, x, y] = tile
-  const z2 = Math.pow(2, z)
-  const fracX = (x + pixelX / tileSize) / z2
-  const fracY = (y + pixelY / tileSize) / z2
-
-  if (crs === 'EPSG:4326') {
-    const { xMin, xMax, yMin, yMax } = xyLimits
-    return [xMin + fracX * (xMax - xMin), yMax - fracY * (yMax - yMin)]
-  }
-
-  // EPSG:3857: tile fractions map linearly to Web Mercator meters.
-  return [
-    (fracX * 2 - 1) * WEB_MERCATOR_EXTENT,
-    (1 - fracY * 2) * WEB_MERCATOR_EXTENT,
-  ]
-}
 
 /**
  * Computes bounding box from GeoJSON geometry.
@@ -410,75 +334,6 @@ export function transformGeometryToPixelSpace(
 }
 
 /**
- * Transform a query geometry from WGS84 lon/lat into tile-pixel coordinates.
- * For EPSG:3857 the lat→Y mapping is nonlinear, so edges are densified.
- * For EPSG:4326 the mapping is linear and vertices are transformed directly.
- */
-export function transformGeometryToTilePixelSpace(
-  geometry: QueryGeometry,
-  tile: TileTuple,
-  tileSize: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): QueryGeometry | null {
-  const transformVertex = (lon: number, lat: number): [number, number] => {
-    const [clampedLon, clampedLat] = clampLatLonToProj4def(lon, lat, crs)
-    const { fracX, fracY } = geoToTileFraction(
-      clampedLon,
-      clampedLat,
-      tile,
-      crs,
-      xyLimits
-    )
-    return [fracX * tileSize, fracY * tileSize]
-  }
-
-  if (geometry.type === 'Point') {
-    const [lon, lat] = geometry.coordinates
-    const pt = transformVertex(lon, lat)
-    if (!isFinite(pt[0]) || !isFinite(pt[1])) return null
-    return { type: 'Point', coordinates: [pt[0], pt[1]] }
-  }
-
-  // EPSG:3857 is nonlinear in Y; EPSG:4326 is linear
-  const needsDensification = crs !== 'EPSG:4326'
-
-  const transformRing = (ring: number[][]): number[][] => {
-    if (needsDensification) {
-      return densifyAndTransformRing(ring, transformVertex)
-    }
-    const result: number[][] = []
-    for (const [lon, lat] of ring) {
-      const pt = transformVertex(lon, lat)
-      if (isFinite(pt[0]) && isFinite(pt[1])) {
-        result.push(pt as number[])
-      }
-    }
-    if (
-      result.length > 1 &&
-      (result[0][0] !== result[result.length - 1][0] ||
-        result[0][1] !== result[result.length - 1][1])
-    ) {
-      result.push([result[0][0], result[0][1]])
-    }
-    return result
-  }
-
-  if (geometry.type === 'Polygon') {
-    const coords = geometry.coordinates.map(transformRing)
-    if (coords[0].length < 4) return null
-    return { type: 'Polygon', coordinates: coords }
-  }
-
-  const coords = geometry.coordinates.map((polygon) =>
-    polygon.map(transformRing)
-  )
-  const valid = coords.filter((poly) => poly[0].length >= 4)
-  if (valid.length === 0) return null
-  return { type: 'MultiPolygon', coordinates: valid }
-}
-
-/**
  * Convert a single WGS84 lon/lat to source-CRS pixel coordinates.
  */
 function lonLatToPixel(
@@ -629,40 +484,6 @@ export function buildScanlineTable(
     }
   }
   return merged
-}
-
-/**
- * Gets tiles that intersect a bounding box at a given zoom level.
- */
-export function getTilesForBoundingBox(
-  bbox: BoundingBox,
-  zoom: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): TileTuple[] {
-  const bounds: [[number, number], [number, number]] = [
-    [bbox.west, bbox.south],
-    [bbox.east, bbox.north],
-  ]
-
-  if (crs === 'EPSG:4326') {
-    return getTilesAtZoomEquirect(zoom, bounds, xyLimits)
-  }
-
-  return getTilesAtZoom(zoom, bounds)
-}
-
-/**
- * Gets tiles that intersect a GeoJSON geometry at a given zoom level.
- */
-export function getTilesForPolygon(
-  geometry: QueryGeometry,
-  zoom: number,
-  crs: CRS,
-  xyLimits: XYLimits
-): TileTuple[] {
-  const bbox = computeBoundingBox(geometry)
-  return getTilesForBoundingBox(bbox, zoom, crs, xyLimits)
 }
 
 // ---------------------------------------------------------------------------

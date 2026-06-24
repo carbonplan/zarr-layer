@@ -1,7 +1,7 @@
 /**
  * @module mode-utils
  *
- * Shared utilities for ZarrMode implementations (TiledMode and UntiledMode).
+ * Shared utilities for the ZarrMode implementation (UntiledMode).
  * Provides common patterns for throttling, request cancellation, and loading state management.
  */
 
