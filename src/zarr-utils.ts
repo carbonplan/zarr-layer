@@ -193,7 +193,15 @@ function getBandInformation(
         // Sanitize band names to be valid GLSL identifiers
         const rawName =
           typeof bandValue === 'string' ? bandValue : `${key}_${bandValue}`
-        const bandName = sanitizeGlslName(rawName)
+        let bandName = sanitizeGlslName(rawName)
+        // Distinct band values can sanitize to the same GLSL identifier
+        // (e.g. 'band-1' and 'band.1' both become 'band_1'). Without this
+        // guard the later entry silently overwrites the earlier one in
+        // `result`, dropping a band from the render. Suffix collisions with
+        // the index to keep every band addressable.
+        if (result[bandName]) {
+          bandName = `${bandName}_${idx}`
+        }
         result[bandName] = { band: bandValue, index: idx }
       })
     }
