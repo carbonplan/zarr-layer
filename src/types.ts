@@ -21,6 +21,22 @@ export type TransformRequest = (
   options?: TransformRequestOptions
 ) => RequestParameters | Promise<RequestParameters>
 
+/**
+ * Callback invoked when a request made through `transformRequest` fails with a
+ * credential-shaped HTTP status (400 or 401).
+ *
+ * `transformRequest` is typically used for signed/authenticated requests (e.g.
+ * presigned S3 URLs). When the credentials behind it expire mid-session, the
+ * service rejects subsequent requests — expired temporary AWS credentials
+ * return 400 (ExpiredToken/InvalidToken), not just 401 — frequently with no
+ * readable body (HEAD probes or CORS-gated error responses). Those failures are
+ * otherwise opaque to the consumer because the store turns them into missing
+ * chunks. This hook surfaces the status so the consumer can refresh credentials.
+ *
+ * @param status - HTTP status of the failed response (400 or 401)
+ */
+export type OnAuthError = (status: number) => void
+
 export type ColormapArray = number[][] | string[]
 
 export type SelectorValue = number | number[] | string | string[]
@@ -129,6 +145,13 @@ export interface ZarrLayerOptions {
    * When provided, the store cache is bypassed to prevent credential sharing between layers.
    */
   transformRequest?: TransformRequest
+  /**
+   * Called when a `transformRequest`-signed request fails with a
+   * credential-shaped status (400/401), e.g. expired presigned-URL credentials.
+   * Lets the consumer refresh credentials and re-add the layer. See
+   * {@link OnAuthError}.
+   */
+  onAuthError?: OnAuthError
   /**
    * Enable full polar coverage in Mapbox globe view for untiled EPSG:4326 or
    * proj4 datasets. Has no effect on tiled or EPSG:3857 data.

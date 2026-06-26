@@ -8,6 +8,7 @@ import type {
   CRS,
   UntiledLevel,
   TransformRequest,
+  OnAuthError,
 } from './types'
 import type { XYLimits } from './map-utils'
 import { DEFAULT_TILE_SIZE } from './constants'
@@ -64,6 +65,8 @@ interface ZarrStoreOptions {
   latIsAscending?: boolean | null
   proj4?: string
   transformRequest?: TransformRequest
+  /** Called when a signed request fails with a credential-shaped status (400/401). */
+  onAuthError?: OnAuthError
   /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
   customStore?: Readable | AsyncReadable
 }
@@ -97,7 +100,8 @@ interface StoreDescription {
  */
 const createFetchStore = (
   url: string,
-  transformRequest?: TransformRequest
+  transformRequest?: TransformRequest,
+  onAuthError?: OnAuthError
 ): zarr.FetchStore => {
   if (!transformRequest) {
     return new zarr.FetchStore(url)
@@ -125,8 +129,23 @@ const createFetchStore = (
           headers: mergedHeaders,
         })
       )
+      // Credential-expiry detection. transformRequest is only set for signed
+      // (authenticated) requests, so a 400/401 here has no benign meaning — a
+      // missing object is 404 and a denied one is 403. Expired temporary
+      // credentials in particular return 400 (ExpiredToken/InvalidToken/
+      // malformed presign), frequently with no readable body (HEAD probes or
+      // CORS-gated error responses), so we key off the status rather than the
+      // body. Notify the consumer via onAuthError so it can refresh credentials,
+      // and remap to 404 so the store treats it as a missing chunk instead of
+      // throwing.
+      if (response.status === 400 || response.status === 401) {
+        onAuthError?.(response.status)
+        return new Response(null, { status: 404 })
+      }
       // Remap 403 to 404 for S3/CloudFront compatibility: these services
-      // return 403 (not 404) for missing or inaccessible paths.
+      // return 403 (not 404) for missing or inaccessible paths. Left as a plain
+      // missing-chunk remap (no onAuthError) so sparse pyramids that legitimately
+      // 403 absent chunks don't trigger spurious credential refreshes.
       if (response.status === 403) {
         return new Response(null, { status: 404 })
       }
@@ -143,6 +162,7 @@ export class ZarrStore {
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
   private transformRequest?: TransformRequest
+  private onAuthError?: OnAuthError
   private customStore?: Readable | AsyncReadable
 
   dimensions: string[] = []
@@ -199,6 +219,7 @@ export class ZarrStore {
     latIsAscending = null,
     proj4,
     transformRequest,
+    onAuthError,
     customStore,
   }: ZarrStoreOptions) {
     if (!source && !customStore) {
@@ -231,6 +252,7 @@ export class ZarrStore {
       }
     }
     this.transformRequest = transformRequest
+    this.onAuthError = onAuthError
     this.customStore = customStore
 
     this.initialized = this._initialize()
@@ -277,7 +299,7 @@ export class ZarrStore {
           ? { format: 'v3' }
           : undefined
       this.store = (await zarr.extendStore(
-        createFetchStore(this.source, this.transformRequest),
+        createFetchStore(this.source, this.transformRequest, this.onAuthError),
         (store) =>
           zarr
             .withMaybeConsolidatedMetadata(store, consolidatedOpts)
