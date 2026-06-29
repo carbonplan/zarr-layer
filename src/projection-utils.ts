@@ -62,16 +62,26 @@ function formatProj4Error(proj4def: string, err: unknown): string {
  * before inspecting — otherwise a real datum (NAD83, …) would look paramless
  * and be wrongly rewritten. Known datums and explicit towgs84/nadgrids keep
  * their params and are left untouched; WGS84 is already the target.
+ *
+ * The datumName guard catches recognized-but-paramless datums like NAD27 (its
+ * proj4js table entry transforms via grids, which Proj.js doesn't surface as
+ * params), so they keep their ellipsoid shift instead of being wrongly nulled.
  */
 function applyNullDatumSemantics(proj4def: string): void {
   try {
     if (!proj4.defs(proj4def)) proj4.defs(proj4def, proj4def)
     const def = proj4.defs(proj4def) as
-      | { datumCode?: string; datum_params?: unknown; nadgrids?: unknown }
+      | {
+          datumCode?: string
+          datumName?: unknown
+          datum_params?: unknown
+          nadgrids?: unknown
+        }
       | undefined
     if (!def) return
     proj4(proj4def) // resolve a named datum's params from proj4js's table
     if (def.datum_params || def.nadgrids) return
+    if (def.datumName) return // proj4js recognized a real datum; don't null it
     if ((def.datumCode ?? '').toLowerCase() === 'wgs84') return
     def.datumCode = 'none'
   } catch {
