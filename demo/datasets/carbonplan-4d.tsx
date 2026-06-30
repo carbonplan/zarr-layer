@@ -18,7 +18,7 @@ const combinedBandsCustomFrag = `
   float norm = (combined - clim.x) / (clim.y - clim.x);
   float cla = clamp(norm, 0.0, 1.0);
   vec4 c = texture(colormap, vec2(cla, 0.5));
-  fragColor = vec4(c.r, c.g, c.b, opacity);
+  fragColor = vec4(c.rgb * opacity, opacity);
 `
 
 const monthRangeAverageFrag = `
@@ -39,7 +39,7 @@ const monthRangeAverageFrag = `
   float average = sum / count;
   float rescaled = (average - clim.x) / (clim.y - clim.x);
   vec4 c = texture(colormap, vec2(clamp(rescaled, 0.0, 1.0), 0.5));
-  fragColor = vec4(c.r, c.g, c.b, opacity);
+  fragColor = vec4(c.rgb * opacity, opacity);
 `
 
 const BANDS = ['prec', 'tavg', 'tavg_range', 'prec_range', 'weighted'] as const
