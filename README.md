@@ -188,11 +188,16 @@ Custom fragment shaders let you do math on your data to change how it's displaye
 
 Band names are automatically sanitized to valid GLSL identifiers: any characters that aren't letters, digits, or underscores are replaced with underscores, and names starting with a digit are prefixed with an underscore. For example, `s2med_harvest:B02` becomes `s2med_harvest_B02` and `123band` becomes `_123band`.
 
+When a `customFrag` is supplied, **it owns discarding**. Missing/fill pixels are surfaced as `NaN` instead of being dropped automatically, so you can aggregate over partial coverage (e.g. a mean over bands with differing coverage) rather than just their intersection. Note that `NaN` propagates through arithmetic (even `NaN * 0.0` is `NaN`), so guard values before multiplying or accumulating, e.g. `isnan(x) ? 0.0 : x`. Add your own `discard` for pixels you want to drop:
+
 ```ts
 new ZarrLayer({
   // ...
   customFrag: `
     uniform float u_weight;
+    if (isnan(band_a)) {
+      discard;
+    }
     float val = band_a * u_weight;
     float norm = (val - clim.x) / (clim.y - clim.x);
     vec4 c = texture(colormap, vec2(clamp(norm, 0.0, 1.0), 0.5));
@@ -216,6 +221,9 @@ new ZarrLayer({
   selector: { band: ['B08', 'B04'], time: 0 },
   clim: [-1, 1],
   customFrag: `
+    if (isnan(B08) || isnan(B04)) {
+      discard;
+    }
     float ndvi = (B08 - B04) / (B08 + B04);
     float norm = (ndvi - clim.x) / (clim.y - clim.x);
     vec4 c = texture(colormap, vec2(clamp(norm, 0.0, 1.0), 0.5));

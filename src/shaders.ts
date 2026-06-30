@@ -495,7 +495,6 @@ export function createFragmentShaderSource(
   options: FragmentShaderOptions
 ): string {
   const { bands, customUniforms = [], customFrag } = options
-  const hasBands = bands.length > 0
 
   const bandSamplers = bands
     .map((name) => `uniform sampler2D ${name};`)
@@ -536,14 +535,6 @@ export function createFragmentShaderSource(
     .map((name) => `(isnan(${name}_tex) || isnan(${name}_val))`)
     .join(' || ')
 
-  const commonDiscardChecks = hasBands
-    ? `
-  if (${fillValueChecks}) {
-    discard;
-  }
-`
-    : ''
-
   return `#version 300 es
 precision highp float;
 
@@ -581,8 +572,8 @@ ${bandReads}
 ${bandAliases}
 ${
   processedFragBody
-    ? `
-${commonDiscardChecks}
+    ? // No pre-discard: customFrag owns discarding (band values incl. NaN are in scope). See #71.
+      `
 ${processedFragBody.replace(/gl_FragColor/g, 'fragColor')}`
     : bands.length === 1
     ? `
