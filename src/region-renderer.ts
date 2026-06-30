@@ -2359,10 +2359,16 @@ export class RegionRenderer {
       return typeof value === 'number' ? value : 0
     }
 
+    // Multiscale pyramids keep non-spatial coordinate arrays under the level
+    // directory (e.g. "0/month"), matching ZarrStore._loadCoordinates and the
+    // layer's loadInitialDimensionValues. Single-level stores keep them at root.
+    const levelPath =
+      this.isMultiscale && this.levels.length > 0 ? this.levels[0].asset : null
+
     try {
       const coords = await loadDimensionValues(
         this.dimensionValues,
-        null,
+        levelPath,
         dimInfo,
         this.zarrStore.root,
         this.zarrStore.version
