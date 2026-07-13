@@ -106,6 +106,11 @@ const createFetchStore = (
   if (!transformRequest) {
     return new zarr.FetchStore(url)
   }
+  // Notify at most once per store: a credential-expiry burst fans out into many
+  // concurrent failures, so the latch stays set for the store's lifetime rather
+  // than resetting on a later success, which could be a stale in-flight response
+  // from the same burst. Recovery re-adds the layer, which builds a fresh store.
+  let authErrorSignaled = false
   return new zarr.FetchStore(url, {
     async fetch(request: Request): Promise<Response> {
       const { url: transformedUrl, ...overrides } = await transformRequest(
@@ -129,23 +134,17 @@ const createFetchStore = (
           headers: mergedHeaders,
         })
       )
-      // Credential-expiry detection. transformRequest is only set for signed
-      // (authenticated) requests, so a 400/401 here has no benign meaning — a
-      // missing object is 404 and a denied one is 403. Expired temporary
-      // credentials in particular return 400 (ExpiredToken/InvalidToken/
-      // malformed presign), frequently with no readable body (HEAD probes or
-      // CORS-gated error responses), so we key off the status rather than the
-      // body. Notify the consumer via onAuthError so it can refresh credentials,
-      // and remap to 404 so the store treats it as a missing chunk instead of
-      // throwing.
-      if (response.status === 400 || response.status === 401) {
-        onAuthError?.(response.status)
+      // 400/401 are credential-shaped; treat as a missing chunk only when a
+      // handler is set, else surface a real error.
+      if ((response.status === 400 || response.status === 401) && onAuthError) {
+        if (!authErrorSignaled) {
+          authErrorSignaled = true
+          onAuthError(response.status)
+        }
         return new Response(null, { status: 404 })
       }
-      // Remap 403 to 404 for S3/CloudFront compatibility: these services
-      // return 403 (not 404) for missing or inaccessible paths. Left as a plain
-      // missing-chunk remap (no onAuthError) so sparse pyramids that legitimately
-      // 403 absent chunks don't trigger spurious credential refreshes.
+      // Remap 403 to 404: S3/CloudFront return 403 for missing/inaccessible
+      // paths.
       if (response.status === 403) {
         return new Response(null, { status: 404 })
       }
