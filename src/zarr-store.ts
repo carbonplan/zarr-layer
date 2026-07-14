@@ -577,6 +577,12 @@ export class ZarrStore {
       this.xyLimits = { xMin: west, xMax: east, yMin: south, yMax: north }
     }
 
+    // Detect CRS from GeoZarr geo-proj convention before any other logic.
+    // This sets _crsFromMetadata so the bounds-based CRS inference below is skipped.
+    if (!this._crsOverride) {
+      this._applyGeoZarrCRS()
+    }
+
     // Tiled pyramids: use standard global extent if no explicit bounds
     if (this.multiscaleType === 'tiled') {
       if (!this.xyLimits) {
@@ -589,8 +595,25 @@ export class ZarrStore {
     }
 
     // For untiled: determine what we still need to detect
-    const needsBounds = !this.xyLimits
+    let needsBounds = !this.xyLimits
     const needsLatAscending = !this._latIsAscendingUserSet
+
+    // Try to derive bounds from GeoZarr spatial conventions (spatial:bbox or spatial:transform).
+    // When this succeeds, skips the expensive coordinate array fetch entirely.
+    // Equivalent to GDAL PR #13872 (coordinate caching: 1030ms -> 148ms band reopen).
+    if (needsBounds) {
+      const spatialResult = this._extractSpatialBounds()
+      if (spatialResult) {
+        this.xyLimits = spatialResult.limits
+        if (
+          !this._latIsAscendingUserSet &&
+          spatialResult.latIsAscending !== null
+        ) {
+          this.latIsAscending = spatialResult.latIsAscending
+        }
+        needsBounds = false
+      }
+    }
 
     // If explicit bounds provided and user doesn't need latIsAscending detection, skip coord fetch
     // (respects user intent to avoid coord reads by providing bounds)
@@ -796,6 +819,147 @@ export class ZarrStore {
         this.crs = 'EPSG:3857'
       }
     }
+  }
+
+  /**
+   * Detect CRS from GeoZarr geo-proj convention attributes.
+   *
+   * Checks merged group + array attributes for:
+   * - `proj:code` (e.g. "EPSG:4326")
+   * - `proj:projjson` (PROJJSON object with id.authority/id.code)
+   *
+   * Sets `this.crs` and `this._crsFromMetadata` when a recognized CRS is found.
+   * Only EPSG:4326 and EPSG:3857 are handled without a proj4 string; other codes
+   * are detected and logged but require the user to supply a proj4 definition.
+   */
+  private _applyGeoZarrCRS(): void {
+    const groupAttrs = (this.metadata as ZarrV3GroupMetadata)?.attributes as
+      | Record<string, unknown>
+      | undefined
+    const arrayAttrs = this.arrayMetadata?.attributes as
+      | Record<string, unknown>
+      | undefined
+    // Merge: array attrs take precedence over group attrs (same as QGIS plugin)
+    const attrs: Record<string, unknown> = {
+      ...(groupAttrs ?? {}),
+      ...(arrayAttrs ?? {}),
+    }
+
+    const setCRS = (code: string): boolean => {
+      const normalized = code.trim().toUpperCase()
+      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
+        this.crs = normalized as CRS
+        this._crsFromMetadata = true
+        return true
+      }
+      if (normalized.startsWith('EPSG:')) {
+        console.warn(
+          `[zarr-layer] Detected CRS ${normalized} from GeoZarr attributes but ` +
+            `only EPSG:4326 and EPSG:3857 are natively supported. ` +
+            `Provide a proj4 string via the 'crs' option for full support.`
+        )
+      }
+      return false
+    }
+
+    // proj:code (geo-proj convention)
+    const projCode = attrs['proj:code']
+    if (typeof projCode === 'string' && projCode.trim()) {
+      if (setCRS(projCode)) return
+    }
+
+    // proj:projjson - extract EPSG code from id object
+    const projjson = attrs['proj:projjson']
+    if (projjson && typeof projjson === 'object' && !Array.isArray(projjson)) {
+      const pid = (projjson as Record<string, unknown>)['id']
+      if (pid && typeof pid === 'object' && !Array.isArray(pid)) {
+        const { authority, code } = pid as Record<string, unknown>
+        if (authority === 'EPSG' && code !== undefined) {
+          if (setCRS(`EPSG:${code}`)) return
+        }
+      }
+    }
+  }
+
+  /**
+   * Try to derive bounds from GeoZarr spatial convention attributes.
+   *
+   * Checks array attributes for:
+   * - `spatial:bbox` ([xMin, yMin, xMax, yMax])
+   * - `spatial:transform` ([a, b, c, d, e, f] affine: a=Δx, c=x-origin, e=Δy, f=y-origin)
+   *
+   * When successful, avoids loading coordinate arrays entirely — equivalent to
+   * the savings in GDAL PR #13872 (1030ms → 148ms band reopen).
+   *
+   * Returns null if no usable spatial attributes are found.
+   */
+  private _extractSpatialBounds(): {
+    limits: XYLimits
+    latIsAscending: boolean | null
+  } | null {
+    const arrayAttrs = this.arrayMetadata?.attributes as
+      | Record<string, unknown>
+      | undefined
+    // Also check group-level attrs for stores that put spatial metadata on the group
+    const groupAttrs = (this.metadata as ZarrV3GroupMetadata)?.attributes as
+      | Record<string, unknown>
+      | undefined
+    const attrs: Record<string, unknown> = {
+      ...(groupAttrs ?? {}),
+      ...(arrayAttrs ?? {}),
+    }
+
+    // spatial:bbox: [xMin, yMin, xMax, yMax] — direct bounds, no shape needed
+    const bbox = attrs['spatial:bbox']
+    if (Array.isArray(bbox) && bbox.length >= 4) {
+      const vals = bbox.slice(0, 4).map(Number)
+      if (vals.every(Number.isFinite)) {
+        return {
+          limits: {
+            xMin: vals[0],
+            yMin: vals[1],
+            xMax: vals[2],
+            yMax: vals[3],
+          },
+          latIsAscending: null,
+        }
+      }
+    }
+
+    // spatial:transform: [a, b, c, d, e, f]
+    // a = Δx (column spacing), c = x origin (left edge of first column)
+    // e = Δy (row spacing, negative for north-up), f = y origin (top edge of first row)
+    const st = attrs['spatial:transform']
+    if (
+      Array.isArray(st) &&
+      st.length === 6 &&
+      this.dimIndices.lon &&
+      this.dimIndices.lat
+    ) {
+      const vals = st.map(Number)
+      const [a, b, c, d, e, f] = vals
+      // Skip rotated transforms (b or d non-zero): min/max bounds would be incorrect.
+      // Axis-aligned transforms (b = d = 0) cover all real-world GeoZarr datasets.
+      if (b !== 0 || d !== 0) return null
+      if ([a, c, e, f].every(Number.isFinite)) {
+        const nCols = this.shape[this.dimIndices.lon.index]
+        const nRows = this.shape[this.dimIndices.lat.index]
+        const xEnd = c + a * nCols
+        const yEnd = f + e * nRows
+        return {
+          limits: {
+            xMin: Math.min(c, xEnd),
+            xMax: Math.max(c, xEnd),
+            yMin: Math.min(f, yEnd),
+            yMax: Math.max(f, yEnd),
+          },
+          // e < 0 means rows go top-to-bottom (north-up), so row 0 is northernmost
+          latIsAscending: e > 0,
+        }
+      }
+    }
+
+    return null
   }
 
   /**
