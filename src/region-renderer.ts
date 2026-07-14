@@ -257,11 +257,10 @@ export class RegionRenderer {
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
   private regionCache: Map<string, RegionState> = new Map()
-  // Keys of regions protected from eviction. Lifecycle:
-  // - Added: in updateVisibleRegions() for current level's visible regions
-  // - Retained: across level switches to protect fallback regions during transitions
-  // - Cleared: in updateVisibleRegions() when currentLevelCoversViewport() returns true,
-  //   at which point non-current-level keys are removed (fallbacks no longer needed)
+  // Keys of regions protected from eviction. Rebuilt in updateVisibleRegions()
+  // from the current viewport: the current level's visible regions, plus
+  // other-level regions retained as fallbacks until the current level covers
+  // the viewport.
   private visibleRegionKeys: Set<string> = new Set()
   private lastVisibleRegions: Array<{ regionX: number; regionY: number }> = [] // Last computed visible regions
   private lastVisibleRegionsLevel: number = -1 // Level index that lastVisibleRegions corresponds to
@@ -1317,32 +1316,32 @@ export class RegionRenderer {
     this.lastVisibleRegionsLevel = this.activeLevel?.index ?? -1
     const levelIndex = this.activeLevel?.index ?? -1
 
-    // Add new level's visible region keys (protected from eviction)
-    // Don't clear old keys yet - they protect fallback regions during transitions
-    for (const { regionX, regionY } of visible) {
-      this.visibleRegionKeys.add(
-        this.makeRegionKey(levelIndex, regionX, regionY)
-      )
-    }
-
-    // Only clear old keys when current level fully covers viewport
-    if (this.currentLevelCoversViewport()) {
-      // Safe to remove protection for non-current-level regions
-      const currentLevelPrefix = `${levelIndex}:`
-      for (const key of this.visibleRegionKeys) {
-        if (!key.startsWith(currentLevelPrefix)) {
-          this.visibleRegionKeys.delete(key)
-        }
-      }
-    }
-
-    // Abort in-flight fetches for regions that left the viewport.
-    // Only signal abort — the fetch's own catch/finally handles state cleanup.
     const visibleKeys = new Set(
       visible.map(({ regionX, regionY }) =>
         this.makeRegionKey(levelIndex, regionX, regionY)
       )
     )
+
+    // Rebuild eviction protection from the current viewport: this level's
+    // visible regions, plus other-level regions kept as fallbacks until the
+    // current level covers the viewport. An empty result can be a transient
+    // state (map bounds or transformer unavailable), so keep the previous
+    // set rather than unprotect regions that are still rendered.
+    if (visible.length > 0) {
+      const nextProtected = new Set(visibleKeys)
+      if (!this.currentLevelCoversViewport()) {
+        const currentLevelPrefix = `${levelIndex}:`
+        for (const key of this.visibleRegionKeys) {
+          if (!key.startsWith(currentLevelPrefix)) {
+            nextProtected.add(key)
+          }
+        }
+      }
+      this.visibleRegionKeys = nextProtected
+    }
+
+    // Abort in-flight fetches for regions that left the viewport.
+    // Only signal abort — the fetch's own catch/finally handles state cleanup.
     for (const [key, region] of this.regionCache) {
       if (
         region.loading &&
