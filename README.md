@@ -14,29 +14,15 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 ## data requirements
 
-Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection for 'untiled' data. Tiled data need to be in EPSG:4326 or EPSG:3857.
+Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection.
 
 ### Multiscales
 
-High resolution datasets require multiscales. There are two main ways to store these. We recommend the untiled path for ease of data creation. Performance appears similar between the two options in most cases.
-
-#### Tiled
-
-Classic approach that requires reprojection to either web mercator or WGS84. Breaks data down into chunks that correspond exactly to web map slippy map tile conventions (XYZ). See [ndpyramid](https://github.com/carbonplan/ndpyramid). Data creation for this format can be resource intensive, see the untiled section below for an easier alternative.
-
-- Limited to EPSG:4326 or EPSG:3857
-
-#### Untiled
-
-Support for the emerging [multiscales](https://github.com/zarr-conventions/multiscales) convention (non-slippy map conforming) is experimental! We also try to interpret other multiscale formats. Chunks are loaded based on viewport intersection and zoom level.
-
-- Supports client side CRS reprojection via `proj4` and `@developmentseed/raster-reproject`
-
-See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## globe rendering and polar coverage
 
-Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For untiled EPSG:4326 and `proj4` datasets:
+Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For EPSG:4326 and `proj4` datasets:
 
 **MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed.
 
@@ -115,7 +101,7 @@ map.on('load', () => {
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
-| renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for untiled EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on tiled or EPSG:3857 data. MapLibre always renders to the poles. |
+| renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on EPSG:3857 data. MapLibre always renders to the poles. |
 
 ## methods
 
@@ -184,7 +170,7 @@ const result = await layer.queryData(
 
 ## custom shaders and uniforms
 
-Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. In tiled mode, data for all selected bands must be in the same chunk. In untiled mode, bands can span separate chunks — each band is fetched in parallel and combined for rendering. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
+Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Bands can span separate chunks — each band is fetched in parallel and combined for rendering. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
 
 Band names are automatically sanitized to valid GLSL identifiers: any characters that aren't letters, digits, or underscores are replaced with underscores, and names starting with a digit are prefixed with an underscore. For example, `s2med_harvest:B02` becomes `s2med_harvest_B02` and `123band` becomes `_123band`.
 
