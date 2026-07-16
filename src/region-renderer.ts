@@ -1394,6 +1394,29 @@ export class RegionRenderer {
       return
     }
 
+    // The browser drains requests roughly in issue order, so the viewport
+    // center loads first.
+    if (visible.length > 1) {
+      let cx = 0
+      let cy = 0
+      for (const { regionX, regionY } of visible) {
+        cx += regionX
+        cy += regionY
+      }
+      cx /= visible.length
+      cy /= visible.length
+      const byCenterDistance = (
+        a: { regionX: number; regionY: number },
+        b: { regionX: number; regionY: number }
+      ) =>
+        (a.regionX - cx) ** 2 +
+        (a.regionY - cy) ** 2 -
+        (b.regionX - cx) ** 2 -
+        (b.regionY - cy) ** 2
+      newRegions.sort(byCenterDistance)
+      staleRegions.sort(byCenterDistance)
+    }
+
     if (newRegions.length > 0) {
       this.fetchRegions(newRegions, gl)
     }
