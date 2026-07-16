@@ -45,18 +45,6 @@ export function renderMapboxTile({
   context,
   regions,
 }: MapboxTileRenderParams): boolean {
-  return renderRegionsToTile(renderer, tileId, context, regions)
-}
-
-/**
- * Render untiled regions to a globe tile.
- */
-function renderRegionsToTile(
-  renderer: ZarrRenderer,
-  tileId: TileId,
-  context: RenderContext,
-  regions: RegionRenderState[]
-): boolean {
   if (regions.length === 0) return true // Still loading
 
   const tileBounds = getMapboxTileBounds(tileId)

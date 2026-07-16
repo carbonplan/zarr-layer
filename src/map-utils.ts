@@ -1,10 +1,8 @@
 /**
  * @module map-utils
  *
- * Utility functions for custom layer integration.
- * Provides tile management, zoom level conversion,
- * coordinate transformations, and projection handling.
- * adapted from zarr-cesium/src/map-utils.ts
+ * Coordinate transformations and projection handling for
+ * custom layer integration.
  */
 
 import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
@@ -74,7 +72,7 @@ export function lonRangeOverlaps(
  * @param lon - Longitude in degrees.
  * @returns Normalized mercator X coordinate.
  */
-export function lonToMercatorNorm(lon: number): number {
+function lonToMercatorNorm(lon: number): number {
   const clamped = Math.max(-180, Math.min(180, lon))
   return (clamped + 180) / 360
 }

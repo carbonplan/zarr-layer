@@ -96,17 +96,6 @@ export function mustCreateTexture(gl: WebGL2RenderingContext): WebGLTexture {
 }
 
 /**
- * Utility to create a buffer or throw.
- */
-export function mustCreateBuffer(gl: WebGL2RenderingContext): WebGLBuffer {
-  const buf = gl.createBuffer()
-  if (!buf) {
-    throw new Error('Failed to create buffer')
-  }
-  return buf
-}
-
-/**
  * Returns the WebGL texture format and internal format for a given number of channels.
  * Used for uploading Float32 data textures with varying channel counts.
  *
@@ -198,39 +187,4 @@ export function interleaveBands(
     }
   }
   return result
-}
-
-export function createSubdividedQuad(subdivisions: number): {
-  vertexArr: Float32Array
-  texCoordArr: Float32Array
-} {
-  const vertices: number[] = []
-  const texCoords: number[] = []
-  const step = 2 / subdivisions
-  const texStep = 1 / subdivisions
-
-  const pushVertex = (col: number, row: number) => {
-    const x = -1 + col * step
-    const y = 1 - row * step
-    const u = col * texStep
-    const v = row * texStep
-    vertices.push(x, y)
-    texCoords.push(u, v)
-  }
-
-  for (let row = 0; row < subdivisions; row++) {
-    for (let col = 0; col <= subdivisions; col++) {
-      pushVertex(col, row)
-      pushVertex(col, row + 1)
-    }
-    if (row < subdivisions - 1) {
-      pushVertex(subdivisions, row + 1)
-      pushVertex(0, row + 1)
-    }
-  }
-
-  return {
-    vertexArr: new Float32Array(vertices),
-    texCoordArr: new Float32Array(texCoords),
-  }
 }
