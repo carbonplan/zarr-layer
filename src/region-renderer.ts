@@ -11,11 +11,7 @@
  */
 
 import * as zarr from 'zarrita'
-import {
-  WEB_MERCATOR_EXTENT,
-  MIN_SUBDIVISIONS,
-  MAX_SUBDIVISIONS,
-} from './constants'
+import { MIN_SUBDIVISIONS, MAX_SUBDIVISIONS } from './constants'
 import type {
   RenderContext,
   TileId,
@@ -33,19 +29,13 @@ import type {
   UntiledLevel,
 } from './types'
 import { ZarrStore } from './zarr-store'
-import {
-  boundsToMercatorNorm,
-  lonRangeOverlaps,
-  type MercatorBounds,
-  type XYLimits,
-} from './map-utils'
+import { type MercatorBounds, type XYLimits } from './map-utils'
 import { getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-tile-renderer'
 import {
   createProjectionContext,
-  sampleEdgesToMercatorBounds,
   type ProjectionContext,
 } from './projection-utils'
 import type {
@@ -60,6 +50,14 @@ import {
   type DimensionValuesCache,
 } from './selector-resolution'
 import { queryData as queryDataWithContext } from './query/data-query'
+import {
+  computeMercatorBoundsFromProjection,
+  computeRegionMercatorBounds,
+  getRegionBounds,
+  getRegionSize,
+  getVisibleRegions,
+  selectLevelForZoom,
+} from './region-math'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -306,43 +304,10 @@ export class RegionRenderer {
     )
   }
 
-  /**
-   * Detect optimal region size from array metadata.
-   * For sharded arrays: use shard chunk_shape
-   * For standard chunked arrays: use array chunks
-   */
   private getRegionSize(
     array: zarr.Array<zarr.DataType>
   ): [number, number] | null {
-    const latIdx = this.dimIndices.lat?.index
-    const lonIdx = this.dimIndices.lon?.index
-    if (latIdx === undefined || lonIdx === undefined) return null
-
-    // Check for sharding codec
-    const codecs = (array as any).codecs || []
-    for (const codec of codecs) {
-      if (
-        codec.name === 'sharding_indexed' &&
-        codec.configuration?.chunk_shape
-      ) {
-        const shardShape = codec.configuration.chunk_shape as number[]
-        return [shardShape[latIdx], shardShape[lonIdx]]
-      }
-    }
-
-    // Fall back to standard chunks
-    const chunks = array.chunks as number[] | undefined
-    if (chunks && chunks.length > Math.max(latIdx, lonIdx)) {
-      const chunkH = chunks[latIdx]
-      const chunkW = chunks[lonIdx]
-      // Only use region-based loading if chunks are smaller than the array
-      const shape = array.shape as number[]
-      if (chunkH < shape[latIdx] || chunkW < shape[lonIdx]) {
-        return [chunkH, chunkW]
-      }
-    }
-
-    return null // No chunking or single chunk
+    return getRegionSize(array, this.dimIndices)
   }
 
   /**
@@ -395,99 +360,16 @@ export class RegionRenderer {
     }
   }
 
-  /**
-   * Calculate which regions are visible in the current viewport.
-   */
   private getVisibleRegions(
     map: MapLike
   ): Array<{ regionX: number; regionY: number }> {
-    const bounds = map.getBounds?.()?.toArray?.()
-    if (!bounds || !this.xyLimits || !this.activeLevel) return []
-    if (!this.projection.def || !this.projection.toWGS84) {
-      // No proj4 transformer was set up — either because the CRS isn't
-      // one proj4js handles natively and no `proj4` prop was supplied
-      // (constructor warned), or because proj4 init threw on a malformed
-      // string. Either way, computing region indices here would be wrong;
-      // skip rather than render a misleading partial result.
-      return []
-    }
-
-    const { width, height, regionSize } = this.activeLevel
-    const [[west, south], [east, north]] = bounds
-    const [regionH, regionW] = regionSize
-
-    // For projected data, use a two-pass approach:
-    // 1. Forward-transform viewport edges to source CRS to find candidate
-    //    regions via index math (O(1) proj4 cost, may include false
-    //    positives for non-bijective projections like UTM outside their zone)
-    // 2. Inverse-transform candidate region bounds to WGS84 for precise overlap
-    const transformer = this.projection.toWGS84
-    const numRegionsX = Math.ceil(width / regionW)
-    const numRegionsY = Math.ceil(height / regionH)
-
-    const candidates = this.getCandidateRegions(
-      west,
-      south,
-      east,
-      north,
-      transformer,
-      numRegionsX,
-      numRegionsY,
-      regionW,
-      regionH,
-      width,
-      height
-    )
-
-    // Verify candidates via inverse transform to WGS84 for precise overlap.
-    // This handles non-bijective projections where forward transforms can
-    // produce false positives.
-    const regions: Array<{ regionX: number; regionY: number }> = []
-    for (const { regionX, regionY } of candidates) {
-      const regBounds = this.getRegionBounds(regionX, regionY, {
-        width,
-        height,
-        regionSize,
-      })
-      const xMid = (regBounds.xMin + regBounds.xMax) / 2
-      const yMid = (regBounds.yMin + regBounds.yMax) / 2
-
-      const samplePoints = [
-        transformer.inverse(regBounds.xMin, regBounds.yMin),
-        transformer.inverse(regBounds.xMax, regBounds.yMin),
-        transformer.inverse(regBounds.xMax, regBounds.yMax),
-        transformer.inverse(regBounds.xMin, regBounds.yMax),
-        transformer.inverse(xMid, regBounds.yMin),
-        transformer.inverse(xMid, regBounds.yMax),
-        transformer.inverse(regBounds.xMin, yMid),
-        transformer.inverse(regBounds.xMax, yMid),
-      ]
-
-      let regWest = Infinity
-      let regEast = -Infinity
-      let regSouth = Infinity
-      let regNorth = -Infinity
-      let hasValid = false
-      for (const [lon, lat] of samplePoints) {
-        if (!isFinite(lon) || !isFinite(lat)) continue
-        hasValid = true
-        if (lon < regWest) regWest = lon
-        if (lon > regEast) regEast = lon
-        if (lat < regSouth) regSouth = lat
-        if (lat > regNorth) regNorth = lat
-      }
-      if (!hasValid) continue
-
-      if (
-        lonRangeOverlaps(west, east, regWest, regEast) &&
-        regNorth >= south &&
-        regSouth <= north
-      ) {
-        regions.push({ regionX, regionY })
-      }
-    }
-
-    return regions
+    return getVisibleRegions({
+      map,
+      xyLimits: this.xyLimits,
+      levelMeta: this.activeLevel,
+      projection: this.projection,
+      latIsAscending: this.latIsAscending,
+    })
   }
 
   /**
@@ -656,185 +538,18 @@ export class RegionRenderer {
     return [...fallbackRegions, ...currentLevelRegions]
   }
 
-  /**
-   * Find candidate regions by forward-transforming viewport edges to source CRS
-   * and using grid index math to find overlapping region indices.
-   *
-   * This is a fast prefilter that may include false positives (e.g., for non-
-   * bijective projections like UTM outside their zone). Callers must verify
-   * candidates with inverse-transform overlap checks.
-   *
-   * On partial transform failures (projection boundary), uses valid points
-   * with a wider margin. Falls back to all regions only if no points are valid.
-   */
-  private getCandidateRegions(
-    west: number,
-    south: number,
-    east: number,
-    north: number,
-    transformer: { forward: (lon: number, lat: number) => [number, number] },
-    numRegionsX: number,
-    numRegionsY: number,
-    regionW: number,
-    regionH: number,
-    width: number,
-    height: number
-  ): Array<{ regionX: number; regionY: number }> {
-    if (!this.xyLimits) return []
-    const { xMin, xMax, yMin, yMax } = this.xyLimits
-
-    // Densely sample viewport edges and interior to capture projection curvature
-    // and extrema that may fall inside the viewport (e.g., pole in polar stereo).
-    const edgeSamples = 16
-    let srcXMin = Infinity
-    let srcXMax = -Infinity
-    let srcYMin = Infinity
-    let srcYMax = -Infinity
-    let validCount = 0
-    let totalCount = 0
-    for (let i = 0; i <= edgeSamples; i++) {
-      const t = i / edgeSamples
-      const lon = west + t * (east - west)
-      const lat = south + t * (north - south)
-      const points = [
-        transformer.forward(lon, south),
-        transformer.forward(lon, north),
-        transformer.forward(west, lat),
-        transformer.forward(east, lat),
-      ]
-      for (const [x, y] of points) {
-        totalCount++
-        if (!isFinite(x) || !isFinite(y)) continue
-        validCount++
-        if (x < srcXMin) srcXMin = x
-        if (x > srcXMax) srcXMax = x
-        if (y < srcYMin) srcYMin = y
-        if (y > srcYMax) srcYMax = y
-      }
-    }
-
-    // Sample interior grid to catch extrema inside viewport (e.g., pole in polar stereo)
-    const interiorSamples = 4
-    for (let iy = 1; iy <= interiorSamples; iy++) {
-      for (let ix = 1; ix <= interiorSamples; ix++) {
-        const lon = west + (ix / (interiorSamples + 1)) * (east - west)
-        const lat = south + (iy / (interiorSamples + 1)) * (north - south)
-        const [x, y] = transformer.forward(lon, lat)
-        totalCount++
-        if (!isFinite(x) || !isFinite(y)) continue
-        validCount++
-        if (x < srcXMin) srcXMin = x
-        if (x > srcXMax) srcXMax = x
-        if (y < srcYMin) srcYMin = y
-        if (y > srcYMax) srcYMax = y
-      }
-    }
-
-    // No valid points — fall back to all regions
-    if (validCount === 0) {
-      const all: Array<{ regionX: number; regionY: number }> = []
-      for (let ry = 0; ry < numRegionsY; ry++) {
-        for (let rx = 0; rx < numRegionsX; rx++) {
-          all.push({ regionX: rx, regionY: ry })
-        }
-      }
-      return all
-    }
-
-    // Widen margin when some samples failed (projection boundary)
-    const margin = validCount < totalCount ? 8 : 2
-
-    const pxXMin = ((srcXMin - xMin) / (xMax - xMin)) * width
-    const pxXMax = ((srcXMax - xMin) / (xMax - xMin)) * width
-    const pxYMin = ((srcYMin - yMin) / (yMax - yMin)) * height
-    const pxYMax = ((srcYMax - yMin) / (yMax - yMin)) * height
-    let rXMin: number, rXMax: number, rYMin: number, rYMax: number
-    if (this.latIsAscending === false) {
-      const invYMin = height - pxYMax
-      const invYMax = height - pxYMin
-      rYMin = Math.floor(invYMin / regionH) - margin
-      rYMax = Math.floor(invYMax / regionH) + margin
-    } else {
-      rYMin = Math.floor(pxYMin / regionH) - margin
-      rYMax = Math.floor(pxYMax / regionH) + margin
-    }
-    rXMin = Math.floor(pxXMin / regionW) - margin
-    rXMax = Math.floor(pxXMax / regionW) + margin
-
-    // Clamp to valid range
-    rXMin = Math.max(0, rXMin)
-    rXMax = Math.min(numRegionsX - 1, rXMax)
-    rYMin = Math.max(0, rYMin)
-    rYMax = Math.min(numRegionsY - 1, rYMax)
-
-    // When the viewport straddles the antimeridian, forward-projecting the
-    // sampled longitudes folds source X back on itself (e.g. proj4 adjust_lon),
-    // so the srcX min/max span no longer bounds the visible columns. Treat
-    // every X region as a candidate; the antimeridian-aware overlap check in
-    // getVisibleRegions then keeps only the columns that are actually visible,
-    // so this widens the search without over-fetching the result (issue #64).
-    const crossesAntimeridian = east < west || east > 180 || west < -180
-    if (crossesAntimeridian) {
-      rXMin = 0
-      rXMax = numRegionsX - 1
-    }
-
-    const candidates: Array<{ regionX: number; regionY: number }> = []
-    for (let ry = rYMin; ry <= rYMax; ry++) {
-      for (let rx = rXMin; rx <= rXMax; rx++) {
-        candidates.push({ regionX: rx, regionY: ry })
-      }
-    }
-    return candidates
-  }
-
-  /**
-   * Get geographic bounds for a region.
-   * Accounts for data orientation (latIsAscending).
-   * Requires level-specific dimensions so async work never reaches back into
-   * `activeLevel`, which may have changed since the caller captured a region.
-   */
   private getRegionBounds(
     regionX: number,
     regionY: number,
     levelMeta: LevelMeta
   ): { xMin: number; xMax: number; yMin: number; yMax: number } {
-    const { width, height, regionSize } = levelMeta
-
-    // xyLimits is assumed constant across all multiscale levels (same geographic extent).
-    // If per-level bounds are ever needed, add xyLimits to LevelMeta type.
-    if (!this.xyLimits) {
-      return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
-    }
-
-    const [regionH, regionW] = regionSize
-    const { xMin, xMax, yMin, yMax } = this.xyLimits
-
-    // Calculate pixel bounds for this region
-    const pxXStart = regionX * regionW
-    const pxXEnd = Math.min(pxXStart + regionW, width)
-    const pxYStart = regionY * regionH
-    const pxYEnd = Math.min(pxYStart + regionH, height)
-
-    // Convert pixel bounds to geographic bounds using pixel edges.
-    const geoXMin = xMin + (pxXStart / width) * (xMax - xMin)
-    const geoXMax = xMin + (pxXEnd / width) * (xMax - xMin)
-
-    // Y mapping depends on data orientation
-    // Default (null/undefined) assumes ascending (row 0 = south = yMin)
-    let geoYMin: number
-    let geoYMax: number
-    if (this.latIsAscending === false) {
-      // Data has lat decreasing with array index: pixel 0 = north (yMax)
-      geoYMax = yMax - (pxYStart / height) * (yMax - yMin)
-      geoYMin = yMax - (pxYEnd / height) * (yMax - yMin)
-    } else {
-      // Data has lat increasing with array index: pixel 0 = south (yMin)
-      geoYMin = yMin + (pxYStart / height) * (yMax - yMin)
-      geoYMax = yMin + (pxYEnd / height) * (yMax - yMin)
-    }
-
-    return { xMin: geoXMin, xMax: geoXMax, yMin: geoYMin, yMax: geoYMax }
+    return getRegionBounds({
+      regionX,
+      regionY,
+      levelMeta,
+      xyLimits: this.xyLimits,
+      latIsAscending: this.latIsAscending,
+    })
   }
 
   /**
@@ -1637,88 +1352,13 @@ export class RegionRenderer {
   }
 
   private selectLevelForZoom(mapZoom: number): number {
-    if (!this.xyLimits || this.levels.length === 0) return 0
-
-    // Calculate map resolution: at zoom Z, full world is 256 * 2^Z pixels
-    const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom)
-
-    // Calculate what fraction of the world the data covers, accounting for CRS
-    let worldFraction: number
-    if (this.projection.kind === 'epsg4326') {
-      // proj4's adjust_lon folds inputs outside [-180, 180] back into range
-      // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
-      // distorts the width for 0-360° stores and antimeridian-crossing
-      // extents. Use the source longitude span for level selection because
-      // render bounds may conservatively expand antimeridian-crossing regions
-      // to full-world X for tile intersection.
-      worldFraction = longitudeWorldFraction(this.xyLimits)
-    } else if (this.projection.kind === 'epsg3857') {
-      // Web Mercator: full world is ~40,075,016 meters
-      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
-      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      worldFraction = dataWidth / fullWorldMeters
-    } else if (this.projection.def && this.projection.toMercator) {
-      // Source-projected data: transform bounds corners to mercator
-      const [minMercX] = this.projection.toMercator.forward(
-        this.xyLimits.xMin,
-        this.xyLimits.yMin
-      )
-      const [maxMercX] = this.projection.toMercator.forward(
-        this.xyLimits.xMax,
-        this.xyLimits.yMax
-      )
-      let dataWidthMeters = Math.abs(maxMercX - minMercX)
-      const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
-      // worldFraction > 1 means the corner projection failed: for projections
-      // like MODIS sinusoidal the rectangular bbox corners fall outside the
-      // valid CRS domain (near-polar latitudes give out-of-domain longitudes),
-      // yielding a garbage or non-finite width. Fall back to the equatorial
-      // strip (y=0), which stays in-domain for any cylindrical-like projection
-      // and gives the correct horizontal extent.
-      if (!isFinite(dataWidthMeters) || dataWidthMeters > fullWorldMeters) {
-        const [eqMinX] = this.projection.toMercator.forward(
-          this.xyLimits.xMin,
-          0
-        )
-        const [eqMaxX] = this.projection.toMercator.forward(
-          this.xyLimits.xMax,
-          0
-        )
-        dataWidthMeters = Math.abs(eqMaxX - eqMinX)
-      }
-      worldFraction = Math.min(1, dataWidthMeters / fullWorldMeters)
-    } else {
-      const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
-      worldFraction = dataWidth / 360
-    }
-
-    // Build list of levels with their effective resolution (pixels per full world)
-    const levelResolutions: Array<{ index: number; effectivePixels: number }> =
-      []
-    for (let i = 0; i < this.levels.length; i++) {
-      const level = this.levels[i]
-      if (!level.shape) continue
-      const lonIndex = this.dimIndices.lon?.index ?? level.shape.length - 1
-      // Scale up to what resolution would be if data covered full world
-      const effectivePixels = level.shape[lonIndex] / worldFraction
-      levelResolutions.push({ index: i, effectivePixels })
-    }
-
-    // If no levels have shape data yet, fall back to the last level index
-    if (levelResolutions.length === 0) return this.levels.length - 1
-
-    // Sort by resolution ascending (lowest res first)
-    levelResolutions.sort((a, b) => a.effectivePixels - b.effectivePixels)
-
-    // Find the lowest resolution level that still provides sufficient detail
-    for (const { index, effectivePixels } of levelResolutions) {
-      if (effectivePixels >= mapPixelsPerWorld) {
-        return index
-      }
-    }
-
-    // If no level is sufficient, use the highest resolution available
-    return levelResolutions[levelResolutions.length - 1].index
+    return selectLevelForZoom({
+      mapZoom,
+      xyLimits: this.xyLimits,
+      levels: this.levels,
+      projection: this.projection,
+      lonIndex: this.dimIndices.lon?.index,
+    })
   }
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
@@ -1948,64 +1588,17 @@ export class RegionRenderer {
     setLoadingCallbackUtil(this.loadingManager, callback)
   }
 
-  /**
-   * Compute mercator bounds from proj4 by sampling edge points.
-   */
   private computeMercatorBoundsFromProjection(): MercatorBounds {
-    if (!this.xyLimits) {
-      return { x0: 0, y0: 0, x1: 1, y1: 1 }
-    }
-    if (this.projection.kind === 'epsg4326') {
-      return boundsToMercatorNorm(this.xyLimits, 'EPSG:4326')
-    }
-    if (this.projection.kind === 'epsg3857') {
-      return boundsToMercatorNorm(this.xyLimits, 'EPSG:3857')
-    }
-    if (!this.projection.def || !this.projection.toMercator) {
-      return { x0: 0, y0: 0, x1: 1, y1: 1 }
-    }
-    const result = sampleEdgesToMercatorBounds(
-      this.xyLimits,
-      this.projection.toMercator,
-      20
-    )
-    if (!result) {
-      console.warn(
-        'computeMercatorBoundsFromProjection: No valid samples found'
-      )
-      return { x0: 0, y0: 0, x1: 1, y1: 1 }
-    }
-    return result
+    return computeMercatorBoundsFromProjection(this.xyLimits, this.projection)
   }
 
-  /**
-   * Compute mercator bounds for a specific region from source CRS bounds.
-   */
   private computeRegionMercatorBounds(bounds: {
     xMin: number
     xMax: number
     yMin: number
     yMax: number
   }): MercatorBounds {
-    if (this.projection.kind === 'epsg4326') {
-      return boundsToMercatorNorm(bounds, 'EPSG:4326')
-    }
-    if (this.projection.kind === 'epsg3857') {
-      return boundsToMercatorNorm(bounds, 'EPSG:3857')
-    }
-    if (!this.projection.def || !this.projection.toMercator) {
-      return { x0: 0, y0: 0, x1: 1, y1: 1 }
-    }
-    const result = sampleEdgesToMercatorBounds(
-      bounds,
-      this.projection.toMercator,
-      5
-    )
-    if (!result) {
-      console.warn('computeRegionMercatorBounds: No valid samples found')
-      return { x0: 0, y0: 0, x1: 1, y1: 1 }
-    }
-    return result
+    return computeRegionMercatorBounds(bounds, this.projection)
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
@@ -2100,19 +1693,4 @@ export class RegionRenderer {
       options
     )
   }
-}
-
-function longitudeWorldFraction(bounds: {
-  xMin: number
-  xMax: number
-}): number {
-  const rawSpan = bounds.xMax - bounds.xMin
-  if (!Number.isFinite(rawSpan) || rawSpan === 0) {
-    return 1
-  }
-  if (Math.abs(rawSpan) >= 360) {
-    return 1
-  }
-  const span = rawSpan > 0 ? rawSpan : rawSpan + 360
-  return Math.max(span / 360, Number.EPSILON)
 }
