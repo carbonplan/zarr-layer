@@ -45,7 +45,7 @@ import {
   type MercatorBounds,
   type XYLimits,
 } from './map-utils'
-import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
+import { normalizeSelector, getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-tile-renderer'
@@ -70,6 +70,11 @@ import type {
   QueryLevelSnapshot,
   RegionState,
 } from './region-state'
+import {
+  buildChannelCombinations,
+  buildSliceArgsForSelector,
+  type DimensionValuesCache,
+} from './selector-resolution'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -142,9 +147,7 @@ export class RegionRenderer {
   )
 
   // Dimension values cache (supports numeric and string coordinate arrays)
-  private dimensionValues: {
-    [key: string]: Float64Array | number[] | string[]
-  } = {}
+  private dimensionValues: DimensionValuesCache = {}
 
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
@@ -669,32 +672,6 @@ export class RegionRenderer {
   }
 
   /**
-   * Build all index combinations from multi-value dimensions.
-   * Returns cartesian product of all dimension value arrays.
-   */
-  private buildChannelCombinations(
-    multiValueDims: Array<{ values: number[]; labels: (number | string)[] }>
-  ): { combinations: number[][]; labelCombinations: (number | string)[][] } {
-    let combinations: number[][] = [[]]
-    let labelCombinations: (number | string)[][] = [[]]
-
-    for (const { values, labels } of multiValueDims) {
-      const nextCombos: number[][] = []
-      const nextLabels: (number | string)[][] = []
-      for (let idx = 0; idx < values.length; idx++) {
-        for (let c = 0; c < combinations.length; c++) {
-          nextCombos.push([...combinations[c], values[idx]])
-          nextLabels.push([...labelCombinations[c], labels[idx]])
-        }
-      }
-      combinations = nextCombos
-      labelCombinations = nextLabels
-    }
-
-    return { combinations, labelCombinations }
-  }
-
-  /**
    * Find candidate regions by forward-transforming viewport edges to source CRS
    * and using grid index math to find overlapping region indices.
    *
@@ -1002,28 +979,6 @@ export class RegionRenderer {
     }
   }
 
-  /**
-   * Classify a dimension by its name.
-   * Used to identify spatial (lat/lon) vs non-spatial dimensions.
-   */
-  private classifyDimension(dimKey: string): 'lon' | 'lat' | 'time' | 'other' {
-    const key = dimKey.toLowerCase()
-    if (key === 'lon' || key === 'x' || key === 'lng' || key.includes('lon')) {
-      return 'lon'
-    }
-    if (key === 'lat' || key === 'y' || key.includes('lat')) {
-      return 'lat'
-    }
-    if (key.includes('time')) {
-      return 'time'
-    }
-    return 'other'
-  }
-
-  /**
-   * Build slice arguments from a selector for all dimensions.
-   * Shared logic used by both display (buildBaseSliceArgs) and queries (fetchDataForSelector).
-   */
   private async buildSliceArgsForSelector(
     selector: NormalizedSelector,
     options: {
@@ -1055,102 +1010,23 @@ export class RegionRenderer {
       labels: (number | string)[]
     }>
   }> {
-    const { array } = options
-
-    const sliceArgs: (number | zarr.Slice)[] = new Array(
-      array.shape.length
-    ).fill(0)
-
-    const multiValueDims: Array<{
-      dimIndex: number
-      dimName: string
-      values: number[]
-      labels: (number | string)[]
-    }> = []
-
-    const dimNames = Object.keys(this.dimIndices)
-
-    for (const dimName of dimNames) {
-      const dimInfo = this.dimIndices[dimName]
-      const dimType = this.classifyDimension(dimName)
-
-      if (dimType === 'lon') {
-        if (options.spatialBounds) {
-          sliceArgs[dimInfo.index] = zarr.slice(
-            options.spatialBounds.minX,
-            options.spatialBounds.maxX
-          )
-        } else {
-          sliceArgs[dimInfo.index] = options.includeSpatialSlices
-            ? zarr.slice(0, array.shape[dimInfo.index] ?? 0)
-            : 0
-        }
-      } else if (dimType === 'lat') {
-        if (options.spatialBounds) {
-          sliceArgs[dimInfo.index] = zarr.slice(
-            options.spatialBounds.minY,
-            options.spatialBounds.maxY
-          )
-        } else {
-          sliceArgs[dimInfo.index] = options.includeSpatialSlices
-            ? zarr.slice(0, array.shape[dimInfo.index] ?? 0)
-            : 0
-        }
-      } else {
-        // Non-spatial dimension: resolve selector value
-        const selectionSpec =
-          selector[dimName] ||
-          (dimType === 'time' ? selector['time'] : undefined)
-
-        if (selectionSpec !== undefined) {
-          const selectionValue = selectionSpec.selected
-          const selectionType = selectionSpec.type
-
-          // Check for multi-value selector
-          if (
-            options.trackMultiValue &&
-            Array.isArray(selectionValue) &&
-            selectionValue.length > 1
-          ) {
-            const resolvedIndices: number[] = []
-            const labelValues: (number | string)[] = []
-            for (const val of selectionValue) {
-              const idx = await this.resolveSelectionIndex(
-                dimName,
-                dimInfo,
-                val,
-                selectionType
-              )
-              resolvedIndices.push(idx)
-              labelValues.push(val)
-            }
-            multiValueDims.push({
-              dimIndex: dimInfo.index,
-              dimName,
-              values: resolvedIndices,
-              labels: labelValues,
-            })
-            sliceArgs[dimInfo.index] = resolvedIndices[0]
-          } else {
-            // Single value (or first value if array)
-            const primaryValue = Array.isArray(selectionValue)
-              ? selectionValue[0]
-              : selectionValue
-
-            sliceArgs[dimInfo.index] = await this.resolveSelectionIndex(
-              dimName,
-              dimInfo,
-              primaryValue,
-              selectionType
-            )
-          }
-        } else {
-          sliceArgs[dimInfo.index] = 0
-        }
-      }
-    }
-
-    return { sliceArgs, multiValueDims }
+    const coordLevelIndex =
+      this.activeLevel?.index ??
+      this.loadingLevelIndex ??
+      this.desiredLevelIndex ??
+      0
+    return buildSliceArgsForSelector(
+      {
+        zarrStore: this.zarrStore,
+        dimIndices: this.dimIndices,
+        levels: this.levels,
+        isMultiscale: this.isMultiscale,
+        dimensionValues: this.dimensionValues,
+        coordLevelIndex,
+      },
+      selector,
+      options
+    )
   }
 
   /**
@@ -1418,8 +1294,9 @@ export class RegionRenderer {
       const currentLevel = this.levels[snapshot.index]
       const fillValue = currentLevel?.fillValue ?? desc.fill_value
 
-      const { combinations: channelCombinations } =
-        this.buildChannelCombinations(snapshot.baseMultiValueDims)
+      const { combinations: channelCombinations } = buildChannelCombinations(
+        snapshot.baseMultiValueDims
+      )
       const numChannels = channelCombinations.length || 1
 
       // Fetch data for all channels
@@ -2203,96 +2080,6 @@ export class RegionRenderer {
     emitLoadingStateUtil(this.loadingManager)
   }
 
-  private async resolveSelectionIndex(
-    dimName: string,
-    dimInfo: {
-      index: number
-      name: string
-      array: zarr.Array<zarr.DataType> | null
-    },
-    value: number | string | [number, number] | undefined,
-    type?: 'index' | 'value'
-  ): Promise<number> {
-    if (type === 'index') {
-      return typeof value === 'number' ? value : 0
-    }
-
-    if (typeof value !== 'number' && typeof value !== 'string') {
-      return 0
-    }
-
-    // Multiscale pyramids (tiled and untiled alike) keep their non-spatial
-    // coordinate arrays inside each level directory (e.g. "0/month"), not at
-    // the store root. ZarrStore preloads those from the level-0 directory into
-    // `coordinates`, so prefer them — opening the same arrays at the root (as
-    // the fallback below does) would 404. The fallback covers single-level
-    // datasets, whose coordinate arrays live at the root and aren't preloaded.
-    const storeCoords = this.zarrStore.coordinates[dimName] as
-      | (number | string)[]
-      | undefined
-    if (storeCoords && storeCoords.length > 0) {
-      const idx = storeCoords.indexOf(value)
-      if (idx >= 0) return idx
-      // Value not present in the preloaded coordinate array: treat a numeric
-      // selector as a direct index.
-      return typeof value === 'number' ? value : 0
-    }
-
-    if (!this.zarrStore.root) {
-      return typeof value === 'number' ? value : 0
-    }
-
-    // Multiscale pyramids keep per-dimension coordinate arrays under per-level
-    // paths (e.g. `0/band/c/0`), not at the root. Passing `null` here resolves
-    // the coordinate array from the root, which 404s for those datasets; the
-    // catch below then falls back to index 0 for every selector value. An RGB
-    // selection (red/green/blue by name) therefore collapses all three channels
-    // to band 0 and renders greyscale. Resolve the in-flight level's path
-    // instead, gated on `isMultiscale` so single-level datasets (coordinates at
-    // root) are unaffected. `loadLevel` calls `buildSliceArgsForSelector`
-    // (and so this) before committing `activeLevel`, so fall through
-    // activeLevel.index -> loadingLevelIndex -> desiredLevelIndex -> 0 to use
-    // the level the in-flight load is actually targeting.
-    let levelInfo: string | null = null
-    if (this.isMultiscale && this.levels.length > 0) {
-      const rawLevelIndex =
-        this.activeLevel?.index ??
-        this.loadingLevelIndex ??
-        this.desiredLevelIndex ??
-        0
-      const safeIdx = Math.max(
-        0,
-        Math.min(rawLevelIndex, this.levels.length - 1)
-      )
-      levelInfo = this.levels[safeIdx]?.asset ?? null
-    }
-
-    try {
-      const coords = await loadDimensionValues(
-        this.dimensionValues,
-        levelInfo,
-        dimInfo,
-        this.zarrStore.root,
-        this.zarrStore.version
-      )
-      this.dimensionValues[dimName] = coords
-
-      const coordIdx = (coords as (number | string)[]).indexOf(value)
-      if (coordIdx >= 0) return coordIdx
-      throw new Error(
-        `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
-          `Available values: [${(coords as (number | string)[])
-            .slice(0, 10)
-            .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
-          `Use { selected: <index>, type: 'index' } to select by array index instead.`
-      )
-    } catch (err) {
-      console.debug(`Could not resolve coordinate for '${dimName}':`, err)
-    }
-
-    return typeof value === 'number' ? value : 0
-  }
-
   /**
    * Unified method to fetch query data for either point or region queries.
    * Handles multi-value dimensions and channel combinations.
@@ -2327,7 +2114,7 @@ export class RegionRenderer {
       const {
         combinations: channelCombinations,
         labelCombinations: channelLabelCombinations,
-      } = this.buildChannelCombinations(multiValueDims)
+      } = buildChannelCombinations(multiValueDims)
       const numChannels = channelCombinations.length || 1
       const multiValueDimNames = multiValueDims.map((d) => d.dimName)
       const getOpts = signal ? { signal } : undefined
