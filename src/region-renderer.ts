@@ -22,13 +22,7 @@ import type {
   RegionRenderState,
   CustomShaderConfig,
 } from './renderer-types'
-import type {
-  QueryGeometry,
-  QueryOptions,
-  QueryResult,
-  QueryDataValues,
-  NestedValues,
-} from './query/types'
+import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import type {
   LoadingStateCallback,
   MapLike,
@@ -45,21 +39,12 @@ import {
   type MercatorBounds,
   type XYLimits,
 } from './map-utils'
-import { normalizeSelector, getBands } from './zarr-utils'
+import { getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import { renderMapboxTile } from './mapbox-tile-renderer'
-import { queryRegionUntiled, findSpatialDimNames } from './query/region-query'
-import {
-  computePixelBoundsFromGeometry,
-  preprocessQueryGeometry,
-  wrappedBboxToPixelSpans,
-  rasterExtentCrossesAntimeridian,
-  type PixelRect,
-} from './query/query-utils'
 import {
   createProjectionContext,
-  pixelToSourceCRS,
   sampleEdgesToMercatorBounds,
   type ProjectionContext,
 } from './projection-utils'
@@ -67,7 +52,6 @@ import type {
   LevelMeta,
   LevelRuntime,
   LevelSnapshot,
-  QueryLevelSnapshot,
   RegionState,
 } from './region-state'
 import {
@@ -75,6 +59,7 @@ import {
   buildSliceArgsForSelector,
   type DimensionValuesCache,
 } from './selector-resolution'
+import { queryData as queryDataWithContext } from './query/data-query'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -2080,294 +2065,40 @@ export class RegionRenderer {
     emitLoadingStateUtil(this.loadingManager)
   }
 
-  /**
-   * Unified method to fetch query data for either point or region queries.
-   * Handles multi-value dimensions and channel combinations.
-   */
-  private async fetchQueryData(
-    level: QueryLevelSnapshot,
-    selector: NormalizedSelector,
-    spatialQuery: {
-      minX: number
-      maxX: number
-      minY: number
-      maxY: number
-    },
-    signal?: AbortSignal
-  ): Promise<{
-    data: Float32Array
-    width: number
-    height: number
-    channels: number
-    channelLabels: (string | number)[][]
-    multiValueDimNames: string[]
-  } | null> {
-    try {
-      const { sliceArgs: baseSliceArgs, multiValueDims } =
-        await this.buildSliceArgsForSelector(selector, {
-          includeSpatialSlices: false,
-          trackMultiValue: true,
-          spatialBounds: spatialQuery,
-          array: level.zarrArray,
-        })
-
-      const {
-        combinations: channelCombinations,
-        labelCombinations: channelLabelCombinations,
-      } = buildChannelCombinations(multiValueDims)
-      const numChannels = channelCombinations.length || 1
-      const multiValueDimNames = multiValueDims.map((d) => d.dimName)
-      const getOpts = signal ? { signal } : undefined
-
-      const fetchWidth = spatialQuery.maxX - spatialQuery.minX
-      const fetchHeight = spatialQuery.maxY - spatialQuery.minY
-
-      if (numChannels === 1) {
-        const result = (await zarr.get(
-          level.zarrArray,
-          baseSliceArgs,
-          getOpts
-        )) as { data: ArrayLike<number> }
-        return {
-          data: new Float32Array(result.data),
-          width: fetchWidth,
-          height: fetchHeight,
-          channels: 1,
-          channelLabels: channelLabelCombinations,
-          multiValueDimNames,
-        }
-      }
-
-      const packedData = new Float32Array(
-        fetchWidth * fetchHeight * numChannels
-      )
-      for (let c = 0; c < numChannels; c++) {
-        const sliceArgs = [...baseSliceArgs]
-        const combo = channelCombinations[c]
-        for (let i = 0; i < multiValueDims.length; i++) {
-          sliceArgs[multiValueDims[i].dimIndex] = combo[i]
-        }
-
-        const bandData = (await zarr.get(
-          level.zarrArray,
-          sliceArgs,
-          getOpts
-        )) as { data: ArrayLike<number> }
-        for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
-          packedData[pixIdx * numChannels + c] = bandData.data[pixIdx]
-        }
-      }
-
-      return {
-        data: packedData,
-        width: fetchWidth,
-        height: fetchHeight,
-        channels: numChannels,
-        channelLabels: channelLabelCombinations,
-        multiValueDimNames,
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
-      console.error('Error fetching query data:', err)
-      return null
-    }
-  }
-
-  /**
-   * Query data for point or region geometries.
-   */
+  /** Query data for point or region geometries. */
   async queryData(
     geometry: QueryGeometry,
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const desc = this.zarrStore.describe()
-    const sourceBounds: [number, number, number, number] | null = this.xyLimits
-      ? [
-          this.xyLimits.xMin,
-          this.xyLimits.yMin,
-          this.xyLimits.xMax,
-          this.xyLimits.yMax,
-        ]
-      : null
-    const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
-      desc.dimensions,
-      desc.dimIndices
-    )
-    const emptyResult = (): QueryResult => ({
-      [this.variable]: [],
-      dimensions: [],
-      coordinates: { [emptyYDim]: [], [emptyXDim]: [] },
-    })
-
     const activeLevel = this.activeLevel
-    if (!this.mercatorBounds || !activeLevel || !sourceBounds) {
-      return emptyResult()
-    }
-    const projectionDef = this.projection.def
-    if (!projectionDef) {
-      return emptyResult()
-    }
-
-    const level: QueryLevelSnapshot = {
-      index: activeLevel.index,
-      zarrArray: activeLevel.zarrArray,
-      width: activeLevel.width,
-      height: activeLevel.height,
-    }
-
-    const normalizedSelector = selector
-      ? normalizeSelector(selector)
-      : this.selector
-
-    const currentLevel = this.levels[level.index]
-    const transforms = {
-      scaleFactor: currentLevel?.scaleFactor ?? desc.scaleFactor,
-      addOffset: currentLevel?.addOffset ?? desc.addOffset,
-      fillValue: currentLevel?.fillValue ?? desc.fill_value,
-    }
-
-    // Closure for running a single pixel-bounds strip query.
-    // Captures request-scoped locals (not instance state) to avoid races
-    // when queryData is called concurrently on the same instance.
-    const runStrip = async (
-      geom: QueryGeometry,
-      pixelBounds: PixelRect,
-      opts?: QueryOptions
-    ): Promise<QueryResult | null> => {
-      const fetched = await this.fetchQueryData(
-        level,
-        normalizedSelector,
-        pixelBounds,
-        opts?.signal
-      )
-      if (!fetched) return null
-
-      const { minX, minY, maxX, maxY } = pixelBounds
-      const [xMin0, yMin0] = pixelToSourceCRS(
-        minX,
-        minY,
-        sourceBounds,
-        level.width,
-        level.height,
-        this.latIsAscending
-      )
-      const [xMax0, yMax0] = pixelToSourceCRS(
-        maxX,
-        maxY,
-        sourceBounds,
-        level.width,
-        level.height,
-        this.latIsAscending
-      )
-      const subsetSourceBounds: Bounds = [
-        Math.min(xMin0, xMax0),
-        Math.min(yMin0, yMax0),
-        Math.max(xMin0, xMax0),
-        Math.max(yMin0, yMax0),
-      ]
-
-      return queryRegionUntiled(
-        this.variable,
-        geom,
-        normalizedSelector,
-        fetched.data,
-        fetched.width,
-        fetched.height,
-        desc.dimensions,
-        desc.coordinates,
-        subsetSourceBounds,
-        projectionDef,
-        fetched.channels,
-        fetched.channelLabels,
-        fetched.multiValueDimNames,
-        this.latIsAscending,
-        transforms,
-        opts,
-        desc.dimIndices,
-        this.projection.toWGS84 ?? undefined
-      )
-    }
-
-    const singleFetch = async (geom: QueryGeometry): Promise<QueryResult> => {
-      const pixelBounds = computePixelBoundsFromGeometry(
-        geom,
-        sourceBounds,
-        level.width,
-        level.height,
-        projectionDef,
-        this.latIsAscending,
-        this.projection.toWGS84 ?? undefined
-      )
-      if (!pixelBounds) return emptyResult()
-      const result = await runStrip(geom, pixelBounds, options)
-      return result ?? emptyResult()
-    }
-
-    const { geometry: processedGeometry, bbox: wrappedBbox } =
-      preprocessQueryGeometry(geometry)
-
-    const supportsWrappedLongitude =
-      this.projection.kind === 'epsg4326' || this.projection.kind === 'epsg3857'
-    const queryGeometry = supportsWrappedLongitude
-      ? processedGeometry
-      : geometry
-
-    if (!wrappedBbox.crossesAntimeridian) {
-      return singleFetch(queryGeometry)
-    }
-
-    if (!supportsWrappedLongitude) {
-      if (!this._antimeridianWarnings.has('proj4-crossing')) {
-        this._antimeridianWarnings.add('proj4-crossing')
-        console.warn(
-          'Antimeridian-crossing polygon queries are not supported for proj4 projections; results may be incorrect'
-        )
-      }
-      return singleFetch(queryGeometry)
-    }
-
-    // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in meters)
-    if (
-      this.projection.kind === 'epsg4326' &&
-      rasterExtentCrossesAntimeridian('EPSG:4326', this.xyLimits)
-    ) {
-      if (!this._antimeridianWarnings.has('raster-extent-crossing')) {
-        this._antimeridianWarnings.add('raster-extent-crossing')
-        console.warn(
-          'Antimeridian-crossing polygon queries are not supported for rasters whose own extent crosses the antimeridian; results may be incorrect'
-        )
-      }
-      return singleFetch(geometry)
-    }
-
-    // Crossing: two-strip fetch
-    const spans = wrappedBboxToPixelSpans(
-      wrappedBbox,
-      sourceBounds,
-      level.width,
-      level.height,
-      projectionDef,
-      this.latIsAscending,
-      this.projection.toWGS84 ?? undefined
+    return queryDataWithContext(
+      {
+        zarrStore: this.zarrStore,
+        variable: this.variable,
+        selector: this.selector,
+        xyLimits: this.xyLimits,
+        mercatorBounds: this.mercatorBounds,
+        latIsAscending: this.latIsAscending,
+        levels: this.levels,
+        level: activeLevel
+          ? {
+              index: activeLevel.index,
+              zarrArray: activeLevel.zarrArray,
+              width: activeLevel.width,
+              height: activeLevel.height,
+            }
+          : null,
+        projection: this.projection,
+        antimeridianWarnings: this._antimeridianWarnings,
+        dimensionValues: this.dimensionValues,
+        isMultiscale: this.isMultiscale,
+        coordLevelIndex: activeLevel?.index ?? 0,
+      },
+      geometry,
+      selector,
+      options
     )
-
-    const westResult = spans.west
-      ? await runStrip(processedGeometry, spans.west, options)
-      : null
-    const eastResult = spans.east
-      ? await runStrip(processedGeometry, spans.east, options)
-      : null
-
-    // If either requested strip failed, return empty rather than partial data
-    if ((spans.west && !westResult) || (spans.east && !eastResult)) {
-      return emptyResult()
-    }
-    if (!westResult && !eastResult) return emptyResult()
-    if (!westResult || !eastResult) return (westResult ?? eastResult)!
-
-    const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
-    return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
 }
 
@@ -2384,88 +2115,4 @@ function longitudeWorldFraction(bounds: {
   }
   const span = rawSpan > 0 ? rawSpan : rawSpan + 360
   return Math.max(span / 360, Number.EPSILON)
-}
-
-/**
- * Merge two QueryResult objects from west and east strips.
- *
- * Ordering: west-strip pixels first, then east-strip pixels. This does NOT
- * preserve row-major scan order. The QueryResult contract provides parallel
- * coordinate arrays so consumers index by position, not implicit grid layout.
- *
- * Spatial coordinate arrays (yDim, xDim) are concatenated.
- * Non-spatial coordinate arrays are taken from the first result unchanged.
- */
-function mergeQueryResults(
-  a: QueryResult,
-  b: QueryResult,
-  variable: string,
-  yDim: string,
-  xDim: string
-): QueryResult {
-  const spatialKeys = new Set([yDim, xDim])
-
-  // Merge coordinates: concatenate spatial, take first for non-spatial
-  const coordinates: Record<string, (number | string)[]> = {}
-  for (const key of Object.keys(a.coordinates)) {
-    if (spatialKeys.has(key)) {
-      coordinates[key] = [...a.coordinates[key], ...b.coordinates[key]]
-    } else {
-      coordinates[key] = a.coordinates[key]
-    }
-  }
-
-  // Merge variable values
-  const aVals = a[variable] as QueryDataValues
-  const bVals = b[variable] as QueryDataValues
-
-  let merged: QueryDataValues
-  if (Array.isArray(aVals) && Array.isArray(bVals)) {
-    merged = [...aVals, ...bVals]
-  } else if (!Array.isArray(aVals) && !Array.isArray(bVals)) {
-    merged = mergeNestedValues(aVals as NestedValues, bVals as NestedValues)
-  } else {
-    merged = aVals // Mismatched types: take first
-  }
-
-  return {
-    [variable]: merged,
-    dimensions: a.dimensions,
-    coordinates,
-  }
-}
-
-/**
- * Recursively merge two NestedValues objects by concatenating leaf arrays.
- */
-function mergeNestedValues(a: NestedValues, b: NestedValues): NestedValues {
-  const result: NestedValues = {}
-  for (const key of Object.keys(a)) {
-    const aVal = a[key]
-    const bVal = b[key]
-    if (Array.isArray(aVal) && Array.isArray(bVal)) {
-      result[key] = [...aVal, ...bVal]
-    } else if (
-      aVal &&
-      bVal &&
-      !Array.isArray(aVal) &&
-      !Array.isArray(bVal) &&
-      typeof aVal === 'object' &&
-      typeof bVal === 'object'
-    ) {
-      result[key] = mergeNestedValues(
-        aVal as NestedValues,
-        bVal as NestedValues
-      )
-    } else {
-      result[key] = aVal
-    }
-  }
-  // Include keys only in b
-  for (const key of Object.keys(b)) {
-    if (!(key in result)) {
-      result[key] = b[key]
-    }
-  }
-  return result
 }
