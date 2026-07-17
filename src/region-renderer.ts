@@ -15,7 +15,6 @@ import {
   WEB_MERCATOR_EXTENT,
   MIN_SUBDIVISIONS,
   MAX_SUBDIVISIONS,
-  MERCATOR_LAT_LIMIT,
 } from './constants'
 import type {
   RenderContext,
@@ -35,7 +34,6 @@ import type {
   MapLike,
   NormalizedSelector,
   Selector,
-  CRS,
   Bounds,
   DimIndicesProps,
   UntiledLevel,
@@ -46,7 +44,6 @@ import {
   lonRangeOverlaps,
   type MercatorBounds,
   type XYLimits,
-  type Wgs84Bounds,
 } from './map-utils'
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
@@ -61,12 +58,18 @@ import {
   type PixelRect,
 } from './query/query-utils'
 import {
-  createTransformer,
-  createTransformerTo4326,
-  createWGS84ToSourceTransformer,
+  createProjectionContext,
   pixelToSourceCRS,
   sampleEdgesToMercatorBounds,
+  type ProjectionContext,
 } from './projection-utils'
+import type {
+  LevelMeta,
+  LevelRuntime,
+  LevelSnapshot,
+  QueryLevelSnapshot,
+  RegionState,
+} from './region-state'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -83,109 +86,8 @@ import {
 import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 
-/** State for a single region (chunk/shard) in region-based loading */
-interface RegionState {
-  key: string
-  levelIndex: number
-  regionX: number
-  regionY: number
-  // Data
-  data: Float32Array | null
-  width: number
-  height: number
-  loading: boolean
-  requestId: number | null
-  channels: number
-  // WebGL resources
-  texture: WebGLTexture | null
-  textureUploaded: boolean
-  vertexBuffer: WebGLBuffer | null
-  pixCoordBuffer: WebGLBuffer | null
-  indexBuffer: WebGLBuffer | null // For adaptive mesh indexed triangles
-  // Geometry arrays for this region's quad
-  vertexArr: Float32Array | null
-  pixCoordArr: Float32Array | null // Texture coordinates for sampling resampled data
-  indexArr: Uint32Array | null // Triangle indices for adaptive mesh
-  vertexCount: number // Number of vertices (for triangle strip) or indices (for indexed)
-  useIndexedMesh: boolean // Whether to use indexed triangles (adaptive mesh)
-  // Mercator bounds for this region (for shader uniforms)
-  mercatorBounds: MercatorBounds | null
-  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
-  wgs84Bounds: Wgs84Bounds | null
-  // Data orientation: true = row 0 is south
-  latIsAscending: boolean
-  // Version tracking for selector changes
-  selectorVersion: number
-  // Multi-band support
-  bandData: Map<string, Float32Array>
-  bandTextures: Map<string, WebGLTexture>
-  bandTexturesUploaded: Set<string>
-  bandTexturesConfigured: Set<string>
-  // Level-specific dimensions for region geometry bounds.
-  // Set from LevelSnapshot during fetch to avoid races with level switching.
-  levelMeta: LevelMeta | null
-}
-
-/** Level-specific dimensions for geometry bounds calculation */
-type LevelMeta = {
-  width: number
-  height: number
-  regionSize: [number, number]
-  // xyLimits omitted - assumed constant across levels for now.
-  // TODO: If heterogeneous pyramids with per-level bounds are needed,
-  // add xyLimits here and store per-region.
-}
-
-type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4'
-
 /** Maximum number of regions to keep in cache (LRU eviction) */
 const MAX_CACHED_REGIONS = 128
-/** Snapshot of level state captured at fetch start to prevent race conditions */
-interface LevelSnapshot {
-  index: number
-  zarrArray: zarr.Array<zarr.DataType>
-  baseSliceArgs: (number | zarr.Slice)[]
-  baseMultiValueDims: Array<{
-    dimIndex: number
-    dimName: string
-    values: number[]
-    labels: (number | string)[]
-  }>
-  width: number
-  height: number
-  regionSize: [number, number]
-  selectorVersion: number
-  bandNames: string[]
-}
-
-/**
- * Fully-committed per-level state. Replaces six top-level fields that were
- * previously mutated independently across `initializeLevel`, `switchToLevel`,
- * `_initialize`, and `setSelector` — any of which was one `await` away from
- * a half-commit race.
- *
- * `RegionRenderer.activeLevel` is either `null` (nothing loaded) or a fully-
- * formed runtime; readers never see a partial level.
- */
-interface LevelRuntime {
-  index: number
-  zarrArray: zarr.Array<zarr.DataType>
-  width: number
-  height: number
-  regionSize: [number, number]
-  baseSliceArgs: (number | zarr.Slice)[]
-  baseMultiValueDims: Array<{
-    dimIndex: number
-    dimName: string
-    values: number[]
-    labels: (number | string)[]
-  }>
-}
-
-type QueryLevelSnapshot = Pick<
-  LevelRuntime,
-  'index' | 'zarrArray' | 'width' | 'height'
->
 
 export class RegionRenderer {
   isMultiscale: boolean = false
@@ -222,21 +124,11 @@ export class RegionRenderer {
   // Multi-level support
   private levels: UntiledLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
-  private projectionKind: ProjectionKind = 'epsg4326'
-  // Transformer definition: EPSG code for built-ins, supplied string for custom proj4.
-  private proj4def: string | null = null
-
-  // Cached transformers for proj4 reprojection (created once, reused everywhere)
-  private cachedMercatorTransformer: ReturnType<
-    typeof createTransformer
-  > | null = null
-  private cachedWGS84Transformer: ReturnType<
-    typeof createWGS84ToSourceTransformer
-  > | null = null
-  // Transformer: source CRS → EPSG:4326 (input to source-projected mesh generation)
-  private cached4326Transformer: ReturnType<
-    typeof createTransformerTo4326
-  > | null = null
+  private projection: ProjectionContext = createProjectionContext({
+    crs: 'EPSG:4326',
+    proj4def: null,
+    xyLimits: null,
+  })
 
   // Loading state
   private isRemoved: boolean = false
@@ -298,45 +190,12 @@ export class RegionRenderer {
       this.dimIndices = desc.dimIndices
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
-      this.projectionKind = resolveProjectionKind(desc.crs, desc.proj4)
-      this.proj4def = resolveProjectionDef(desc.crs, desc.proj4)
-
       // Cache transformers once for reuse (major performance optimization)
-      if (this.proj4def && this.xyLimits) {
-        const bounds: [number, number, number, number] = [
-          this.xyLimits.xMin,
-          this.xyLimits.yMin,
-          this.xyLimits.xMax,
-          this.xyLimits.yMax,
-        ]
-        const rawMercatorTransformer = createTransformer(this.proj4def, bounds)
-        // Wrap the source→3857 forward so lat=±90° inputs (common for global
-        // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
-        // sees them. Without this, `sampleEdgesToMercatorBounds` silently
-        // drops the polar edge samples and produces too-tight mercator bounds.
-        this.cachedMercatorTransformer =
-          this.projectionKind === 'epsg4326'
-            ? {
-                ...rawMercatorTransformer,
-                forward: (x, y) =>
-                  rawMercatorTransformer.forward(
-                    x,
-                    Math.max(
-                      -MERCATOR_LAT_LIMIT,
-                      Math.min(MERCATOR_LAT_LIMIT, y)
-                    )
-                  ),
-              }
-            : rawMercatorTransformer
-        this.cachedWGS84Transformer = createWGS84ToSourceTransformer(
-          this.proj4def
-        )
-        // Source CRS → EPSG:4326 (for WGS84 mesh vertices and ECEF projection)
-        this.cached4326Transformer = createTransformerTo4326(
-          this.proj4def,
-          bounds
-        )
-      }
+      this.projection = createProjectionContext({
+        crs: desc.crs,
+        proj4def: desc.proj4,
+        xyLimits: this.xyLimits,
+      })
 
       // Check if this is a multi-level dataset
       if (desc.untiledLevels && desc.untiledLevels.length > 0) {
@@ -356,7 +215,7 @@ export class RegionRenderer {
       }
 
       if (this.xyLimits) {
-        if (this.proj4def) {
+        if (this.projection.def) {
           this.mercatorBounds = this.computeMercatorBoundsFromProjection()
         }
       } else {
@@ -556,7 +415,7 @@ export class RegionRenderer {
   ): Array<{ regionX: number; regionY: number }> {
     const bounds = map.getBounds?.()?.toArray?.()
     if (!bounds || !this.xyLimits || !this.activeLevel) return []
-    if (!this.proj4def || !this.cachedWGS84Transformer) {
+    if (!this.projection.def || !this.projection.toWGS84) {
       // No proj4 transformer was set up — either because the CRS isn't
       // one proj4js handles natively and no `proj4` prop was supplied
       // (constructor warned), or because proj4 init threw on a malformed
@@ -574,7 +433,7 @@ export class RegionRenderer {
     //    regions via index math (O(1) proj4 cost, may include false
     //    positives for non-bijective projections like UTM outside their zone)
     // 2. Inverse-transform candidate region bounds to WGS84 for precise overlap
-    const transformer = this.cachedWGS84Transformer
+    const transformer = this.projection.toWGS84
     const numRegionsX = Math.ceil(width / regionW)
     const numRegionsY = Math.ceil(height / regionH)
 
@@ -1036,9 +895,9 @@ export class RegionRenderer {
     region.useIndexedMesh = false
 
     if (
-      !this.proj4def ||
-      !this.cached4326Transformer ||
-      !this.cachedMercatorTransformer
+      !this.projection.def ||
+      !this.projection.to4326 ||
+      !this.projection.toMercator
     ) {
       return
     }
@@ -1054,11 +913,11 @@ export class RegionRenderer {
     const centerX = (geoBounds.xMin + geoBounds.xMax) / 2
     const centerY = (geoBounds.yMin + geoBounds.yMax) / 2
     const samplePoints = [
-      this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMin),
-      this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMin),
-      this.cached4326Transformer.forward(geoBounds.xMin, geoBounds.yMax),
-      this.cached4326Transformer.forward(geoBounds.xMax, geoBounds.yMax),
-      this.cached4326Transformer.forward(centerX, centerY),
+      this.projection.to4326.forward(geoBounds.xMin, geoBounds.yMin),
+      this.projection.to4326.forward(geoBounds.xMax, geoBounds.yMin),
+      this.projection.to4326.forward(geoBounds.xMin, geoBounds.yMax),
+      this.projection.to4326.forward(geoBounds.xMax, geoBounds.yMax),
+      this.projection.to4326.forward(centerX, centerY),
     ]
     const validLats = samplePoints
       .map((p) => p[1])
@@ -1072,7 +931,7 @@ export class RegionRenderer {
     // would fold it via adjust_lon and understate it. Other projections have no
     // such direct measure, so use the sampled WGS84 longitudes.
     let lonSpan: number
-    if (this.projectionKind === 'epsg4326') {
+    if (this.projection.kind === 'epsg4326') {
       lonSpan = Math.min(360, Math.abs(geoBounds.xMax - geoBounds.xMin))
     } else {
       const validLons = samplePoints
@@ -1104,9 +963,9 @@ export class RegionRenderer {
       height: region.height,
       lonSubdivisions,
       latSubdivisions,
-      transformer: this.cached4326Transformer,
+      transformer: this.projection.to4326,
       latIsAscending: this.latIsAscending,
-      allowUnwrappedLongitudes: this.projectionKind === 'epsg4326',
+      allowUnwrappedLongitudes: this.projection.kind === 'epsg4326',
       // The mesh encodes vertices as deltas from a per-region mercator origin
       // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
       // anchor_clip, keeping the eye origin near the on-screen region for
@@ -1628,7 +1487,7 @@ export class RegionRenderer {
       // GPU handles reprojection. Source-projected data uses an adaptive mesh
       // (source CRS → WGS84), then the GPU projects to Mercator or ECEF.
       const needsProj4MercBounds =
-        this.proj4def && this.cachedMercatorTransformer
+        this.projection.def && this.projection.toMercator
 
       if (needsProj4MercBounds && this.xyLimits && !region.mercatorBounds) {
         const levelMeta: LevelMeta = {
@@ -1923,7 +1782,7 @@ export class RegionRenderer {
 
     // Calculate what fraction of the world the data covers, accounting for CRS
     let worldFraction: number
-    if (this.projectionKind === 'epsg4326') {
+    if (this.projection.kind === 'epsg4326') {
       // proj4's adjust_lon folds inputs outside [-180, 180] back into range
       // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
       // distorts the width for 0-360° stores and antimeridian-crossing
@@ -1931,18 +1790,18 @@ export class RegionRenderer {
       // render bounds may conservatively expand antimeridian-crossing regions
       // to full-world X for tile intersection.
       worldFraction = longitudeWorldFraction(this.xyLimits)
-    } else if (this.projectionKind === 'epsg3857') {
+    } else if (this.projection.kind === 'epsg3857') {
       // Web Mercator: full world is ~40,075,016 meters
       const dataWidth = this.xyLimits.xMax - this.xyLimits.xMin
       const fullWorldMeters = 2 * WEB_MERCATOR_EXTENT
       worldFraction = dataWidth / fullWorldMeters
-    } else if (this.proj4def && this.cachedMercatorTransformer) {
+    } else if (this.projection.def && this.projection.toMercator) {
       // Source-projected data: transform bounds corners to mercator
-      const [minMercX] = this.cachedMercatorTransformer.forward(
+      const [minMercX] = this.projection.toMercator.forward(
         this.xyLimits.xMin,
         this.xyLimits.yMin
       )
-      const [maxMercX] = this.cachedMercatorTransformer.forward(
+      const [maxMercX] = this.projection.toMercator.forward(
         this.xyLimits.xMax,
         this.xyLimits.yMax
       )
@@ -1955,11 +1814,11 @@ export class RegionRenderer {
       // strip (y=0), which stays in-domain for any cylindrical-like projection
       // and gives the correct horizontal extent.
       if (!isFinite(dataWidthMeters) || dataWidthMeters > fullWorldMeters) {
-        const [eqMinX] = this.cachedMercatorTransformer.forward(
+        const [eqMinX] = this.projection.toMercator.forward(
           this.xyLimits.xMin,
           0
         )
-        const [eqMaxX] = this.cachedMercatorTransformer.forward(
+        const [eqMaxX] = this.projection.toMercator.forward(
           this.xyLimits.xMax,
           0
         )
@@ -2003,7 +1862,7 @@ export class RegionRenderer {
   render(renderer: ZarrRenderer, context: RenderContext): void {
     const useMapbox = !!context.mapbox
     // Use the source-projected mesh path when the CRS is resolved via proj4.
-    const useWgs84 = !!this.proj4def && !!this.cached4326Transformer
+    const useWgs84 = !!this.projection.def && !!this.projection.to4326
 
     // MapLibre globe exposes a projectionTransition value in the shader prelude.
     // Keep ECEF active while that transition is nonzero.
@@ -2215,9 +2074,11 @@ export class RegionRenderer {
     // Clean up region caches
     this.clearRegionCache(gl)
     this.activeLevel = null
-    this.cachedMercatorTransformer = null
-    this.cachedWGS84Transformer = null
-    this.cached4326Transformer = null
+    this.projection = createProjectionContext({
+      crs: 'EPSG:4326',
+      proj4def: null,
+      xyLimits: null,
+    })
     this.loadingDebouncer.hide()
   }
 
@@ -2232,18 +2093,18 @@ export class RegionRenderer {
     if (!this.xyLimits) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
-    if (this.projectionKind === 'epsg4326') {
+    if (this.projection.kind === 'epsg4326') {
       return boundsToMercatorNorm(this.xyLimits, 'EPSG:4326')
     }
-    if (this.projectionKind === 'epsg3857') {
+    if (this.projection.kind === 'epsg3857') {
       return boundsToMercatorNorm(this.xyLimits, 'EPSG:3857')
     }
-    if (!this.proj4def || !this.cachedMercatorTransformer) {
+    if (!this.projection.def || !this.projection.toMercator) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     const result = sampleEdgesToMercatorBounds(
       this.xyLimits,
-      this.cachedMercatorTransformer,
+      this.projection.toMercator,
       20
     )
     if (!result) {
@@ -2264,18 +2125,18 @@ export class RegionRenderer {
     yMin: number
     yMax: number
   }): MercatorBounds {
-    if (this.projectionKind === 'epsg4326') {
+    if (this.projection.kind === 'epsg4326') {
       return boundsToMercatorNorm(bounds, 'EPSG:4326')
     }
-    if (this.projectionKind === 'epsg3857') {
+    if (this.projection.kind === 'epsg3857') {
       return boundsToMercatorNorm(bounds, 'EPSG:3857')
     }
-    if (!this.proj4def || !this.cachedMercatorTransformer) {
+    if (!this.projection.def || !this.projection.toMercator) {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     const result = sampleEdgesToMercatorBounds(
       bounds,
-      this.cachedMercatorTransformer,
+      this.projection.toMercator,
       5
     )
     if (!result) {
@@ -2556,7 +2417,7 @@ export class RegionRenderer {
     if (!this.mercatorBounds || !activeLevel || !sourceBounds) {
       return emptyResult()
     }
-    const projectionDef = this.proj4def
+    const projectionDef = this.projection.def
     if (!projectionDef) {
       return emptyResult()
     }
@@ -2637,7 +2498,7 @@ export class RegionRenderer {
         transforms,
         opts,
         desc.dimIndices,
-        this.cachedWGS84Transformer ?? undefined
+        this.projection.toWGS84 ?? undefined
       )
     }
 
@@ -2649,7 +2510,7 @@ export class RegionRenderer {
         level.height,
         projectionDef,
         this.latIsAscending,
-        this.cachedWGS84Transformer ?? undefined
+        this.projection.toWGS84 ?? undefined
       )
       if (!pixelBounds) return emptyResult()
       const result = await runStrip(geom, pixelBounds, options)
@@ -2660,7 +2521,7 @@ export class RegionRenderer {
       preprocessQueryGeometry(geometry)
 
     const supportsWrappedLongitude =
-      this.projectionKind === 'epsg4326' || this.projectionKind === 'epsg3857'
+      this.projection.kind === 'epsg4326' || this.projection.kind === 'epsg3857'
     const queryGeometry = supportsWrappedLongitude
       ? processedGeometry
       : geometry
@@ -2681,7 +2542,7 @@ export class RegionRenderer {
 
     // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in meters)
     if (
-      this.projectionKind === 'epsg4326' &&
+      this.projection.kind === 'epsg4326' &&
       rasterExtentCrossesAntimeridian('EPSG:4326', this.xyLimits)
     ) {
       if (!this._antimeridianWarnings.has('raster-extent-crossing')) {
@@ -2701,7 +2562,7 @@ export class RegionRenderer {
       level.height,
       projectionDef,
       this.latIsAscending,
-      this.cachedWGS84Transformer ?? undefined
+      this.projection.toWGS84 ?? undefined
     )
 
     const westResult = spans.west
@@ -2721,38 +2582,6 @@ export class RegionRenderer {
     const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
     return mergeQueryResults(westResult, eastResult, this.variable, yDim, xDim)
   }
-}
-
-function normalizeBuiltinProjectionDef(
-  def: string | null | undefined
-): CRS | null {
-  if (!def) return null
-  const normalized = def.trim().toUpperCase()
-  return normalized === 'EPSG:4326' || normalized === 'EPSG:3857'
-    ? normalized
-    : null
-}
-
-function resolveProjectionKind(
-  crs: CRS,
-  proj4def: string | null
-): ProjectionKind {
-  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
-  if (builtinProj4Def) {
-    return builtinProj4Def === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
-  }
-  if (proj4def?.trim()) {
-    return 'custom-proj4'
-  }
-  return crs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
-}
-
-function resolveProjectionDef(crs: CRS, proj4def: string | null): string {
-  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
-  if (builtinProj4Def) return builtinProj4Def
-  const trimmedProj4Def = proj4def?.trim()
-  if (trimmedProj4Def) return trimmedProj4Def
-  return crs
 }
 
 function longitudeWorldFraction(bounds: {
