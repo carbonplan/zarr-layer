@@ -493,7 +493,6 @@ export class RegionRenderer {
   private createRegionGeometry(
     regionX: number,
     regionY: number,
-    gl: WebGL2RenderingContext,
     region: RegionState
   ): void {
     // Guard: can't create geometry without dimension info
@@ -589,28 +588,6 @@ export class RegionRenderer {
     region.wgs84Bounds = meshResult.wgs84Bounds
     region.useIndexedMesh = true
     region.vertexCount = region.indexArr.length
-
-    // Create/update buffers
-    if (!region.vertexBuffer) {
-      region.vertexBuffer = gl.createBuffer()
-    }
-    if (!region.pixCoordBuffer) {
-      region.pixCoordBuffer = gl.createBuffer()
-    }
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
-    gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
-
-    // Upload index buffer for adaptive mesh
-    if (region.useIndexedMesh && region.indexArr) {
-      if (!region.indexBuffer) {
-        region.indexBuffer = gl.createBuffer()
-      }
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
-    }
   }
 
   private async buildSliceArgsForSelector(
@@ -782,19 +759,19 @@ export class RegionRenderer {
     }
 
     if (newRegions.length > 0) {
-      this.fetchRegions(newRegions, gl)
+      this.fetchRegions(newRegions)
     }
     if (staleRegions.length > 0) {
-      this.fetchRegions(staleRegions, gl)
+      this.fetchRegions(staleRegions)
     }
+    this.evictOldRegions(gl)
   }
 
   /**
    * Fetch multiple regions with limited concurrency to avoid overwhelming the browser.
    */
   private async fetchRegions(
-    regions: Array<{ regionX: number; regionY: number }>,
-    gl: WebGL2RenderingContext
+    regions: Array<{ regionX: number; regionY: number }>
   ): Promise<void> {
     // Can't fetch without a committed level.
     if (!this.activeLevel) return
@@ -851,7 +828,7 @@ export class RegionRenderer {
       // pressure on the connection pool; throttling fetchRegion calls here
       // just fragments the coalescer's same-tick batch window.
       const fetches = regions.map(({ regionX, regionY }) =>
-        this.fetchRegion(regionX, regionY, gl, snapshot)
+        this.fetchRegion(regionX, regionY, snapshot)
       )
       await Promise.allSettled(fetches)
     }
@@ -860,8 +837,6 @@ export class RegionRenderer {
     if (!hasActiveRequests(this.requestCanceller)) {
       this.loadingDebouncer.hide()
 
-      // Evict old regions if cache is full (LRU via Map insertion order)
-      this.evictOldRegions(gl)
       this.invalidate()
     }
   }
@@ -874,7 +849,6 @@ export class RegionRenderer {
   private async fetchRegion(
     regionX: number,
     regionY: number,
-    gl: WebGL2RenderingContext,
     snapshot: LevelSnapshot
   ): Promise<void> {
     if ((this.activeLevel?.index ?? -1) !== snapshot.index) {
@@ -1055,7 +1029,7 @@ export class RegionRenderer {
       // Check if geometry needs to be (re)created before updating dimensions
       // The adaptive mesh only depends on spatial bounds and dimensions, not the selector
       const needsGeometry =
-        !region.vertexBuffer ||
+        !region.vertexArr ||
         region.width !== actualW ||
         region.height !== actualH
 
@@ -1073,25 +1047,11 @@ export class RegionRenderer {
         regionSize: [...snapshot.regionSize] as [number, number],
       }
 
-      // Create/update main texture for this region
-      if (!region.texture) {
-        region.texture = gl.createTexture()
-      }
-
-      // Upload texture using shared helper
-      const result = uploadDataTexture(gl, {
-        texture: region.texture!,
-        data: region.data!,
-        width: actualW,
-        height: actualH,
-        channels: numChannels,
-        configured: false,
-      })
-      region.textureUploaded = result.uploaded
+      region.textureUploaded = false
 
       // Create geometry only if needed (new region or dimensions changed)
       if (needsGeometry) {
-        this.createRegionGeometry(regionX, regionY, gl, region)
+        this.createRegionGeometry(regionX, regionY, region)
       }
 
       this.invalidate()
@@ -1379,6 +1339,49 @@ export class RegionRenderer {
    * for the ECEF vertex shader path. Render-only fields are set here instead of
    * cached on RegionState, so projection toggles have no stale state.
    */
+  private ensureRegionGpuResources(
+    gl: WebGL2RenderingContext,
+    region: RegionState
+  ): boolean {
+    if (!region.data || !region.vertexArr || !region.pixCoordArr) return false
+
+    if (!region.texture) region.texture = gl.createTexture()
+    if (!region.texture) return false
+    if (!region.textureUploaded) {
+      const result = uploadDataTexture(gl, {
+        texture: region.texture,
+        data: region.data,
+        width: region.width,
+        height: region.height,
+        channels: region.channels,
+        configured: false,
+      })
+      region.textureUploaded = result.uploaded
+    }
+
+    if (!region.vertexBuffer) {
+      region.vertexBuffer = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
+      gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
+    }
+    if (!region.pixCoordBuffer) {
+      region.pixCoordBuffer = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
+      gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
+    }
+    if (region.useIndexedMesh && region.indexArr && !region.indexBuffer) {
+      region.indexBuffer = gl.createBuffer()
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
+    }
+    return !!(
+      region.textureUploaded &&
+      region.vertexBuffer &&
+      region.pixCoordBuffer &&
+      (!region.useIndexedMesh || region.indexBuffer)
+    )
+  }
+
   private regionToRenderable(
     region: RegionState,
     useDirectEcef: boolean = false
@@ -1432,6 +1435,7 @@ export class RegionRenderer {
 
     // Render each loaded region using unified path
     for (const region of this.getLoadedRegions()) {
+      if (!this.ensureRegionGpuResources(gl, region)) continue
       renderRegion(
         gl,
         shaderProgram,
@@ -1457,7 +1461,7 @@ export class RegionRenderer {
         ...context,
         uniforms: this.getUniformsForRender(context.uniforms),
       },
-      regions: this.getRegionStates(),
+      regions: this.getRegionStates(renderer.gl),
     })
   }
 
@@ -1470,30 +1474,32 @@ export class RegionRenderer {
    * Get render states for all loaded regions (for multi-region rendering).
    * Includes previous level regions as fallback during level transitions.
    */
-  private getRegionStates(): RegionRenderState[] {
+  private getRegionStates(gl: WebGL2RenderingContext): RegionRenderState[] {
     if (!(this.activeLevel?.regionSize ?? null)) {
       return []
     }
 
-    return this.getLoadedRegions().map((region) => ({
-      texture: region.texture!,
-      vertexBuffer: region.vertexBuffer!,
-      pixCoordBuffer: region.pixCoordBuffer!,
-      vertexArr: region.vertexArr!,
-      mercatorBounds: region.mercatorBounds!,
-      width: region.width,
-      height: region.height,
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
-      // Indexed mesh fields for proj4 adaptive mesh
-      indexBuffer: region.indexBuffer ?? undefined,
-      vertexCount: region.vertexCount,
-      useIndexedMesh: region.useIndexedMesh,
-      wgs84Bounds: region.wgs84Bounds ?? undefined,
-      latIsAscending: region.latIsAscending,
-    }))
+    return this.getLoadedRegions()
+      .filter((region) => this.ensureRegionGpuResources(gl, region))
+      .map((region) => ({
+        texture: region.texture!,
+        vertexBuffer: region.vertexBuffer!,
+        pixCoordBuffer: region.pixCoordBuffer!,
+        vertexArr: region.vertexArr!,
+        mercatorBounds: region.mercatorBounds!,
+        width: region.width,
+        height: region.height,
+        bandData: region.bandData,
+        bandTextures: region.bandTextures,
+        bandTexturesUploaded: region.bandTexturesUploaded,
+        bandTexturesConfigured: region.bandTexturesConfigured,
+        // Indexed mesh fields for proj4 adaptive mesh
+        indexBuffer: region.indexBuffer ?? undefined,
+        vertexCount: region.vertexCount,
+        useIndexedMesh: region.useIndexedMesh,
+        wgs84Bounds: region.wgs84Bounds ?? undefined,
+        latIsAscending: region.latIsAscending,
+      }))
   }
 
   dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void {

@@ -54,11 +54,8 @@ export function createRegionState(
 export function isRegionValid(region: RegionState): boolean {
   return !!(
     region.data &&
-    region.textureUploaded &&
-    region.texture &&
-    region.vertexBuffer &&
-    region.pixCoordBuffer &&
     region.vertexArr &&
+    region.pixCoordArr &&
     region.mercatorBounds &&
     region.levelMeta
   )
