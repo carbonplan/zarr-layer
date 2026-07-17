@@ -58,6 +58,12 @@ import {
   getVisibleRegions,
   selectLevelForZoom,
 } from './region-math'
+import {
+  RegionCache,
+  createRegionState,
+  isRegionValid,
+  makeRegionKey,
+} from './region-cache'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -73,9 +79,6 @@ import {
 } from './region-utils'
 import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
-
-/** Maximum number of regions to keep in cache (LRU eviction) */
-const MAX_CACHED_REGIONS = 128
 
 export class RegionRenderer {
   isMultiscale: boolean = false
@@ -134,12 +137,7 @@ export class RegionRenderer {
 
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
-  private regionCache: Map<string, RegionState> = new Map()
-  // Keys of regions protected from eviction. Rebuilt in updateVisibleRegions()
-  // from the current viewport: the current level's visible regions, plus
-  // other-level regions retained as fallbacks until the current level covers
-  // the viewport.
-  private visibleRegionKeys: Set<string> = new Set()
+  private regionCache = new RegionCache()
   private lastVisibleRegions: Array<{ regionX: number; regionY: number }> = [] // Last computed visible regions
   private lastVisibleRegionsLevel: number = -1 // Level index that lastVisibleRegions corresponds to
   private lastViewportHash: string = ''
@@ -316,27 +314,8 @@ export class RegionRenderer {
   private clearRegionCache(
     gl: WebGL2RenderingContext | WebGLRenderingContext
   ): void {
-    for (const region of this.regionCache.values()) {
-      this.disposeRegion(region, gl)
-    }
-    this.regionCache.clear()
+    this.regionCache.clear(gl)
     this.lastViewportHash = ''
-  }
-
-  /**
-   * Dispose WebGL resources for a single region.
-   */
-  private disposeRegion(
-    region: RegionState,
-    gl: WebGL2RenderingContext | WebGLRenderingContext
-  ): void {
-    if (region.texture) gl.deleteTexture(region.texture)
-    if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
-    if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer)
-    if (region.indexBuffer) gl.deleteBuffer(region.indexBuffer)
-    for (const tex of region.bandTextures.values()) {
-      gl.deleteTexture(tex)
-    }
   }
 
   /**
@@ -345,19 +324,7 @@ export class RegionRenderer {
    * Never evicts currently visible regions.
    */
   private evictOldRegions(gl: WebGL2RenderingContext): void {
-    while (this.regionCache.size > MAX_CACHED_REGIONS) {
-      let evictedKey: string | null = null
-      for (const key of this.regionCache.keys()) {
-        if (!this.visibleRegionKeys.has(key)) {
-          evictedKey = key
-          break
-        }
-      }
-      if (!evictedKey) break // All regions are visible, stop
-      const region = this.regionCache.get(evictedKey)
-      if (region) this.disposeRegion(region, gl)
-      this.regionCache.delete(evictedKey)
-    }
+    this.regionCache.evict(gl)
   }
 
   private getVisibleRegions(
@@ -380,7 +347,7 @@ export class RegionRenderer {
     regionX: number,
     regionY: number
   ): string {
-    return `${levelIndex}:${regionX},${regionY}`
+    return makeRegionKey(levelIndex, regionX, regionY)
   }
 
   /**
@@ -391,53 +358,20 @@ export class RegionRenderer {
     regionX: number,
     regionY: number
   ): RegionState {
-    return {
-      key: this.makeRegionKey(levelIndex, regionX, regionY),
+    return createRegionState(
       levelIndex,
       regionX,
       regionY,
-      data: null,
-      width: 0,
-      height: 0,
-      loading: false,
-      requestId: null,
-      channels: 1,
-      texture: null,
-      textureUploaded: false,
-      vertexBuffer: null,
-      pixCoordBuffer: null,
-      indexBuffer: null,
-      vertexArr: null,
-      pixCoordArr: null,
-      indexArr: null,
-      vertexCount: 0,
-      useIndexedMesh: false,
-      mercatorBounds: null,
-      wgs84Bounds: null,
-      latIsAscending: this.latIsAscending,
-      selectorVersion: this.selectorVersion,
-      bandData: new Map(),
-      bandTextures: new Map(),
-      bandTexturesUploaded: new Set(),
-      bandTexturesConfigured: new Set(),
-      levelMeta: null, // Set from snapshot in fetchRegion
-    }
+      this.latIsAscending,
+      this.selectorVersion
+    )
   }
 
   /**
    * Check if a region has all required data for rendering.
    */
   private isRegionValid(region: RegionState): boolean {
-    return !!(
-      region.data &&
-      region.textureUploaded &&
-      region.texture &&
-      region.vertexBuffer &&
-      region.pixCoordBuffer &&
-      region.vertexArr &&
-      region.mercatorBounds &&
-      region.levelMeta
-    )
+    return isRegionValid(region)
   }
 
   /**
@@ -503,7 +437,7 @@ export class RegionRenderer {
       if (region.levelIndex === (this.activeLevel?.index ?? -1)) continue
       if (!this.isRegionValid(region)) continue
       // Only include regions that are protected (were visible)
-      if (!this.visibleRegionKeys.has(region.key)) continue
+      if (!this.regionCache.isProtected(region.key)) continue
       fallbacks.push(region)
     }
     return fallbacks
@@ -763,16 +697,11 @@ export class RegionRenderer {
     // state (map bounds or transformer unavailable), so keep the previous
     // set rather than unprotect regions that are still rendered.
     if (visible.length > 0) {
-      const nextProtected = new Set(visibleKeys)
-      if (!this.currentLevelCoversViewport()) {
-        const currentLevelPrefix = `${levelIndex}:`
-        for (const key of this.visibleRegionKeys) {
-          if (!key.startsWith(currentLevelPrefix)) {
-            nextProtected.add(key)
-          }
-        }
-      }
-      this.visibleRegionKeys = nextProtected
+      this.regionCache.rebuildProtection(visibleKeys, {
+        retainKeysNotMatching: this.currentLevelCoversViewport()
+          ? ''
+          : `${levelIndex}:`,
+      })
     }
 
     // Abort in-flight fetches for regions that left the viewport.
