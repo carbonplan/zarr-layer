@@ -393,8 +393,12 @@ export class RegionFetcher {
         console.error(`[fetchRegion] Error fetching region ${key}:`, err)
       }
     } finally {
-      region.loading = false
-      region.requestId = null
+      // Only clear flags if this request still owns the region — a newer
+      // request may have taken over while an aborted one was unwinding.
+      if (region.requestId === requestId) {
+        region.loading = false
+        region.requestId = null
+      }
       this.context.requestCanceller.controllers.delete(requestId)
       // Re-evaluate visible regions after abort so panned-back regions get re-fetched.
       if (controller.signal.aborted && !this.context.isRemoved()) {

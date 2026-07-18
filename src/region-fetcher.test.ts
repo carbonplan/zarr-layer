@@ -260,6 +260,23 @@ describe('RegionFetcher', () => {
     }
   })
 
+  it('an aborted fetch does not clobber a newer request that took over the region', async () => {
+    const harness = await makeHarness({ gateReads: true })
+    const { fetcher, cache, requestCanceller, releaseReads } = harness
+
+    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    cancelAllRequests(requestCanceller)
+    // A newer request takes over the region while the aborted one unwinds.
+    region.requestId = 999
+    region.loading = true
+    releaseReads()
+    await batch
+
+    expect(region.requestId).toBe(999)
+    expect(region.loading).toBe(true)
+  })
+
   it('does nothing without a committed level', async () => {
     const harness = await makeHarness()
     const { fetcher, cache, setLevel } = harness
