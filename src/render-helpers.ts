@@ -7,6 +7,7 @@
 
 import type { ShaderProgram } from './shader-program'
 import type { CustomShaderConfig } from './renderer-types'
+import type { RegionState } from './region-state'
 import { configureDataTexture, getTextureFormats } from './webgl-utils'
 
 /**
@@ -207,4 +208,53 @@ export function uploadDataTexture(
   )
 
   return { configured: true, uploaded: true }
+}
+
+/**
+ * Lazily create and upload a region's GPU resources from its CPU-side state.
+ * Fetch produces only data and geometry arrays; the render paths call this
+ * per frame so uploads happen on the context that is actually drawing.
+ * Returns false while the region isn't renderable yet.
+ */
+export function ensureRegionGpuResources(
+  gl: WebGL2RenderingContext,
+  region: RegionState
+): boolean {
+  if (!region.data || !region.vertexArr || !region.pixCoordArr) return false
+
+  if (!region.texture) region.texture = gl.createTexture()
+  if (!region.texture) return false
+  if (!region.textureUploaded) {
+    const result = uploadDataTexture(gl, {
+      texture: region.texture,
+      data: region.data,
+      width: region.width,
+      height: region.height,
+      channels: region.channels,
+      configured: false,
+    })
+    region.textureUploaded = result.uploaded
+  }
+
+  if (!region.vertexBuffer) {
+    region.vertexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
+    gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
+  }
+  if (!region.pixCoordBuffer) {
+    region.pixCoordBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
+    gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
+  }
+  if (region.useIndexedMesh && region.indexArr && !region.indexBuffer) {
+    region.indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
+  }
+  return !!(
+    region.textureUploaded &&
+    region.vertexBuffer &&
+    region.pixCoordBuffer &&
+    (!region.useIndexedMesh || region.indexBuffer)
+  )
 }

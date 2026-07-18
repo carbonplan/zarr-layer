@@ -51,12 +51,7 @@ import {
   getVisibleRegions,
   selectLevelForZoom,
 } from './region-math'
-import {
-  RegionCache,
-  createRegionState,
-  isRegionValid,
-  makeRegionKey,
-} from './region-cache'
+import { RegionCache, isRegionValid, makeRegionKey } from './region-cache'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader } from './level-loader'
 import { createHybridMesh } from './mesh-reprojector'
@@ -68,11 +63,13 @@ import {
   createLoadingManager,
   createChunkLoadingDebouncer,
   cancelAllRequests,
-  hasActiveRequests,
   setLoadingCallback as setLoadingCallbackUtil,
   emitLoadingState as emitLoadingStateUtil,
 } from './region-utils'
-import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
+import {
+  ensureRegionGpuResources,
+  setupBandTextureUniforms,
+} from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 
 export class RegionRenderer {
@@ -405,23 +402,6 @@ export class RegionRenderer {
     regionY: number
   ): string {
     return makeRegionKey(levelIndex, regionX, regionY)
-  }
-
-  /**
-   * Create a new region state entry.
-   */
-  private createRegionState(
-    levelIndex: number,
-    regionX: number,
-    regionY: number
-  ): RegionState {
-    return createRegionState(
-      levelIndex,
-      regionX,
-      regionY,
-      this.latIsAscending,
-      this.selectorVersion
-    )
   }
 
   /**
@@ -982,49 +962,6 @@ export class RegionRenderer {
    * for the ECEF vertex shader path. Render-only fields are set here instead of
    * cached on RegionState, so projection toggles have no stale state.
    */
-  private ensureRegionGpuResources(
-    gl: WebGL2RenderingContext,
-    region: RegionState
-  ): boolean {
-    if (!region.data || !region.vertexArr || !region.pixCoordArr) return false
-
-    if (!region.texture) region.texture = gl.createTexture()
-    if (!region.texture) return false
-    if (!region.textureUploaded) {
-      const result = uploadDataTexture(gl, {
-        texture: region.texture,
-        data: region.data,
-        width: region.width,
-        height: region.height,
-        channels: region.channels,
-        configured: false,
-      })
-      region.textureUploaded = result.uploaded
-    }
-
-    if (!region.vertexBuffer) {
-      region.vertexBuffer = gl.createBuffer()
-      gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
-      gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
-    }
-    if (!region.pixCoordBuffer) {
-      region.pixCoordBuffer = gl.createBuffer()
-      gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
-      gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
-    }
-    if (region.useIndexedMesh && region.indexArr && !region.indexBuffer) {
-      region.indexBuffer = gl.createBuffer()
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
-    }
-    return !!(
-      region.textureUploaded &&
-      region.vertexBuffer &&
-      region.pixCoordBuffer &&
-      (!region.useIndexedMesh || region.indexBuffer)
-    )
-  }
-
   private regionToRenderable(
     region: RegionState,
     useDirectEcef: boolean = false
@@ -1078,7 +1015,7 @@ export class RegionRenderer {
 
     // Render each loaded region using unified path
     for (const region of this.getLoadedRegions()) {
-      if (!this.ensureRegionGpuResources(gl, region)) continue
+      if (!ensureRegionGpuResources(gl, region)) continue
       renderRegion(
         gl,
         shaderProgram,
@@ -1123,7 +1060,7 @@ export class RegionRenderer {
     }
 
     return this.getLoadedRegions()
-      .filter((region) => this.ensureRegionGpuResources(gl, region))
+      .filter((region) => ensureRegionGpuResources(gl, region))
       .map((region) => ({
         texture: region.texture!,
         vertexBuffer: region.vertexBuffer!,
