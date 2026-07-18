@@ -267,4 +267,86 @@ describe('RegionFetcher', () => {
     await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
     expect(cache.size).toBe(0)
   })
+
+  it('fetches multi-value dims as parallel channels and interleaves them', async () => {
+    // 2-time x 4-lat x 8-lon ramp: value = t*32 + y*8 + x. Selecting both
+    // time steps packs two channels per pixel.
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temperature',
+          shape: [2, HEIGHT, WIDTH],
+          chunkShape: [2, HEIGHT, WIDTH],
+          dimensionNames: ['time', 'lat', 'lon'],
+          chunks: { '0/0/0': Array.from({ length: 64 }, (_, i) => i) },
+        },
+      ],
+    })
+    const store = new ZarrStore({
+      customStore: memory,
+      variable: 'temperature',
+      version: 3,
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+    })
+    await store.initialized
+    const zarrArray = await store.getArray()
+
+    const level: LevelRuntime = {
+      index: 0,
+      zarrArray,
+      width: WIDTH,
+      height: HEIGHT,
+      regionSize: REGION,
+      baseSliceArgs: [0, 0, 0],
+      baseMultiValueDims: [
+        { dimIndex: 0, dimName: 'time', values: [0, 1], labels: [10, 20] },
+      ],
+    }
+    const cache = new RegionCache()
+    const fetcher = new RegionFetcher({
+      zarrStore: store,
+      dimIndices: store.describe().dimIndices,
+      levels: [],
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+      }),
+      xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+      latIsAscending: false,
+      fixedDataScale: 1,
+      regionCache: cache,
+      requestCanceller: createRequestCanceller(),
+      loadingDebouncer: { show: () => {}, hide: () => {} },
+      getActiveLevel: () => level,
+      getSelectorVersion: () => 0,
+      // One name provided: the second channel falls back to band_<index>.
+      getBandNames: () => ['t10'],
+      isRemoved: () => false,
+      getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
+      computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
+      createRegionGeometry: vi.fn(),
+      invalidate: vi.fn(),
+    })
+
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+
+    expect(region.channels).toBe(2)
+    const t0 = chunkData(0, 0)
+    expect(Array.from(region.bandData.get('t10')!)).toEqual(t0)
+    expect(Array.from(region.bandData.get('band_1')!)).toEqual(
+      t0.map((v) => v + 32)
+    )
+    // Interleaved pixel-major: [c0[0], c1[0], c0[1], c1[1], ...].
+    const interleaved = Array.from(region.data!)
+    expect(interleaved).toHaveLength(t0.length * 2)
+    expect(interleaved.slice(0, 4)).toEqual([
+      t0[0],
+      t0[0] + 32,
+      t0[1],
+      t0[1] + 32,
+    ])
+  })
 })
