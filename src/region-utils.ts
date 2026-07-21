@@ -1,7 +1,7 @@
 /**
- * @module mode-utils
+ * @module region-utils
  *
- * Shared utilities for ZarrMode implementations (TiledMode and UntiledMode).
+ * Shared utilities for the region renderer (RegionRenderer).
  * Provides common patterns for throttling, request cancellation, and loading state management.
  */
 
@@ -20,21 +20,6 @@ export function createRequestCanceller(): RequestCanceller {
   return {
     controllers: new Map(),
     currentVersion: 0,
-  }
-}
-
-/**
- * Cancel all requests older than the completed version.
- */
-export function cancelOlderRequests(
-  canceller: RequestCanceller,
-  completedVersion: number
-): void {
-  for (const [version, controller] of canceller.controllers) {
-    if (version < completedVersion) {
-      controller.abort()
-      canceller.controllers.delete(version)
-    }
   }
 }
 

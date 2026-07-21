@@ -1,11 +1,13 @@
 /**
- * @module untiled-mode
+ * @module region-renderer
  *
- * Unified mode for non-tiled Zarr datasets.
- * Handles both single-level datasets and multi-level datasets following
- * the zarr-conventions/multiscales standard. Loads full images at each
- * resolution level (not slippy map tiles) with automatic level selection
- * based on map zoom.
+ * The unified renderer for every Zarr dataset. Reads the visible region of a
+ * resolution level as chunk-sized sub-rectangles, reprojects each onto an
+ * adaptive source→WGS84 mesh, and lets the GPU project to Mercator or ECEF.
+ * Handles single-level datasets, untiled multiscale pyramids, and tiled
+ * (slippy-map) pyramids alike — a tiled pyramid is just a multiscale whose
+ * levels are arrays chunked at the tile size (see ZarrStore). Automatic level
+ * selection is driven by map zoom.
  */
 
 import * as zarr from 'zarrita'
@@ -16,11 +18,11 @@ import {
   MERCATOR_LAT_LIMIT,
 } from './constants'
 import type {
-  ZarrMode,
   RenderContext,
   TileId,
   RegionRenderState,
-} from './zarr-mode'
+  CustomShaderConfig,
+} from './renderer-types'
 import type {
   QueryGeometry,
   QueryOptions,
@@ -49,7 +51,6 @@ import {
 import { loadDimensionValues, normalizeSelector, getBands } from './zarr-utils'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
-import type { CustomShaderConfig } from './renderer-types'
 import { renderMapboxTile } from './mapbox-tile-renderer'
 import { queryRegionUntiled, findSpatialDimNames } from './query/region-query'
 import {
@@ -78,7 +79,7 @@ import {
   hasActiveRequests,
   setLoadingCallback as setLoadingCallbackUtil,
   emitLoadingState as emitLoadingStateUtil,
-} from './mode-utils'
+} from './region-utils'
 import { setupBandTextureUniforms, uploadDataTexture } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
 
@@ -163,7 +164,7 @@ interface LevelSnapshot {
  * `_initialize`, and `setSelector` — any of which was one `await` away from
  * a half-commit race.
  *
- * `UntiledMode.activeLevel` is either `null` (nothing loaded) or a fully-
+ * `RegionRenderer.activeLevel` is either `null` (nothing loaded) or a fully-
  * formed runtime; readers never see a partial level.
  */
 interface LevelRuntime {
@@ -186,10 +187,8 @@ type QueryLevelSnapshot = Pick<
   'index' | 'zarrArray' | 'width' | 'height'
 >
 
-export class UntiledMode implements ZarrMode {
+export class RegionRenderer {
   isMultiscale: boolean = false
-
-  private channels: number = 1
 
   // The single committed snapshot. All per-level state (array, dims, slice
   // args) is swapped atomically through `loadLevel()`; nothing else mutates
@@ -218,7 +217,6 @@ export class UntiledMode implements ZarrMode {
   private invalidate: () => void
   private dimIndices: DimIndicesProps = {}
   private xyLimits: XYLimits | null = null
-  private crs: CRS = 'EPSG:4326'
   private latIsAscending: boolean = true
 
   // Multi-level support
@@ -259,11 +257,10 @@ export class UntiledMode implements ZarrMode {
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
   private regionCache: Map<string, RegionState> = new Map()
-  // Keys of regions protected from eviction. Lifecycle:
-  // - Added: in updateVisibleRegions() for current level's visible regions
-  // - Retained: across level switches to protect fallback regions during transitions
-  // - Cleared: in updateVisibleRegions() when currentLevelCoversViewport() returns true,
-  //   at which point non-current-level keys are removed (fallbacks no longer needed)
+  // Keys of regions protected from eviction. Rebuilt in updateVisibleRegions()
+  // from the current viewport: the current level's visible regions, plus
+  // other-level regions retained as fallbacks until the current level covers
+  // the viewport.
   private visibleRegionKeys: Set<string> = new Set()
   private lastVisibleRegions: Array<{ regionX: number; regionY: number }> = [] // Last computed visible regions
   private lastVisibleRegionsLevel: number = -1 // Level index that lastVisibleRegions corresponds to
@@ -299,7 +296,6 @@ export class UntiledMode implements ZarrMode {
     try {
       const desc = this.zarrStore.describe()
       this.dimIndices = desc.dimIndices
-      this.crs = desc.crs
       this.xyLimits = desc.xyLimits
       this.latIsAscending = desc.latIsAscending
       this.projectionKind = resolveProjectionKind(desc.crs, desc.proj4)
@@ -364,7 +360,7 @@ export class UntiledMode implements ZarrMode {
           this.mercatorBounds = this.computeMercatorBoundsFromProjection()
         }
       } else {
-        console.warn('UntiledMode: No XY limits found')
+        console.warn('RegionRenderer: No XY limits found')
       }
     } finally {
       this.loadingManager.metadataLoading = false
@@ -1320,32 +1316,32 @@ export class UntiledMode implements ZarrMode {
     this.lastVisibleRegionsLevel = this.activeLevel?.index ?? -1
     const levelIndex = this.activeLevel?.index ?? -1
 
-    // Add new level's visible region keys (protected from eviction)
-    // Don't clear old keys yet - they protect fallback regions during transitions
-    for (const { regionX, regionY } of visible) {
-      this.visibleRegionKeys.add(
-        this.makeRegionKey(levelIndex, regionX, regionY)
-      )
-    }
-
-    // Only clear old keys when current level fully covers viewport
-    if (this.currentLevelCoversViewport()) {
-      // Safe to remove protection for non-current-level regions
-      const currentLevelPrefix = `${levelIndex}:`
-      for (const key of this.visibleRegionKeys) {
-        if (!key.startsWith(currentLevelPrefix)) {
-          this.visibleRegionKeys.delete(key)
-        }
-      }
-    }
-
-    // Abort in-flight fetches for regions that left the viewport.
-    // Only signal abort — the fetch's own catch/finally handles state cleanup.
     const visibleKeys = new Set(
       visible.map(({ regionX, regionY }) =>
         this.makeRegionKey(levelIndex, regionX, regionY)
       )
     )
+
+    // Rebuild eviction protection from the current viewport: this level's
+    // visible regions, plus other-level regions kept as fallbacks until the
+    // current level covers the viewport. An empty result can be a transient
+    // state (map bounds or transformer unavailable), so keep the previous
+    // set rather than unprotect regions that are still rendered.
+    if (visible.length > 0) {
+      const nextProtected = new Set(visibleKeys)
+      if (!this.currentLevelCoversViewport()) {
+        const currentLevelPrefix = `${levelIndex}:`
+        for (const key of this.visibleRegionKeys) {
+          if (!key.startsWith(currentLevelPrefix)) {
+            nextProtected.add(key)
+          }
+        }
+      }
+      this.visibleRegionKeys = nextProtected
+    }
+
+    // Abort in-flight fetches for regions that left the viewport.
+    // Only signal abort — the fetch's own catch/finally handles state cleanup.
     for (const [key, region] of this.regionCache) {
       if (
         region.loading &&
@@ -1396,6 +1392,29 @@ export class UntiledMode implements ZarrMode {
       !viewportChanged
     ) {
       return
+    }
+
+    // The browser drains requests roughly in issue order, so the viewport
+    // center loads first.
+    if (visible.length > 1) {
+      let cx = 0
+      let cy = 0
+      for (const { regionX, regionY } of visible) {
+        cx += regionX
+        cy += regionY
+      }
+      cx /= visible.length
+      cy /= visible.length
+      const byCenterDistance = (
+        a: { regionX: number; regionY: number },
+        b: { regionX: number; regionY: number }
+      ) =>
+        (a.regionX - cx) ** 2 +
+        (a.regionY - cy) ** 2 -
+        (b.regionX - cx) ** 2 -
+        (b.regionY - cy) ** 2
+      newRegions.sort(byCenterDistance)
+      staleRegions.sort(byCenterDistance)
     }
 
     if (newRegions.length > 0) {
@@ -1964,7 +1983,7 @@ export class UntiledMode implements ZarrMode {
       levelResolutions.push({ index: i, effectivePixels })
     }
 
-    // If no levels have shape data yet, return last index (lowest res for untiled)
+    // If no levels have shape data yet, fall back to the last level index
     if (levelResolutions.length === 0) return this.levels.length - 1
 
     // Sort by resolution ascending (lowest res first)
@@ -2140,10 +2159,9 @@ export class UntiledMode implements ZarrMode {
     context: RenderContext
   ): boolean {
     // This method is only used for draped Mapbox rendering. The direct
-    // untiled ECEF path disables renderToTile at the layer level.
+    // ECEF path disables renderToTile at the layer level.
     return renderMapboxTile({
       renderer,
-      mode: this,
       tileId,
       context: {
         ...context,
@@ -2156,10 +2174,6 @@ export class UntiledMode implements ZarrMode {
   onProjectionChange(isGlobe: boolean): void {
     if (this.isGlobeProjection === isGlobe) return
     this.isGlobeProjection = isGlobe
-  }
-
-  getTiledState() {
-    return null
   }
 
   /**
@@ -2179,7 +2193,6 @@ export class UntiledMode implements ZarrMode {
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
-      channels: this.channels,
       bandData: region.bandData,
       bandTextures: region.bandTextures,
       bandTexturesUploaded: region.bandTexturesUploaded,
@@ -2210,14 +2223,6 @@ export class UntiledMode implements ZarrMode {
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
     setLoadingCallbackUtil(this.loadingManager, callback)
-  }
-
-  getCRS(): CRS {
-    return this.crs
-  }
-
-  getXYLimits(): XYLimits | null {
-    return this.xyLimits
   }
 
   /**
@@ -2278,14 +2283,6 @@ export class UntiledMode implements ZarrMode {
       return { x0: 0, y0: 0, x1: 1, y1: 1 }
     }
     return result
-  }
-
-  getMaxLevelIndex(): number {
-    return this.levels.length > 0 ? this.levels.length - 1 : 0
-  }
-
-  getLevels(): string[] {
-    return this.levels.map((l) => l.asset)
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
@@ -2359,6 +2356,27 @@ export class UntiledMode implements ZarrMode {
       return typeof value === 'number' ? value : 0
     }
 
+    if (typeof value !== 'number' && typeof value !== 'string') {
+      return 0
+    }
+
+    // Multiscale pyramids (tiled and untiled alike) keep their non-spatial
+    // coordinate arrays inside each level directory (e.g. "0/month"), not at
+    // the store root. ZarrStore preloads those from the level-0 directory into
+    // `coordinates`, so prefer them — opening the same arrays at the root (as
+    // the fallback below does) would 404. The fallback covers single-level
+    // datasets, whose coordinate arrays live at the root and aren't preloaded.
+    const storeCoords = this.zarrStore.coordinates[dimName] as
+      | (number | string)[]
+      | undefined
+    if (storeCoords && storeCoords.length > 0) {
+      const idx = storeCoords.indexOf(value)
+      if (idx >= 0) return idx
+      // Value not present in the preloaded coordinate array: treat a numeric
+      // selector as a direct index.
+      return typeof value === 'number' ? value : 0
+    }
+
     if (!this.zarrStore.root) {
       return typeof value === 'number' ? value : 0
     }
@@ -2398,17 +2416,15 @@ export class UntiledMode implements ZarrMode {
       )
       this.dimensionValues[dimName] = coords
 
-      if (typeof value === 'number' || typeof value === 'string') {
-        const coordIdx = (coords as (number | string)[]).indexOf(value)
-        if (coordIdx >= 0) return coordIdx
-        throw new Error(
-          `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
-            `Available values: [${(coords as (number | string)[])
-              .slice(0, 10)
-              .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
-            `Use { selected: <index>, type: 'index' } to select by array index instead.`
-        )
-      }
+      const coordIdx = (coords as (number | string)[]).indexOf(value)
+      if (coordIdx >= 0) return coordIdx
+      throw new Error(
+        `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
+          `Available values: [${(coords as (number | string)[])
+            .slice(0, 10)
+            .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
+          `Use { selected: <index>, type: 'index' } to select by array index instead.`
+      )
     } catch (err) {
       console.debug(`Could not resolve coordinate for '${dimName}':`, err)
     }
