@@ -55,7 +55,7 @@
   "dependencies": {
     "@developmentseed/raster-reproject": "^0.1.0",
     "delaunator": "^5.0.1",
-    "proj4": "^2.20.2",
+    "proj4": "^2.20.9",
     "zarrita": "^0.7.1"
   },
   "lint-staged": {
