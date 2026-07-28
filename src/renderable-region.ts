@@ -172,7 +172,8 @@ export function renderRegion(
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
   }
 
-  // Bind textures (upload happens at fetch time for both tiles and regions)
+  // Bind textures. The main texture must already be uploaded; bindBandTextures
+  // uploads any band whose contents are not resident yet.
   if (shaderProgram.useCustomShader && customShaderConfig) {
     const bandsBound = bindBandTextures(gl, {
       bandData: region.bandData,

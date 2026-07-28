@@ -1,8 +1,9 @@
 /**
  * @module render-helpers
  *
- * Shared rendering utilities for both tiled and untiled modes.
- * Handles band texture setup, binding, and geometry buffer binding.
+ * Rendering utilities shared by the region and Mapbox draped-tile paths.
+ * Handles band texture setup, binding, geometry buffer binding, and the lazy
+ * upload of a region's textures and geometry to the GPU.
  */
 
 import type { ShaderProgram } from './shader-program'

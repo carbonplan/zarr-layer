@@ -415,8 +415,8 @@ export class RegionRenderer {
 
   /**
    * Get uniforms for rendering with scale/offset disabled.
-   * Untiled mode applies per-level scale/offset in JS (in fetchRegion),
-   * so we tell the shader to skip its scale/offset application.
+   * Per-level scale/offset is applied in JS while a region is fetched, so the
+   * shader is told to skip its own scale/offset application.
    */
   private getUniformsForRender(contextUniforms: RenderContext['uniforms']) {
     return {
@@ -449,11 +449,6 @@ export class RegionRenderer {
   }
 
   /**
-   * Get fallback regions from other levels that are protected from eviction.
-   * These were visible before or during level transitions and provide
-   * coverage while the current level loads.
-   */
-  /**
    * The band textures the active shader samples, or undefined when it reads
    * the main texture. Readiness and uploads must agree on this.
    */
@@ -461,6 +456,11 @@ export class RegionRenderer {
     return this.rendersFromBandTextures ? this.bandNames : undefined
   }
 
+  /**
+   * Get fallback regions from other levels that are protected from eviction.
+   * These were visible before or during level transitions and provide
+   * coverage while the current level loads.
+   */
   private getProtectedFallbackRegions(): RegionState[] {
     const fallbacks: RegionState[] = []
     for (const region of this.regionCache.values()) {

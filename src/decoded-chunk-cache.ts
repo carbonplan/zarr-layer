@@ -5,7 +5,7 @@ import { MAX_CACHED_REGIONS } from './region-cache'
  * Insertion-order LRU bounded by entry count and by total bytes, whichever
  * binds first. Chunk sizes vary by orders of magnitude between datasets (a 2D
  * 128x128 float32 chunk is 65 KB; a 4D [2, 12, 128, 128] chunk is 1.5 MB), so
- * a count-only bound would hold a quarter-gigabyte of the latter.
+ * a count-only bound would hold 768 MB of the latter at the 512-entry default.
  */
 const createLRU = <V>(
   maxEntries: number,
