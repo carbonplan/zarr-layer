@@ -41,8 +41,8 @@ export interface RenderableRegion {
   positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
   sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
 
-  // Main texture (pre-uploaded)
-  texture: WebGLTexture
+  // Main texture (pre-uploaded). Null when band textures are sampled instead.
+  texture: WebGLTexture | null
 
   // Band textures (for custom shaders)
   bandData: Map<string, Float32Array>
@@ -188,6 +188,7 @@ export function renderRegion(
       return false
     }
   } else {
+    if (!region.texture) return false
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, region.texture)
     if (shaderProgram.texLoc !== null) {

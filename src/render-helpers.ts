@@ -55,6 +55,28 @@ interface BindBandTexturesOptions {
   ensureTexture?: (bandName: string) => WebGLTexture | null
 }
 
+/** The per-band GPU bookkeeping carried on a region. */
+interface BandTextureState {
+  bandTextures: Map<string, WebGLTexture>
+  bandTexturesUploaded: Set<string>
+  bandTexturesConfigured: Set<string>
+}
+
+/** Delete every band texture whose name is not in `wanted`. */
+function pruneBandTextures(
+  gl: WebGL2RenderingContext,
+  wanted: Set<string>,
+  state: BandTextureState
+): void {
+  for (const [name, tex] of state.bandTextures) {
+    if (wanted.has(name)) continue
+    gl.deleteTexture(tex)
+    state.bandTextures.delete(name)
+    state.bandTexturesUploaded.delete(name)
+    state.bandTexturesConfigured.delete(name)
+  }
+}
+
 /**
  * Bind and upload band textures for a single tile/region.
  * Returns false if any required band data is missing.
@@ -79,18 +101,15 @@ export function bindBandTextures(
   } = options
 
   // Band names track the selector on some datasets, so the set changes as the
-  // user scrubs. Textures for names that are no longer requested would
-  // otherwise sit on the GPU until the region is evicted. Skipped when the
-  // caller owns the textures.
-  if (!ensureTexture && bandTextures.size > customShaderConfig.bands.length) {
-    const wanted = new Set(customShaderConfig.bands)
-    for (const [name, tex] of bandTextures) {
-      if (wanted.has(name)) continue
-      gl.deleteTexture(tex)
-      bandTextures.delete(name)
-      bandTexturesUploaded.delete(name)
-      bandTexturesConfigured.delete(name)
-    }
+  // user scrubs. Prune by membership rather than count: a same-size swap
+  // (red, green -> nir, swir) replaces every name without changing the size.
+  // Skipped when the caller owns the textures.
+  if (!ensureTexture) {
+    pruneBandTextures(gl, new Set(customShaderConfig.bands), {
+      bandTextures,
+      bandTexturesUploaded,
+      bandTexturesConfigured,
+    })
   }
 
   let textureUnit = 2
@@ -226,29 +245,97 @@ export function uploadDataTexture(
 }
 
 /**
+ * Create and upload the band textures a custom shader samples, dropping any
+ * that are no longer requested. Returns false if a band's data is missing or
+ * a texture cannot be allocated, which makes the region undrawable.
+ */
+function ensureBandTextures(
+  gl: WebGL2RenderingContext,
+  region: RegionState,
+  bands: readonly string[]
+): boolean {
+  pruneBandTextures(gl, new Set(bands), region)
+
+  for (const name of bands) {
+    const data = region.bandData.get(name)
+    if (!data) return false
+
+    let texture = region.bandTextures.get(name)
+    if (!texture) {
+      texture = gl.createTexture()
+      if (!texture) return false
+      region.bandTextures.set(name, texture)
+    }
+    if (region.bandTexturesUploaded.has(name)) continue
+
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    if (!region.bandTexturesConfigured.has(name)) {
+      configureDataTexture(gl)
+      region.bandTexturesConfigured.add(name)
+    }
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.R32F,
+      region.width,
+      region.height,
+      0,
+      gl.RED,
+      gl.FLOAT,
+      data
+    )
+    region.bandTexturesUploaded.add(name)
+  }
+  return true
+}
+
+/**
  * Lazily create and upload a region's GPU resources from its CPU-side state.
  * Fetch produces only data and geometry arrays; the render paths call this
  * per frame so uploads happen on the context that is actually drawing.
  * Returns false while the region isn't renderable yet.
+ *
+ * `requiredBands` names the textures a custom shader will sample. It has to be
+ * the same list the draw call uses: this function's return value decides
+ * whether the level is considered covered, and a level that displaces its
+ * fallbacks and then fails to bind a band leaves the viewport blank. The main
+ * texture is not created in that mode, since nothing samples it.
  */
 export function ensureRegionGpuResources(
   gl: WebGL2RenderingContext,
-  region: RegionState
+  region: RegionState,
+  requiredBands?: readonly string[]
 ): boolean {
   if (!region.data || !region.vertexArr || !region.pixCoordArr) return false
 
-  if (!region.texture) region.texture = gl.createTexture()
-  if (!region.texture) return false
-  if (!region.textureUploaded) {
-    const result = uploadDataTexture(gl, {
-      texture: region.texture,
-      data: region.data,
-      width: region.width,
-      height: region.height,
-      channels: region.channels,
-      configured: false,
-    })
-    region.textureUploaded = result.uploaded
+  const bandRendering = !!requiredBands && requiredBands.length > 0
+  let texturesReady: boolean
+
+  if (bandRendering) {
+    if (region.texture) {
+      // Switched from main-texture rendering; nothing samples it now.
+      gl.deleteTexture(region.texture)
+      region.texture = null
+      region.textureUploaded = false
+    }
+    texturesReady = ensureBandTextures(gl, region, requiredBands)
+  } else {
+    pruneBandTextures(gl, new Set(), region)
+    if (!region.texture) region.texture = gl.createTexture()
+    if (!region.texture) return false
+    if (!region.textureUploaded) {
+      const result = uploadDataTexture(gl, {
+        texture: region.texture,
+        data: region.data,
+        width: region.width,
+        height: region.height,
+        channels: region.channels,
+        configured: false,
+      })
+      region.textureUploaded = result.uploaded
+    }
+    texturesReady = region.textureUploaded
   }
 
   // Buffer objects are reused across re-uploads, so the dirty flag — not the
@@ -279,5 +366,5 @@ export function ensureRegionGpuResources(
       (!region.useIndexedMesh || region.indexBuffer)
     )
   }
-  return region.textureUploaded && region.geometryUploaded
+  return texturesReady && region.geometryUploaded
 }

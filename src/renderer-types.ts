@@ -67,7 +67,8 @@ export interface TileId {
 }
 
 export interface RegionRenderState {
-  texture: WebGLTexture
+  /** Null when a custom shader samples band textures instead. */
+  texture: WebGLTexture | null
   vertexBuffer: WebGLBuffer
   /** Texture coordinate buffer for sampling resampled data */
   pixCoordBuffer: WebGLBuffer

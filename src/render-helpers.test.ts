@@ -14,13 +14,13 @@ import type { RegionState } from './region-state'
 // Texture unit constants matter: bands bind from unit 2 up, in config order.
 const TEXTURE0 = 0x84c0
 
-function fakeGl() {
+function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
   let textureCount = 0
   let bufferCount = 0
   return {
     TEXTURE0,
     TEXTURE_2D: 0x0de1,
-    createTexture: vi.fn(() => ({ tex: ++textureCount })),
+    createTexture: vi.fn(() => (failTextures ? null : { tex: ++textureCount })),
     createBuffer: vi.fn(() => ({ buf: ++bufferCount })),
     deleteTexture: vi.fn(),
     bindTexture: vi.fn(),
@@ -177,6 +177,89 @@ describe('ensureRegionGpuResources', () => {
     expect(ensureRegionGpuResources(flatGl, flat)).toBe(true)
     expect(flat.indexBuffer).toBeNull()
     expect(flatGl.createBuffer).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('ensureRegionGpuResources with band rendering', () => {
+  function bandRegion(): RegionState {
+    const region = fetchedRegion()
+    region.bandData.set('red', new Float32Array([1, 2, 3, 4]))
+    region.bandData.set('green', new Float32Array([5, 6, 7, 8]))
+    return region
+  }
+
+  it('uploads the band textures the shader will sample', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+
+    expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(true)
+    expect([...region.bandTexturesUploaded]).toEqual(['red', 'green'])
+    expect(region.bandTextures.size).toBe(2)
+    // Nothing samples the main texture in this mode.
+    expect(region.texture).toBeNull()
+    expect(region.textureUploaded).toBe(false)
+    expect(gl.createTexture).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports not-ready when a band texture cannot be allocated', () => {
+    const gl = fakeGl({ failTextures: true })
+    const region = bandRegion()
+
+    // Coverage is decided by this result, so a failed band allocation has to
+    // read as undrawable rather than as a covered level.
+    expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(false)
+  })
+
+  it('reports not-ready when a required band has no data', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    expect(ensureRegionGpuResources(gl, region, ['red', 'missing'])).toBe(false)
+  })
+
+  it('releases band textures when switching back to the main texture', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    ensureRegionGpuResources(gl, region, ['red', 'green'])
+    const released = [...region.bandTextures.values()]
+
+    // The shader no longer samples bands. bindBandTextures is not called at
+    // all in that mode, so this is the only chance to free them.
+    expect(ensureRegionGpuResources(gl, region)).toBe(true)
+    for (const tex of released) {
+      expect(gl.deleteTexture).toHaveBeenCalledWith(tex)
+    }
+    expect(region.bandTextures.size).toBe(0)
+    expect(region.bandTexturesUploaded.size).toBe(0)
+    expect(region.texture).not.toBeNull()
+  })
+
+  it('releases the main texture when switching to band rendering', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    ensureRegionGpuResources(gl, region)
+    const mainTexture = region.texture
+
+    expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(true)
+    expect(gl.deleteTexture).toHaveBeenCalledWith(mainTexture)
+    expect(region.texture).toBeNull()
+  })
+
+  it('drops bands that leave the set on the same call', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    ensureRegionGpuResources(gl, region, ['red', 'green'])
+    const stale = [...region.bandTextures.values()]
+
+    // Same-size swap: a count-based prune would miss this entirely.
+    region.bandData.clear()
+    region.bandData.set('nir', new Float32Array([1, 2, 3, 4]))
+    region.bandData.set('swir', new Float32Array([5, 6, 7, 8]))
+    expect(ensureRegionGpuResources(gl, region, ['nir', 'swir'])).toBe(true)
+
+    for (const tex of stale) {
+      expect(gl.deleteTexture).toHaveBeenCalledWith(tex)
+    }
+    expect([...region.bandTextures.keys()]).toEqual(['nir', 'swir'])
   })
 })
 

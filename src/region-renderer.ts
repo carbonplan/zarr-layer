@@ -440,7 +440,7 @@ export class RegionRenderer {
     for (const { regionX, regionY } of this.lastVisibleRegions) {
       const key = this.makeRegionKey(levelIndex, regionX, regionY)
       const region = this.regionCache.get(key)
-      if (!region || !isRegionGpuReady(region)) {
+      if (!region || !isRegionGpuReady(region, this.requiredBands())) {
         return false
       }
     }
@@ -452,6 +452,14 @@ export class RegionRenderer {
    * These were visible before or during level transitions and provide
    * coverage while the current level loads.
    */
+  /**
+   * The band textures the active shader samples, or undefined when it reads
+   * the main texture. Readiness and uploads must agree on this.
+   */
+  private requiredBands(): string[] | undefined {
+    return this.rendersFromBandTextures ? this.bandNames : undefined
+  }
+
   private getProtectedFallbackRegions(): RegionState[] {
     const fallbacks: RegionState[] = []
     for (const region of this.regionCache.values()) {
@@ -474,10 +482,11 @@ export class RegionRenderer {
     const currentLevel = this.activeLevel?.index ?? -1
     const currentLevelRegions: RegionState[] = []
 
+    const requiredBands = this.requiredBands()
     for (const region of this.regionCache.values()) {
       if (region.levelIndex !== currentLevel) continue
       if (!isRegionCpuReady(region)) continue
-      if (!ensureRegionGpuResources(gl, region)) continue
+      if (!ensureRegionGpuResources(gl, region, requiredBands)) continue
       currentLevelRegions.push(region)
     }
 
@@ -487,7 +496,7 @@ export class RegionRenderer {
 
     // Render order: fallbacks first (beneath), current level on top
     const fallbackRegions = this.getProtectedFallbackRegions().filter(
-      (region) => ensureRegionGpuResources(gl, region)
+      (region) => ensureRegionGpuResources(gl, region, requiredBands)
     )
     return [...fallbackRegions, ...currentLevelRegions]
   }
@@ -982,7 +991,7 @@ export class RegionRenderer {
       useIndexedMesh: region.useIndexedMesh,
       wgs84Bounds: region.wgs84Bounds ?? undefined,
       latIsAscending: region.latIsAscending,
-      texture: region.texture!,
+      texture: region.texture,
       bandData: region.bandData,
       bandTextures: region.bandTextures,
       bandTexturesUploaded: region.bandTexturesUploaded,
@@ -1064,7 +1073,7 @@ export class RegionRenderer {
     }
 
     return this.getLoadedRegions(gl).map((region) => ({
-      texture: region.texture!,
+      texture: region.texture,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
       vertexArr: region.vertexArr!,

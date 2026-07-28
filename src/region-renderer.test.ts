@@ -101,7 +101,8 @@ function seedFallbackRegion(
   {
     levelIndex = 1,
     uploaded = true,
-  }: { levelIndex?: number; uploaded?: boolean } = {}
+    bands,
+  }: { levelIndex?: number; uploaded?: boolean; bands?: string[] } = {}
 ) {
   const region = createRegionState(levelIndex, 0, 0, false, 0)
   region.data = new Float32Array([1, 2, 3, 4])
@@ -111,12 +112,22 @@ function seedFallbackRegion(
   region.pixCoordArr = new Float32Array(8)
   region.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   region.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
+  // A fallback was fetched under the same selector, so it carries the same
+  // bands as the current level.
+  for (const band of bands ?? []) {
+    region.bandData.set(band, new Float32Array([1, 2, 3, 4]))
+  }
   if (uploaded) {
     region.texture = {} as WebGLTexture
     region.vertexBuffer = {} as WebGLBuffer
     region.pixCoordBuffer = {} as WebGLBuffer
     region.textureUploaded = true
     region.geometryUploaded = true
+    for (const band of bands ?? []) {
+      region.bandTextures.set(band, {} as WebGLTexture)
+      region.bandTexturesUploaded.add(band)
+      region.bandTexturesConfigured.add(band)
+    }
   }
 
   const cache = seam(renderer).regionCache
@@ -332,6 +343,28 @@ describe('RegionRenderer', () => {
     expect(gl.texImage2D).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps fallback coverage when a band texture cannot be allocated', async () => {
+    const { renderer, map } = await makeRenderer()
+    const working = fakeGl()
+    renderer.update(map, working)
+    await settle()
+    await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, working)
+    await settle()
+
+    const fallback = seedFallbackRegion(renderer, {
+      bands: ['time_10', 'time_20'],
+    })
+
+    // Band textures are what this shader samples, so failing to allocate them
+    // has to read as undrawable even though geometry uploads fine.
+    const failing = fakeGl({ failTextures: true })
+    const states = seam(renderer).getRegionStates(failing)
+    expect(states).toHaveLength(1)
+    expect(states[0].bandTextures).toBe(fallback.bandTextures)
+  })
+
   it('holds other-level eviction protection until the level is drawable', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
@@ -375,6 +408,17 @@ describe('RegionRenderer', () => {
     expect(refetched.bandData.size).toBe(2)
     expect(refetched.data).toBe(refetched.bandData.get('time_10'))
     expect(refetched.channels).toBe(1)
+
+    // Rendering uploads the bands and no main texture at all, which is only
+    // true if the renderer passes its band list down to the upload.
+    const states = seam(renderer).getRegionStates(gl)
+    expect(states).toHaveLength(4)
+    for (const state of states) {
+      expect(state.texture).toBeNull()
+    }
+    expect([...refetched.bandTexturesUploaded]).toEqual(['time_10', 'time_20'])
+    // Two bands per region across the 2x2 grid, no main textures.
+    expect(gl.createTexture).toHaveBeenCalledTimes(8)
   })
 
   it('disposes GPU resources and stops rendering after dispose', async () => {

@@ -102,6 +102,30 @@ describe('isRegionGpuReady', () => {
     expect(isRegionGpuReady(r)).toBe(false)
   })
 
+  it('requires the band textures a custom shader will sample', () => {
+    const r = cpuReadyRegion()
+    r.textureUploaded = true
+    r.geometryUploaded = true
+    // The main texture is resident, but a band-sampling shader draws from
+    // textures that do not exist yet, so the region is not drawable.
+    expect(isRegionGpuReady(r, ['red', 'green'])).toBe(false)
+
+    r.bandTexturesUploaded.add('red')
+    expect(isRegionGpuReady(r, ['red', 'green'])).toBe(false)
+
+    r.bandTexturesUploaded.add('green')
+    expect(isRegionGpuReady(r, ['red', 'green'])).toBe(true)
+  })
+
+  it('ignores the main texture when bands are required', () => {
+    const r = cpuReadyRegion()
+    r.geometryUploaded = true
+    r.bandTexturesUploaded.add('red')
+    // Band rendering never creates a main texture.
+    expect(r.textureUploaded).toBe(false)
+    expect(isRegionGpuReady(r, ['red'])).toBe(true)
+  })
+
   it('goes stale again when a refetch marks the uploads dirty', () => {
     const r = cpuReadyRegion()
     r.textureUploaded = true

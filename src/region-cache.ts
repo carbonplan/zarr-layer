@@ -72,13 +72,20 @@ export function isRegionCpuReady(region: RegionState): boolean {
  * decide that a level covers the viewport: a level that displaces its
  * lower-resolution fallbacks on CPU state alone leaves nothing on screen if
  * its uploads then fail.
+ *
+ * `requiredBands` names the textures a custom shader samples. Pass the same
+ * list the draw call uses, or a region whose main texture is resident but
+ * whose bands are not would count towards coverage and then fail to draw.
  */
-export function isRegionGpuReady(region: RegionState): boolean {
-  return (
-    isRegionCpuReady(region) &&
-    region.textureUploaded &&
-    region.geometryUploaded
-  )
+export function isRegionGpuReady(
+  region: RegionState,
+  requiredBands?: readonly string[]
+): boolean {
+  if (!isRegionCpuReady(region) || !region.geometryUploaded) return false
+  if (requiredBands && requiredBands.length > 0) {
+    return requiredBands.every((band) => region.bandTexturesUploaded.has(band))
+  }
+  return region.textureUploaded
 }
 
 export function disposeRegion(
