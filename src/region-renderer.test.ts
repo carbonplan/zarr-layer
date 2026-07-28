@@ -136,10 +136,26 @@ function seedFallbackRegion(
   return region
 }
 
-/** Let the fire-and-forget fetch chain started by update() settle. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+/**
+ * Let the fire-and-forget fetch chain started by update() run to quiescence.
+ * `fetchRegions` marks its batch loading before it yields, so an in-flight
+ * batch is already visible here. Hopping the macrotask queue until nothing is
+ * loading keeps the tests independent of how many awaits deep the chain runs.
+ */
+async function settle(
+  renderer: RegionRenderer,
+  timeoutMs = 2000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  const fetching = () => {
+    for (const region of seam(renderer).regionCache.values()) {
+      if (region.loading) return true
+    }
+    return false
+  }
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  } while (fetching() && Date.now() < deadline)
 }
 
 async function makeRenderer() {
@@ -199,7 +215,7 @@ describe('RegionRenderer', () => {
     const { renderer, invalidate, gl, map } = await makeRenderer()
 
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     // 2x2 region grid, all visible at a whole-world viewport.
     expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
@@ -210,7 +226,7 @@ describe('RegionRenderer', () => {
     const { renderer, gl, map } = await makeRenderer()
 
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     // Fetch is complete, but nothing has been drawn yet.
     expect(gl.createTexture).not.toHaveBeenCalled()
     expect(gl.texImage2D).not.toHaveBeenCalled()
@@ -232,7 +248,7 @@ describe('RegionRenderer', () => {
     const { renderer, gl, map } = await makeRenderer()
 
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     seam(renderer).getRegionStates(gl)
     seam(renderer).getRegionStates(gl)
     seam(renderer).getRegionStates(gl)
@@ -251,7 +267,7 @@ describe('RegionRenderer', () => {
   it('serves queries from the same level the renderer committed', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     // Pixel (0, 0) of the 8x4 grid: lon -157.5, lat 67.5.
     const first = await renderer.queryData(
@@ -270,14 +286,14 @@ describe('RegionRenderer', () => {
   it('refetches and re-uploads every region after a selector change', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     seam(renderer).getRegionStates(gl)
     expect(gl.texImage2D).toHaveBeenCalledTimes(4)
     const geometryUploads = gl.bufferData.mock.calls.length
 
     await renderer.setSelector({ time: { selected: 20, type: 'value' } })
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     const states = seam(renderer).getRegionStates(gl)
     expect(states).toHaveLength(4)
@@ -291,7 +307,7 @@ describe('RegionRenderer', () => {
   it('sends regenerated geometry to the GPU on the next frame', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     seam(renderer).getRegionStates(gl)
     const uploadsBefore = gl.bufferData.mock.calls.length
 
@@ -314,7 +330,7 @@ describe('RegionRenderer', () => {
   it('recomputes mercator bounds with the regenerated geometry', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     const region = seam(renderer).regionCache.get('0:0,0')!
     // A quarter of the world: the north-west region of a 2x2 grid.
     expect(region.mercatorBounds).toMatchObject({ x0: 0, x1: 0.5 })
@@ -334,7 +350,7 @@ describe('RegionRenderer', () => {
     const { renderer, map } = await makeRenderer()
     const gl = fakeGl({ failTextures: true })
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     const fallback = seedFallbackRegion(renderer)
 
     // The current level has data but its textures won't allocate. Dropping the
@@ -359,11 +375,11 @@ describe('RegionRenderer', () => {
   it('draws nothing from a band-mode region until the shader switch refetches', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
 
     // Switching back to the main texture leaves cached regions holding band
@@ -374,7 +390,7 @@ describe('RegionRenderer', () => {
 
     // The refetch triggered by the switch restores them.
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     const states = seam(renderer).getRegionStates(gl)
     expect(states).toHaveLength(4)
     for (const state of states) {
@@ -385,11 +401,11 @@ describe('RegionRenderer', () => {
   it('stops fetching once band-mode regions have their data', async () => {
     const { renderer, invalidate, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     // Every fetch batch ends in invalidate(), so a settled viewport that keeps
     // invalidating is redispatching. Store reads can't see this: the decoded
@@ -400,7 +416,7 @@ describe('RegionRenderer', () => {
     // only looks at `data` queues every visible region on every frame.
     for (let frame = 0; frame < 3; frame++) {
       renderer.update(map, gl)
-      await settle()
+      await settle(renderer)
     }
     expect(invalidate).not.toHaveBeenCalled()
   })
@@ -409,11 +425,11 @@ describe('RegionRenderer', () => {
     const { renderer, map } = await makeRenderer()
     const working = fakeGl()
     renderer.update(map, working)
-    await settle()
+    await settle(renderer)
     await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, working)
-    await settle()
+    await settle(renderer)
 
     const fallback = seedFallbackRegion(renderer, {
       bands: ['time_10', 'time_20'],
@@ -430,7 +446,7 @@ describe('RegionRenderer', () => {
   it('holds other-level eviction protection until the level is drawable', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     const fallback = seedFallbackRegion(renderer)
     const cache = seam(renderer).regionCache
 
@@ -450,10 +466,10 @@ describe('RegionRenderer', () => {
     // setSelector rebuilds the level only once a gl context has been cached,
     // so the first update has to land before the multi-value selector.
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     const region = seam(renderer).regionCache.get('0:0,0')!
     expect(region.channels).toBe(2)
@@ -464,7 +480,7 @@ describe('RegionRenderer', () => {
     // main texture, so the interleaved copy stops being built.
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
 
     const refetched = seam(renderer).regionCache.get('0:0,0')!
     expect(refetched.bandData.size).toBe(2)
@@ -485,7 +501,7 @@ describe('RegionRenderer', () => {
   it('disposes GPU resources and stops rendering after dispose', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
-    await settle()
+    await settle(renderer)
     seam(renderer).getRegionStates(gl)
 
     renderer.dispose(gl)
