@@ -141,6 +141,9 @@ export class RegionRenderer {
 
   // Cached WebGL context for use in setSelector
   private cachedGl: WebGL2RenderingContext | null = null
+  // Whether the active shader samples per-band textures instead of the main
+  // texture. Owned by ZarrLayer, which decides the shader variant.
+  private rendersFromBandTextures: boolean = false
   // Track current projection for Mapbox's direct globe render path.
   private isGlobeProjection: boolean = false
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
@@ -805,6 +808,7 @@ export class RegionRenderer {
       getActiveLevel: () => this.activeLevel,
       getSelectorVersion: () => this.selectorVersion,
       getBandNames: () => this.bandNames,
+      usesBandTextures: () => this.rendersFromBandTextures,
       isRemoved: () => this.isRemoved,
       getRegionBounds: (regionX, regionY, levelMeta) =>
         this.getRegionBounds(regionX, regionY, levelMeta),
@@ -1096,6 +1100,20 @@ export class RegionRenderer {
 
   setLoadingCallback(callback: LoadingStateCallback | undefined): void {
     setLoadingCallbackUtil(this.loadingManager, callback)
+  }
+
+  /**
+   * Tell the renderer which texture the shader will sample. Band-sampling
+   * shaders skip the interleaved channel copy that feeds the main texture.
+   * Regions fetched under the previous setting keep their old layout until
+   * they are refetched, so bump the selector version to refresh them.
+   */
+  setRendersFromBandTextures(active: boolean): void {
+    if (this.rendersFromBandTextures === active) return
+    this.rendersFromBandTextures = active
+    this.selectorVersion++
+    this.lastViewportHash = ''
+    this.invalidate()
   }
 
   private computeMercatorBoundsFromProjection(): MercatorBounds {

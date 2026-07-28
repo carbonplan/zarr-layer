@@ -350,6 +350,33 @@ describe('RegionRenderer', () => {
     expect(cache.isProtected(fallback.key)).toBe(false)
   })
 
+  it('drops the interleaved copy once the shader samples band textures', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    // setSelector rebuilds the level only once a gl context has been cached,
+    // so the first update has to land before the multi-value selector.
+    renderer.update(map, gl)
+    await settle()
+    await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
+    renderer.update(map, gl)
+    await settle()
+
+    const region = seam(renderer).regionCache.get('0:0,0')!
+    expect(region.channels).toBe(2)
+    expect(region.bandData.size).toBe(2)
+    expect(region.data).not.toBe(region.bandData.get('time_10'))
+
+    // The layer switches to the band-sampling shader, which never reads the
+    // main texture, so the interleaved copy stops being built.
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, gl)
+    await settle()
+
+    const refetched = seam(renderer).regionCache.get('0:0,0')!
+    expect(refetched.bandData.size).toBe(2)
+    expect(refetched.data).toBe(refetched.bandData.get('time_10'))
+    expect(refetched.channels).toBe(1)
+  })
+
   it('disposes GPU resources and stops rendering after dispose', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)

@@ -125,6 +125,7 @@ async function makeHarness(
     getActiveLevel: () => level,
     getSelectorVersion: () => selectorVersion,
     getBandNames: () => ['temperature'],
+    usesBandTextures: () => false,
     isRemoved: () => false,
     getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
     computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
@@ -330,9 +331,9 @@ describe('RegionFetcher', () => {
     expect(cache.size).toBe(0)
   })
 
-  it('fetches multi-value dims as parallel channels and interleaves them', async () => {
-    // 2-time x 4-lat x 8-lon ramp: value = t*32 + y*8 + x. Selecting both
-    // time steps packs two channels per pixel.
+  // 2-time x 4-lat x 8-lon ramp: value = t*32 + y*8 + x. Selecting both time
+  // steps produces two channels.
+  async function makeMultibandHarness(usesBandTextures: boolean) {
     const memory = buildMemoryZarrStore({
       arrays: [
         {
@@ -385,13 +386,18 @@ describe('RegionFetcher', () => {
       getSelectorVersion: () => 0,
       // One name provided: the second channel falls back to band_<index>.
       getBandNames: () => ['t10'],
+      usesBandTextures: () => usesBandTextures,
       isRemoved: () => false,
       getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
       computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
       createRegionGeometry: vi.fn(),
       invalidate: vi.fn(),
     })
+    return { fetcher, cache }
+  }
 
+  it('fetches multi-value dims as parallel channels and interleaves them', async () => {
+    const { fetcher, cache } = await makeMultibandHarness(false)
     await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
     const region = cache.get(makeRegionKey(0, 0, 0))!
 
@@ -410,5 +416,22 @@ describe('RegionFetcher', () => {
       t0[1],
       t0[1] + 32,
     ])
+  })
+
+  it('skips the interleaved copy when the shader samples band textures', async () => {
+    const { fetcher, cache } = await makeMultibandHarness(true)
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+
+    // Every band is still fetched and kept; only the interleaved copy that
+    // would feed the unread main texture is skipped.
+    const t0 = chunkData(0, 0)
+    expect(Array.from(region.bandData.get('t10')!)).toEqual(t0)
+    expect(Array.from(region.bandData.get('band_1')!)).toEqual(
+      t0.map((v) => v + 32)
+    )
+    // data aliases the first band rather than allocating a second array.
+    expect(region.data).toBe(region.bandData.get('t10'))
+    expect(region.channels).toBe(1)
   })
 })

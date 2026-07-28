@@ -349,14 +349,7 @@ export class ZarrLayer {
     this.customFrag = customFrag
     this.customUniforms = uniforms || {}
 
-    this.bandNames = getBands(variable, this.normalizedSelector)
-    if (this.bandNames.length > 1 || customFrag) {
-      this.customShaderConfig = {
-        bands: this.bandNames,
-        customFrag: customFrag,
-        customUniforms: this.customUniforms,
-      }
-    }
+    this.refreshCustomShaderConfig()
 
     if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
@@ -364,6 +357,25 @@ export class ZarrLayer {
     this.transformRequest = transformRequest
     this.customStore = store
     this.renderPoles = renderPoles
+  }
+
+  /**
+   * Recompute the band list and the shader variant it implies. More than one
+   * band, or any custom fragment, means the shader samples per-band textures
+   * rather than the main one, which the renderer needs to know so it can skip
+   * building data only the main texture would consume.
+   */
+  private refreshCustomShaderConfig(): void {
+    this.bandNames = getBands(this.variable, this.normalizedSelector)
+    this.customShaderConfig =
+      this.bandNames.length > 1 || this.customFrag
+        ? {
+            bands: this.bandNames,
+            customFrag: this.customFrag,
+            customUniforms: this.customUniforms,
+          }
+        : null
+    this.regionRenderer?.setRendersFromBandTextures(!!this.customShaderConfig)
   }
 
   private emitLoadingState(): void {
@@ -485,16 +497,7 @@ export class ZarrLayer {
     this.selector = selector
     this.normalizedSelector = normalized
 
-    this.bandNames = getBands(this.variable, this.normalizedSelector)
-    if (this.bandNames.length > 1 || this.customFrag) {
-      this.customShaderConfig = {
-        bands: this.bandNames,
-        customFrag: this.customFrag,
-        customUniforms: this.customUniforms,
-      }
-    } else {
-      this.customShaderConfig = null
-    }
+    this.refreshCustomShaderConfig()
 
     if (this.regionRenderer) {
       await this.regionRenderer.setSelector(this.normalizedSelector)
@@ -593,6 +596,9 @@ export class ZarrLayer {
     // Lock immediately after the renderer captures the value, before async initialize()
     this.dataScaleLocked = true
 
+    // The shader variant was resolved during initialize(), before this
+    // renderer existed, so hand it over before the first fetch.
+    this.regionRenderer.setRendersFromBandTextures(!!this.customShaderConfig)
     this.regionRenderer.setLoadingCallback(this.handleChunkLoadingChange)
     await this.regionRenderer.initialize()
 
@@ -637,16 +643,7 @@ export class ZarrLayer {
       this.normalizedSelector = normalizeSelector(this.selector)
       await this.loadInitialDimensionValues()
 
-      this.bandNames = getBands(this.variable, this.normalizedSelector)
-      if (this.bandNames.length > 1 || this.customFrag) {
-        this.customShaderConfig = {
-          bands: this.bandNames,
-          customFrag: this.customFrag,
-          customUniforms: this.customUniforms,
-        }
-      } else {
-        this.customShaderConfig = null
-      }
+      this.refreshCustomShaderConfig()
     } catch (err) {
       // Clean up partially-initialized store before re-throwing
       if (this.zarrStore) {

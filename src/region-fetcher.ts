@@ -33,6 +33,12 @@ export type RegionFetcherContext = {
   getActiveLevel: () => LevelRuntime | null
   getSelectorVersion: () => number
   getBandNames: () => string[]
+  /**
+   * True when a custom shader samples the per-band textures. The main texture
+   * is then never bound, so the interleaved copy of every channel that feeds
+   * it is dead weight (12 bands at 128x128 is 786 KB per region).
+   */
+  usesBandTextures: () => boolean
   isRemoved: () => boolean
   getRegionBounds: (
     regionX: number,
@@ -356,8 +362,13 @@ export class RegionFetcher {
         normalizedBands.push(bandNormalized)
       }
 
-      // Construct interleaved data from normalized bands
-      region.data = interleaveBands(normalizedBands, numChannels)
+      // Construct interleaved data from normalized bands. Band-sampling
+      // shaders never read the main texture, so point it at the first band
+      // rather than allocating an interleaved copy of every channel.
+      const bandRendering = this.context.usesBandTextures()
+      region.data = bandRendering
+        ? normalizedBands[0]
+        : interleaveBands(normalizedBands, numChannels)
 
       // Check if geometry needs to be (re)created before updating dimensions
       // The adaptive mesh only depends on spatial bounds and dimensions, not the selector
@@ -368,7 +379,7 @@ export class RegionFetcher {
 
       region.width = actualW
       region.height = actualH
-      region.channels = numChannels
+      region.channels = bandRendering ? 1 : numChannels
       region.loading = false
 
       // Store level-specific dimensions from snapshot for geometry creation.
