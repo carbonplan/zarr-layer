@@ -4,7 +4,8 @@ import {
   RegionCache,
   createRegionState,
   disposeRegion,
-  isRegionValid,
+  isRegionCpuReady,
+  isRegionGpuReady,
   makeRegionKey,
 } from './region-cache'
 import type { RegionState } from './region-state'
@@ -57,28 +58,59 @@ describe('createRegionState', () => {
   })
 })
 
-describe('isRegionValid', () => {
+function cpuReadyRegion() {
+  const r = region(0, 0, 0)
+  r.data = new Float32Array(4)
+  r.vertexArr = new Float32Array(8)
+  r.pixCoordArr = new Float32Array(8)
+  r.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  r.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
+  return r
+}
+
+describe('isRegionCpuReady', () => {
   it('requires CPU-side data, geometry arrays, bounds, and level meta', () => {
-    const r = region(0, 0, 0)
-    expect(isRegionValid(r)).toBe(false)
-    r.data = new Float32Array(4)
-    r.vertexArr = new Float32Array(8)
-    r.pixCoordArr = new Float32Array(8)
-    r.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
-    r.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
-    expect(isRegionValid(r)).toBe(true)
+    expect(isRegionCpuReady(region(0, 0, 0))).toBe(false)
+    expect(isRegionCpuReady(cpuReadyRegion())).toBe(true)
   })
 
   it('does not require GPU resources (uploads happen lazily at render)', () => {
-    const r = region(0, 0, 0)
-    r.data = new Float32Array(4)
-    r.vertexArr = new Float32Array(8)
-    r.pixCoordArr = new Float32Array(8)
-    r.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
-    r.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
+    const r = cpuReadyRegion()
     expect(r.texture).toBeNull()
     expect(r.vertexBuffer).toBeNull()
-    expect(isRegionValid(r)).toBe(true)
+    expect(isRegionCpuReady(r)).toBe(true)
+  })
+})
+
+describe('isRegionGpuReady', () => {
+  it('requires both uploads on top of CPU readiness', () => {
+    const r = cpuReadyRegion()
+    expect(isRegionGpuReady(r)).toBe(false)
+
+    r.textureUploaded = true
+    expect(isRegionGpuReady(r)).toBe(false)
+
+    r.geometryUploaded = true
+    expect(isRegionGpuReady(r)).toBe(true)
+  })
+
+  it('is false for an uploaded region whose data was dropped', () => {
+    const r = cpuReadyRegion()
+    r.textureUploaded = true
+    r.geometryUploaded = true
+    r.data = null
+    expect(isRegionGpuReady(r)).toBe(false)
+  })
+
+  it('goes stale again when a refetch marks the uploads dirty', () => {
+    const r = cpuReadyRegion()
+    r.textureUploaded = true
+    r.geometryUploaded = true
+
+    // A refetch clears the texture flag; a regenerated mesh clears the other.
+    r.textureUploaded = false
+    expect(isRegionGpuReady(r)).toBe(false)
+    expect(isRegionCpuReady(r)).toBe(true)
   })
 })
 

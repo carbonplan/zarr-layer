@@ -52,13 +52,32 @@ export function createRegionState(
   }
 }
 
-export function isRegionValid(region: RegionState): boolean {
+/**
+ * The region has everything an upload needs. Gates whether
+ * `ensureRegionGpuResources` is worth attempting — not whether the region can
+ * be drawn, which also requires that upload to have succeeded.
+ */
+export function isRegionCpuReady(region: RegionState): boolean {
   return !!(
     region.data &&
     region.vertexArr &&
     region.pixCoordArr &&
     region.mercatorBounds &&
     region.levelMeta
+  )
+}
+
+/**
+ * The region is drawable right now. Use this, never `isRegionCpuReady`, to
+ * decide that a level covers the viewport: a level that displaces its
+ * lower-resolution fallbacks on CPU state alone leaves nothing on screen if
+ * its uploads then fail.
+ */
+export function isRegionGpuReady(region: RegionState): boolean {
+  return (
+    isRegionCpuReady(region) &&
+    region.textureUploaded &&
+    region.geometryUploaded
   )
 }
 

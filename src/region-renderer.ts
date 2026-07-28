@@ -51,7 +51,12 @@ import {
   getVisibleRegions,
   selectLevelForZoom,
 } from './region-math'
-import { RegionCache, isRegionValid, makeRegionKey } from './region-cache'
+import {
+  RegionCache,
+  isRegionCpuReady,
+  isRegionGpuReady,
+  makeRegionKey,
+} from './region-cache'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader } from './level-loader'
 import { createHybridMesh } from './mesh-reprojector'
@@ -405,13 +410,6 @@ export class RegionRenderer {
   }
 
   /**
-   * Check if a region has all required data for rendering.
-   */
-  private isRegionValid(region: RegionState): boolean {
-    return isRegionValid(region)
-  }
-
-  /**
    * Get uniforms for rendering with scale/offset disabled.
    * Untiled mode applies per-level scale/offset in JS (in fetchRegion),
    * so we tell the shader to skip its scale/offset application.
@@ -426,7 +424,9 @@ export class RegionRenderer {
 
   /**
    * Check if current level fully covers the visible viewport.
-   * Returns true if all visible regions have valid loaded data.
+   * Returns true only if every visible region is drawable right now — the
+   * decision releases the previous level's fallbacks, both from the render
+   * list and from eviction protection, so CPU-side readiness isn't enough.
    */
   private currentLevelCoversViewport(): boolean {
     // If visible regions are stale (from different level), we can't know coverage
@@ -437,7 +437,7 @@ export class RegionRenderer {
     for (const { regionX, regionY } of this.lastVisibleRegions) {
       const key = this.makeRegionKey(levelIndex, regionX, regionY)
       const region = this.regionCache.get(key)
-      if (!region || !this.isRegionValid(region)) {
+      if (!region || !isRegionGpuReady(region)) {
         return false
       }
     }
@@ -453,7 +453,7 @@ export class RegionRenderer {
     const fallbacks: RegionState[] = []
     for (const region of this.regionCache.values()) {
       if (region.levelIndex === (this.activeLevel?.index ?? -1)) continue
-      if (!this.isRegionValid(region)) continue
+      if (!isRegionCpuReady(region)) continue
       // Only include regions that are protected (were visible)
       if (!this.regionCache.isProtected(region.key)) continue
       fallbacks.push(region)
@@ -462,31 +462,30 @@ export class RegionRenderer {
   }
 
   /**
-   * Get regions to render: current level regions plus fallbacks if needed.
-   * When current level fully covers viewport, returns only current level.
-   * Otherwise, includes protected fallback regions from other levels.
+   * Get drawable regions: current level regions plus fallbacks if needed.
+   * Uploads the current level first so coverage is judged on what can actually
+   * be drawn — a level that displaces its fallbacks and then fails to upload
+   * would leave the viewport blank. Every returned region is GPU-ready.
    */
-  private getLoadedRegions(): RegionState[] {
+  private getLoadedRegions(gl: WebGL2RenderingContext): RegionState[] {
     const currentLevel = this.activeLevel?.index ?? -1
     const currentLevelRegions: RegionState[] = []
 
-    // Collect all valid regions at current level
     for (const region of this.regionCache.values()) {
-      if (!this.isRegionValid(region)) continue
-      if (region.levelIndex === currentLevel) {
-        currentLevelRegions.push(region)
-      }
+      if (region.levelIndex !== currentLevel) continue
+      if (!isRegionCpuReady(region)) continue
+      if (!ensureRegionGpuResources(gl, region)) continue
+      currentLevelRegions.push(region)
     }
 
-    // If current level fully covers viewport, no fallback needed
     if (this.currentLevelCoversViewport()) {
       return currentLevelRegions
     }
 
-    // Include protected fallback regions from other levels
-    const fallbackRegions = this.getProtectedFallbackRegions()
-
     // Render order: fallbacks first (beneath), current level on top
+    const fallbackRegions = this.getProtectedFallbackRegions().filter(
+      (region) => ensureRegionGpuResources(gl, region)
+    )
     return [...fallbackRegions, ...currentLevelRegions]
   }
 
@@ -1016,8 +1015,7 @@ export class RegionRenderer {
     setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
 
     // Render each loaded region using unified path
-    for (const region of this.getLoadedRegions()) {
-      if (!ensureRegionGpuResources(gl, region)) continue
+    for (const region of this.getLoadedRegions(gl)) {
       renderRegion(
         gl,
         shaderProgram,
@@ -1061,27 +1059,25 @@ export class RegionRenderer {
       return []
     }
 
-    return this.getLoadedRegions()
-      .filter((region) => ensureRegionGpuResources(gl, region))
-      .map((region) => ({
-        texture: region.texture!,
-        vertexBuffer: region.vertexBuffer!,
-        pixCoordBuffer: region.pixCoordBuffer!,
-        vertexArr: region.vertexArr!,
-        mercatorBounds: region.mercatorBounds!,
-        width: region.width,
-        height: region.height,
-        bandData: region.bandData,
-        bandTextures: region.bandTextures,
-        bandTexturesUploaded: region.bandTexturesUploaded,
-        bandTexturesConfigured: region.bandTexturesConfigured,
-        // Indexed mesh fields for proj4 adaptive mesh
-        indexBuffer: region.indexBuffer ?? undefined,
-        vertexCount: region.vertexCount,
-        useIndexedMesh: region.useIndexedMesh,
-        wgs84Bounds: region.wgs84Bounds ?? undefined,
-        latIsAscending: region.latIsAscending,
-      }))
+    return this.getLoadedRegions(gl).map((region) => ({
+      texture: region.texture!,
+      vertexBuffer: region.vertexBuffer!,
+      pixCoordBuffer: region.pixCoordBuffer!,
+      vertexArr: region.vertexArr!,
+      mercatorBounds: region.mercatorBounds!,
+      width: region.width,
+      height: region.height,
+      bandData: region.bandData,
+      bandTextures: region.bandTextures,
+      bandTexturesUploaded: region.bandTexturesUploaded,
+      bandTexturesConfigured: region.bandTexturesConfigured,
+      // Indexed mesh fields for proj4 adaptive mesh
+      indexBuffer: region.indexBuffer ?? undefined,
+      vertexCount: region.vertexCount,
+      useIndexedMesh: region.useIndexedMesh,
+      wgs84Bounds: region.wgs84Bounds ?? undefined,
+      latIsAscending: region.latIsAscending,
+    }))
   }
 
   dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void {
