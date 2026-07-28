@@ -10,7 +10,6 @@ import { MAX_CACHED_REGIONS } from './region-cache'
 const createLRU = <V>(
   maxEntries: number,
   maxBytes: number,
-  minEntries: number,
   sizeOf: (value: V) => number
 ) => {
   const store = new Map<string, { value: V; bytes: number }>()
@@ -36,14 +35,11 @@ const createLRU = <V>(
       const bytes = sizeOf(value)
       store.set(key, { value, bytes })
       totalBytes += bytes
-      // The byte budget never shrinks the cache below the working set: a
-      // cache smaller than one viewport evicts chunks that are still being
-      // sliced, turning every selector change into a refetch storm. Holding
-      // the working set costs more memory than the budget asks for and is
-      // still bounded; thrashing it is not.
+      // Keep the most recent entry even when it alone exceeds the budget, so
+      // a dataset with very large chunks caches one instead of none.
       while (
         store.size > maxEntries ||
-        (totalBytes > maxBytes && store.size > minEntries)
+        (totalBytes > maxBytes && store.size > 1)
       ) {
         const oldest = store.keys().next().value
         if (oldest === undefined) break
@@ -70,15 +66,17 @@ const createLRU = <V>(
 
 type AnyChunk = zarr.Chunk<zarr.DataType>
 
-/** Soft cap on decoded bytes held per store, applied above the working set. */
-const DEFAULT_MAX_BYTES = 128 * 1024 * 1024
-
 /**
- * Chunks the byte budget will never evict. One rendered region reads one
- * chunk, so this mirrors the region cache's own cap: a smaller chunk cache
- * would evict chunks that regions still in flight are slicing.
+ * Hard cap on decoded bytes held per store.
+ *
+ * Sized so a full viewport still fits for ordinary chunk sizes: one rendered
+ * region reads one chunk, so the working set is up to `MAX_CACHED_REGIONS`
+ * chunks, and a cache below that turns every selector change back into
+ * network reads. Above ~2 MB per chunk the byte cap wins and re-reads start
+ * missing, which is the right trade: the alternative is an entry floor that
+ * would let a 50 MB chunk size retain gigabytes.
  */
-const DEFAULT_MIN_ENTRIES = MAX_CACHED_REGIONS
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * MAX_CACHED_REGIONS
 
 const chunkBytes = (chunk: AnyChunk): number => {
   const data = chunk.data as { byteLength?: number; length?: number }
@@ -211,13 +209,11 @@ export const withDecodedChunkCaching = zarr.defineStoreExtension(
     opts: {
       maxEntries?: number
       maxBytes?: number
-      minEntries?: number
     } = {}
   ) => {
     const cache = createLRU<AnyChunk>(
       opts.maxEntries ?? 512,
       opts.maxBytes ?? DEFAULT_MAX_BYTES,
-      opts.minEntries ?? DEFAULT_MIN_ENTRIES,
       chunkBytes
     )
     const pending = new Map<string, PendingEntry>()

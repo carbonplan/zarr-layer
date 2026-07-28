@@ -11,11 +11,7 @@ import { buildMemoryZarrStore, ramp } from './__fixtures__/memory-zarr'
 
 const CHUNK_BYTES = 4 * 4 * 4
 
-async function makeArray(opts: {
-  maxEntries?: number
-  maxBytes?: number
-  minEntries?: number
-}) {
+async function makeArray(opts: { maxEntries?: number; maxBytes?: number }) {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -58,6 +54,18 @@ describe('withDecodedChunkCaching', () => {
     expect(reads).toHaveLength(1)
   })
 
+  it('holds a viewport worth of ordinary chunks by default', async () => {
+    // The default budget has to clear the working set: one rendered region
+    // reads one chunk, so a cache below that turns panning and every selector
+    // change back into network reads.
+    const { array, reads } = await makeArray({})
+    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
+    expect(reads).toHaveLength(4)
+
+    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
+    expect(reads).toHaveLength(4)
+  })
+
   it('shares one read between concurrent callers', async () => {
     const { array, reads } = await makeArray({})
     await Promise.all([array.getChunk([0, 0]), array.getChunk([0, 0])])
@@ -70,7 +78,6 @@ describe('withDecodedChunkCaching', () => {
     const { array, reads } = await makeArray({
       maxEntries: 512,
       maxBytes: CHUNK_BYTES * 2,
-      minEntries: 1,
     })
     await array.getChunk([0, 0])
     await array.getChunk([0, 1])
@@ -87,34 +94,36 @@ describe('withDecodedChunkCaching', () => {
   })
 
   it('keeps a chunk larger than the whole budget rather than caching nothing', async () => {
-    const { array, reads } = await makeArray({ maxBytes: 1, minEntries: 1 })
+    const { array, reads } = await makeArray({ maxBytes: 1 })
     await array.getChunk([0, 0])
     await array.getChunk([0, 0])
     expect(reads).toHaveLength(1)
   })
 
-  it('holds the working set even when it exceeds the byte budget', async () => {
-    // Budget for one chunk, but four are in play. A cache smaller than the
-    // working set evicts chunks that are still being read, so the floor wins
-    // and every one of them stays resident.
-    const { array, reads } = await makeArray({
-      maxBytes: CHUNK_BYTES,
-      minEntries: 4,
-    })
+  it('never retains more than the byte budget', async () => {
+    // The budget is the hard bound: no entry floor keeps chunks resident past
+    // it, which is what would let a large chunk size retain gigabytes.
+    const { array, reads } = await makeArray({ maxBytes: CHUNK_BYTES })
     for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
     expect(reads).toHaveLength(4)
 
-    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
-    expect(reads).toHaveLength(4)
+    // Only the newest survived, so every earlier chunk reads again.
+    for (const x of [0, 1, 2]) await array.getChunk([0, x])
+    expect(reads).toHaveLength(7)
   })
 
-  it('defaults the floor to the region cache capacity', async () => {
-    // Four large chunks against a one-byte budget: the default floor is well
-    // above four, so nothing is evicted.
+  it('serves in-flight readers from the shared fetch, not the cache', async () => {
+    // Awaiters resolve from the pending promise, so eviction between the
+    // fetch starting and finishing cannot break them. Worth pinning: it is
+    // the reason the byte bound needs no carve-out for active chunks.
     const { array, reads } = await makeArray({ maxBytes: 1 })
-    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
-    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x])
-    expect(reads).toHaveLength(4)
+    const [a, b] = await Promise.all([
+      array.getChunk([0, 0]),
+      array.getChunk([0, 0]),
+    ])
+    expect(reads).toHaveLength(1)
+    expect(a).toBe(b)
+    expect(Array.from(a.data as Float32Array)).toEqual(ramp(16))
   })
 
   it('still honors the entry cap when chunks are small', async () => {
@@ -130,10 +139,7 @@ describe('withDecodedChunkCaching', () => {
   })
 
   it('refreshes recency on a cache hit', async () => {
-    const { array, reads } = await makeArray({
-      maxBytes: CHUNK_BYTES * 2,
-      minEntries: 1,
-    })
+    const { array, reads } = await makeArray({ maxBytes: CHUNK_BYTES * 2 })
     await array.getChunk([0, 0])
     await array.getChunk([0, 1])
     // Touch the oldest so the next insert evicts [0, 1] instead.
