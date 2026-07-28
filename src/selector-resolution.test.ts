@@ -189,8 +189,9 @@ describe('buildSliceArgsForSelector', () => {
       }
     )
     expect(sliceArgs[0]).toBe(0) // unselected non-spatial dim
-    expect(sliceArgs[1]).not.toBe(0) // lat slice
-    expect(sliceArgs[2]).not.toBe(0) // lon slice
+    // Full extent of each spatial dim, from the array shape [5, 180, 360].
+    expect(sliceArgs[1]).toMatchObject({ start: 0, stop: 180 })
+    expect(sliceArgs[2]).toMatchObject({ start: 0, stop: 360 })
   })
 
   it('sets spatial dims to placeholder 0 when slices are excluded', async () => {

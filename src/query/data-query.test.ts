@@ -184,8 +184,13 @@ describe('queryData', () => {
           ],
         ],
       }
-      await queryData(proj4Context, crossing)
-      await queryData(proj4Context, crossing)
+      const result = await queryData(proj4Context, crossing, { time: 10 })
+      // One strip clamped to the raster extent, not the two-strip merge the
+      // EPSG:4326 path produces for the same polygon ([7, 0]).
+      expect(result.temp).toEqual([7])
+      expect(result.coordinates.lon).toEqual([157.5])
+
+      await queryData(proj4Context, crossing, { time: 10 })
       expect(warnSpy).toHaveBeenCalledTimes(1)
       expect(proj4Context.antimeridianWarnings.has('proj4-crossing')).toBe(true)
     } finally {
