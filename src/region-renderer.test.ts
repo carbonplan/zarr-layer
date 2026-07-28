@@ -166,8 +166,15 @@ async function makeRenderer() {
       },
     ],
   })
+  const chunkReads: string[] = []
+  const counting = {
+    get: async (key: string) => {
+      if (key.includes('/temperature/c/')) chunkReads.push(key)
+      return memory.get(key)
+    },
+  }
   const store = new ZarrStore({
-    customStore: memory,
+    customStore: counting,
     variable: 'temperature',
     version: 3,
     bounds: [-180, -90, 180, 90],
@@ -178,7 +185,13 @@ async function makeRenderer() {
   const invalidate = vi.fn()
   const renderer = new RegionRenderer(store, 'temperature', {}, invalidate)
   await renderer.initialize()
-  return { renderer, invalidate, gl: fakeGl(), map: mapAt(-180, -85, 180, 85) }
+  return {
+    renderer,
+    invalidate,
+    chunkReads,
+    gl: fakeGl(),
+    map: mapAt(-180, -85, 180, 85),
+  }
 }
 
 describe('RegionRenderer', () => {
@@ -367,6 +380,29 @@ describe('RegionRenderer', () => {
     for (const state of states) {
       expect(state.texture).not.toBeNull()
     }
+  })
+
+  it('stops fetching once band-mode regions have their data', async () => {
+    const { renderer, invalidate, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle()
+    await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, gl)
+    await settle()
+
+    // Every fetch batch ends in invalidate(), so a settled viewport that keeps
+    // invalidating is redispatching. Store reads can't see this: the decoded
+    // chunk cache serves the refetches without touching the store.
+    invalidate.mockClear()
+
+    // Band-mode regions carry no interleaved copy, so a has-data check that
+    // only looks at `data` queues every visible region on every frame.
+    for (let frame = 0; frame < 3; frame++) {
+      renderer.update(map, gl)
+      await settle()
+    }
+    expect(invalidate).not.toHaveBeenCalled()
   })
 
   it('keeps fallback coverage when a band texture cannot be allocated', async () => {

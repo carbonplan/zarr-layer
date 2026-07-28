@@ -53,6 +53,7 @@ import {
 } from './region-math'
 import {
   RegionCache,
+  hasRegionData,
   isRegionCpuReady,
   isRegionGpuReady,
   makeRegionKey,
@@ -743,7 +744,7 @@ export class RegionRenderer {
         continue
       }
 
-      if (!cached?.data) {
+      if (!cached || !hasRegionData(cached)) {
         // No data yet - this is a new region (viewport change)
         newRegions.push({ regionX, regionY })
       } else if (cached.selectorVersion !== this.selectorVersion) {

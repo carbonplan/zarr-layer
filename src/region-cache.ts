@@ -53,15 +53,22 @@ export function createRegionState(
 }
 
 /**
+ * The region's pixels have arrived, in whichever form the active shader
+ * reads them. Band-sampling regions carry no interleaved copy, so `data`
+ * alone is not the test for whether a region still needs fetching.
+ */
+export function hasRegionData(region: RegionState): boolean {
+  return !!region.data || region.bandData.size > 0
+}
+
+/**
  * The region has everything an upload needs. Gates whether
  * `ensureRegionGpuResources` is worth attempting — not whether the region can
  * be drawn, which also requires that upload to have succeeded.
  */
 export function isRegionCpuReady(region: RegionState): boolean {
-  // Band-sampling regions carry no interleaved copy; their pixels live in
-  // bandData instead.
   return !!(
-    (region.data || region.bandData.size > 0) &&
+    hasRegionData(region) &&
     region.vertexArr &&
     region.pixCoordArr &&
     region.mercatorBounds &&
