@@ -34,6 +34,7 @@ export function createRegionState(
     vertexBuffer: null,
     pixCoordBuffer: null,
     indexBuffer: null,
+    geometryUploaded: false,
     vertexArr: null,
     pixCoordArr: null,
     indexArr: null,

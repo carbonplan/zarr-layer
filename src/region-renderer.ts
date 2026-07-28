@@ -521,6 +521,8 @@ export class RegionRenderer {
     region.wgs84Bounds = null
     region.indexArr = null
     region.useIndexedMesh = false
+    // Whatever this produces is newer than the buffers already on the GPU.
+    region.geometryUploaded = false
 
     if (
       !this.projection.def ||
@@ -532,9 +534,9 @@ export class RegionRenderer {
 
     const geoBounds = this.getRegionBounds(regionX, regionY, region.levelMeta)
 
-    if (!region.mercatorBounds) {
-      region.mercatorBounds = this.computeRegionMercatorBounds(geoBounds)
-    }
+    // Recomputed alongside the mesh: both derive from geoBounds, so keeping a
+    // previously computed value would pair a new mesh with old shader bounds.
+    region.mercatorBounds = this.computeRegionMercatorBounds(geoBounds)
 
     // Generate a source-projected mesh via proj4. CPU transforms source CRS to
     // WGS84, then encodes region-local Mercator deltas for the shader.

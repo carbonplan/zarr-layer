@@ -100,6 +100,55 @@ describe('ensureRegionGpuResources', () => {
     expect(ensureRegionGpuResources(gl, region)).toBe(true)
     expect(gl.createTexture).toHaveBeenCalledTimes(1)
     expect(gl.texImage2D).toHaveBeenCalledTimes(2)
+    // Geometry is untouched by a data-only refresh.
+    expect(gl.bufferData).toHaveBeenCalledTimes(3)
+  })
+
+  it('re-uploads regenerated geometry into the existing buffers', () => {
+    const gl = fakeGl()
+    const region = fetchedRegion()
+    ensureRegionGpuResources(gl, region)
+    const buffers = [
+      region.vertexBuffer,
+      region.pixCoordBuffer,
+      region.indexBuffer,
+    ]
+
+    // A refetch at new dimensions regenerates the mesh: createRegionGeometry
+    // replaces the arrays and clears the flag. Without the re-upload the GPU
+    // would keep the old mesh and draw the new data misaligned against it.
+    const vertexArr = new Float32Array([9, 9, 9, 9, 9, 9, 9, 9])
+    const pixCoordArr = new Float32Array([8, 8, 8, 8, 8, 8, 8, 8])
+    const indexArr = new Uint32Array([2, 1, 0])
+    region.vertexArr = vertexArr
+    region.pixCoordArr = pixCoordArr
+    region.indexArr = indexArr
+    region.geometryUploaded = false
+
+    expect(ensureRegionGpuResources(gl, region)).toBe(true)
+    expect(gl.bufferData).toHaveBeenCalledTimes(6)
+    expect(gl.bufferData.mock.calls.slice(3).map((call) => call[1])).toEqual([
+      vertexArr,
+      pixCoordArr,
+      indexArr,
+    ])
+    // Reused, not reallocated.
+    expect(gl.createBuffer).toHaveBeenCalledTimes(3)
+    expect([
+      region.vertexBuffer,
+      region.pixCoordBuffer,
+      region.indexBuffer,
+    ]).toEqual(buffers)
+    expect(region.geometryUploaded).toBe(true)
+  })
+
+  it('leaves clean geometry alone across frames', () => {
+    const gl = fakeGl()
+    const region = fetchedRegion()
+    ensureRegionGpuResources(gl, region)
+    ensureRegionGpuResources(gl, region)
+    ensureRegionGpuResources(gl, region)
+    expect(gl.bufferData).toHaveBeenCalledTimes(3)
   })
 
   it('skips the index buffer for non-indexed meshes', () => {

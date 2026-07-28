@@ -20,6 +20,8 @@ export interface RegionState {
   vertexBuffer: WebGLBuffer | null
   pixCoordBuffer: WebGLBuffer | null
   indexBuffer: WebGLBuffer | null // For adaptive mesh indexed triangles
+  // False whenever the geometry arrays below are newer than the buffers above
+  geometryUploaded: boolean
   // Geometry arrays for this region's quad
   vertexArr: Float32Array | null
   pixCoordArr: Float32Array | null // Texture coordinates for sampling resampled data

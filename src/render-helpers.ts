@@ -236,25 +236,33 @@ export function ensureRegionGpuResources(
     region.textureUploaded = result.uploaded
   }
 
-  if (!region.vertexBuffer) {
-    region.vertexBuffer = gl.createBuffer()
-    gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
+  // Buffer objects are reused across re-uploads, so the dirty flag — not the
+  // presence of a buffer — decides whether the GPU has the current mesh. A
+  // region refetched at new dimensions regenerates its arrays, and without
+  // this its data would be drawn against the previous mesh.
+  if (!region.geometryUploaded) {
+    if (!region.vertexBuffer) region.vertexBuffer = gl.createBuffer()
+    if (!region.pixCoordBuffer) region.pixCoordBuffer = gl.createBuffer()
+    if (region.vertexBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.vertexBuffer)
+      gl.bufferData(gl.ARRAY_BUFFER, region.vertexArr, gl.STATIC_DRAW)
+    }
+    if (region.pixCoordBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
+      gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
+    }
+    if (region.useIndexedMesh && region.indexArr) {
+      if (!region.indexBuffer) region.indexBuffer = gl.createBuffer()
+      if (region.indexBuffer) {
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
+      }
+    }
+    region.geometryUploaded = !!(
+      region.vertexBuffer &&
+      region.pixCoordBuffer &&
+      (!region.useIndexedMesh || region.indexBuffer)
+    )
   }
-  if (!region.pixCoordBuffer) {
-    region.pixCoordBuffer = gl.createBuffer()
-    gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
-    gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
-  }
-  if (region.useIndexedMesh && region.indexArr && !region.indexBuffer) {
-    region.indexBuffer = gl.createBuffer()
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
-  }
-  return !!(
-    region.textureUploaded &&
-    region.vertexBuffer &&
-    region.pixCoordBuffer &&
-    (!region.useIndexedMesh || region.indexBuffer)
-  )
+  return region.textureUploaded && region.geometryUploaded
 }
