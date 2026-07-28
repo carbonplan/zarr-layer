@@ -78,6 +78,21 @@ export function bindBandTextures(
     ensureTexture,
   } = options
 
+  // Band names track the selector on some datasets, so the set changes as the
+  // user scrubs. Textures for names that are no longer requested would
+  // otherwise sit on the GPU until the region is evicted. Skipped when the
+  // caller owns the textures.
+  if (!ensureTexture && bandTextures.size > customShaderConfig.bands.length) {
+    const wanted = new Set(customShaderConfig.bands)
+    for (const [name, tex] of bandTextures) {
+      if (wanted.has(name)) continue
+      gl.deleteTexture(tex)
+      bandTextures.delete(name)
+      bandTexturesUploaded.delete(name)
+      bandTexturesConfigured.delete(name)
+    }
+  }
+
   let textureUnit = 2
   for (const bandName of customShaderConfig.bands) {
     const data = bandData.get(bandName)

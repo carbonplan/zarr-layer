@@ -22,6 +22,7 @@ function fakeGl() {
     TEXTURE_2D: 0x0de1,
     createTexture: vi.fn(() => ({ tex: ++textureCount })),
     createBuffer: vi.fn(() => ({ buf: ++bufferCount })),
+    deleteTexture: vi.fn(),
     bindTexture: vi.fn(),
     bindBuffer: vi.fn(),
     bufferData: vi.fn(),
@@ -31,6 +32,7 @@ function fakeGl() {
   } as unknown as WebGL2RenderingContext & {
     createTexture: ReturnType<typeof vi.fn>
     createBuffer: ReturnType<typeof vi.fn>
+    deleteTexture: ReturnType<typeof vi.fn>
     bufferData: ReturnType<typeof vi.fn>
     texImage2D: ReturnType<typeof vi.fn>
     bindTexture: ReturnType<typeof vi.fn>
@@ -258,6 +260,41 @@ describe('bindBandTextures', () => {
     // not get a texture, so the caller must skip the draw entirely.
     expect(region.bandTextures.has('blue')).toBe(false)
     expect(region.bandTexturesUploaded.has('blue')).toBe(false)
+  })
+
+  it('releases textures for bands that are no longer requested', () => {
+    const gl = fakeGl()
+    const region = twoBandRegion()
+    bindBandTextures(gl, bandOptions(region, ['red', 'green']))
+    const greenTexture = region.bandTextures.get('green')
+
+    // The selector changed: only 'red' is in the band set now.
+    region.bandData.delete('green')
+    expect(bindBandTextures(gl, bandOptions(region, ['red']))).toBe(true)
+
+    expect(gl.deleteTexture).toHaveBeenCalledWith(greenTexture)
+    expect(region.bandTextures.has('green')).toBe(false)
+    expect(region.bandTexturesUploaded.has('green')).toBe(false)
+    expect(region.bandTexturesConfigured.has('green')).toBe(false)
+    // The retained band keeps its texture and is not re-uploaded.
+    expect(region.bandTextures.has('red')).toBe(true)
+    expect(gl.texImage2D).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves caller-owned textures alone', () => {
+    const gl = fakeGl()
+    const region = twoBandRegion()
+    const ensureTexture = vi.fn(
+      (name: string) => ({ pooled: name } as unknown as WebGLTexture)
+    )
+    bindBandTextures(gl, {
+      ...bandOptions(region, ['red', 'green']),
+      ensureTexture,
+    })
+
+    bindBandTextures(gl, { ...bandOptions(region, ['red']), ensureTexture })
+    expect(gl.deleteTexture).not.toHaveBeenCalled()
+    expect(region.bandTextures.has('green')).toBe(true)
   })
 
   it('routes texture creation through ensureTexture when provided', () => {
