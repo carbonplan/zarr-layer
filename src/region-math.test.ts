@@ -8,6 +8,7 @@ import {
   getVisibleRegions,
   longitudeWorldFraction,
   selectLevelForZoom,
+  type RegionCoordinate,
 } from './region-math'
 import { createProjectionContext } from './projection-utils'
 import { boundsToMercatorNorm } from './map-utils'
@@ -166,33 +167,102 @@ describe('getCandidateRegions', () => {
     latIsAscending: false,
   }
 
-  it('returns a margin-padded block around the viewport', () => {
-    const candidates = getCandidateRegions({
-      ...grid,
-      west: -10,
-      south: -10,
-      east: 10,
-      north: 10,
-    })
+  /**
+   * Candidates are always a solid rectangle of the region grid, so its extent
+   * plus the count pins the exact block — including the prefetch margin, which
+   * a min/max range assertion would let drift to zero unnoticed.
+   */
+  const block = (candidates: RegionCoordinate[]) => {
     const xs = candidates.map((c) => c.regionX)
     const ys = candidates.map((c) => c.regionY)
-    // Viewport around the grid center, well away from the edges.
-    expect(Math.min(...xs)).toBeGreaterThan(10)
-    expect(Math.max(...xs)).toBeLessThan(30)
-    expect(Math.min(...ys)).toBeGreaterThan(2)
-    expect(Math.max(...ys)).toBeLessThan(18)
+    return {
+      xMin: Math.min(...xs),
+      xMax: Math.max(...xs),
+      yMin: Math.min(...ys),
+      yMax: Math.max(...ys),
+      count: candidates.length,
+    }
+  }
+
+  it('returns the viewport block padded by the prefetch margin', () => {
+    // lon -10..10 -> px 1700..1900 -> columns 18..21, padded by 2 -> 16..23.
+    // lat -10..10 north-first -> px rows 800..1000 -> rows 8..11 -> 6..13.
+    expect(
+      block(
+        getCandidateRegions({
+          ...grid,
+          west: -10,
+          south: -10,
+          east: 10,
+          north: 10,
+        })
+      )
+    ).toEqual({ xMin: 16, xMax: 23, yMin: 6, yMax: 13, count: 8 * 8 })
+  })
+
+  it('mirrors the row block for ascending latitude', () => {
+    // Asymmetric viewport: a box centered on the equator maps to the same rows
+    // under either orientation, so it can't distinguish them.
+    const northern = { ...grid, west: -10, south: 10, east: 10, north: 50 }
+    expect(block(getCandidateRegions(northern))).toMatchObject({
+      yMin: 2,
+      yMax: 10,
+    })
+    expect(
+      block(getCandidateRegions({ ...northern, latIsAscending: true }))
+    ).toMatchObject({ yMin: 9, yMax: 17 })
+  })
+
+  it('widens the margin when some viewport samples fail to project', () => {
+    // Samples above lat 5 fall outside the projection's valid domain, so the
+    // sampled extent understates the viewport and the margin grows 2 -> 8.
+    const partial = {
+      forward: (lon: number, lat: number): [number, number] =>
+        lat > 5 ? [NaN, NaN] : [lon, lat],
+    }
+    expect(
+      block(
+        getCandidateRegions({
+          ...grid,
+          transformer: partial,
+          west: -10,
+          south: -10,
+          east: 10,
+          north: 10,
+        })
+      )
+    ).toEqual({ xMin: 10, xMax: 29, yMin: 1, yMax: 19, count: 20 * 19 })
   })
 
   it('widens to every X column when the viewport crosses the antimeridian', () => {
-    const candidates = getCandidateRegions({
-      ...grid,
-      west: 170,
-      south: -10,
-      east: -170,
-      north: 10,
-    })
-    const xs = new Set(candidates.map((c) => c.regionX))
-    expect(xs.size).toBe(grid.numRegionsX)
+    // Unwrapped bounds (east past +180) are the discriminating case: the
+    // sampled X span is narrow and would otherwise yield only the far-east
+    // columns, but the projection folds source X back on itself so that span
+    // no longer bounds the visible columns.
+    const { xMin, xMax, yMin, yMax } = block(
+      getCandidateRegions({
+        ...grid,
+        west: 170,
+        south: -10,
+        east: 190,
+        north: 10,
+      })
+    )
+    expect([xMin, xMax]).toEqual([0, grid.numRegionsX - 1])
+    // Rows stay bounded by the viewport — only the X span is widened.
+    expect([yMin, yMax]).toEqual([6, 13])
+
+    // Wrapped bounds (east < west) get the same treatment.
+    const wrapped = block(
+      getCandidateRegions({
+        ...grid,
+        west: 170,
+        south: -10,
+        east: -170,
+        north: 10,
+      })
+    )
+    expect([wrapped.xMin, wrapped.xMax]).toEqual([0, grid.numRegionsX - 1])
   })
 
   it('falls back to every region when no viewport sample projects', () => {
@@ -269,6 +339,17 @@ describe('getVisibleRegions', () => {
         xyLimits: WORLD,
         levelMeta: null,
         projection,
+        latIsAscending: false,
+      })
+    ).toEqual([])
+    // Region indices computed without a source transformer would be wrong, so
+    // the caller renders nothing rather than a misleading partial result.
+    expect(
+      getVisibleRegions({
+        map: mapAt(-10, -10, 10, 10),
+        xyLimits: WORLD,
+        levelMeta,
+        projection: { ...projection, toWGS84: null },
         latIsAscending: false,
       })
     ).toEqual([])
