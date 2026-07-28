@@ -58,8 +58,10 @@ export function createRegionState(
  * be drawn, which also requires that upload to have succeeded.
  */
 export function isRegionCpuReady(region: RegionState): boolean {
+  // Band-sampling regions carry no interleaved copy; their pixels live in
+  // bandData instead.
   return !!(
-    region.data &&
+    (region.data || region.bandData.size > 0) &&
     region.vertexArr &&
     region.pixCoordArr &&
     region.mercatorBounds &&

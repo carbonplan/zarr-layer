@@ -362,12 +362,15 @@ export class RegionFetcher {
         normalizedBands.push(bandNormalized)
       }
 
-      // Construct interleaved data from normalized bands. Band-sampling
-      // shaders never read the main texture, so point it at the first band
-      // rather than allocating an interleaved copy of every channel.
+      // Interleaved data exists only to feed the main texture. Band-sampling
+      // shaders never read it, so skip the copy entirely rather than leaving
+      // a partial stand-in: if the shader later switches back to the main
+      // texture, a stand-in would be uploaded and drawn as if it were the
+      // whole dataset until the refetch lands. Null keeps the region
+      // undrawable through that path instead.
       const bandRendering = this.context.usesBandTextures()
       region.data = bandRendering
-        ? normalizedBands[0]
+        ? null
         : interleaveBands(normalizedBands, numChannels)
 
       // Check if geometry needs to be (re)created before updating dimensions
@@ -379,7 +382,7 @@ export class RegionFetcher {
 
       region.width = actualW
       region.height = actualH
-      region.channels = bandRendering ? 1 : numChannels
+      region.channels = numChannels
       region.loading = false
 
       // Store level-specific dimensions from snapshot for geometry creation.

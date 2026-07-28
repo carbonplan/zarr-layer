@@ -430,8 +430,10 @@ describe('RegionFetcher', () => {
     expect(Array.from(region.bandData.get('band_1')!)).toEqual(
       t0.map((v) => v + 32)
     )
-    // data aliases the first band rather than allocating a second array.
-    expect(region.data).toBe(region.bandData.get('t10'))
-    expect(region.channels).toBe(1)
+    // Left null rather than aliased to one band: a stand-in here would be
+    // drawn as the whole dataset if the shader switched back to the main
+    // texture before the refetch landed.
+    expect(region.data).toBeNull()
+    expect(region.channels).toBe(2)
   })
 })

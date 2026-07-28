@@ -343,6 +343,32 @@ describe('RegionRenderer', () => {
     expect(gl.texImage2D).toHaveBeenCalledTimes(1)
   })
 
+  it('draws nothing from a band-mode region until the shader switch refetches', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle()
+    await renderer.setSelector({ time: { selected: [10, 20], type: 'value' } })
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, gl)
+    await settle()
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+
+    // Switching back to the main texture leaves cached regions holding band
+    // data only. Drawing them through the main path would put one band's
+    // values on screen as if they were the whole dataset.
+    renderer.setRendersFromBandTextures(false)
+    expect(seam(renderer).getRegionStates(gl)).toEqual([])
+
+    // The refetch triggered by the switch restores them.
+    renderer.update(map, gl)
+    await settle()
+    const states = seam(renderer).getRegionStates(gl)
+    expect(states).toHaveLength(4)
+    for (const state of states) {
+      expect(state.texture).not.toBeNull()
+    }
+  })
+
   it('keeps fallback coverage when a band texture cannot be allocated', async () => {
     const { renderer, map } = await makeRenderer()
     const working = fakeGl()
@@ -406,8 +432,7 @@ describe('RegionRenderer', () => {
 
     const refetched = seam(renderer).regionCache.get('0:0,0')!
     expect(refetched.bandData.size).toBe(2)
-    expect(refetched.data).toBe(refetched.bandData.get('time_10'))
-    expect(refetched.channels).toBe(1)
+    expect(refetched.data).toBeNull()
 
     // Rendering uploads the bands and no main texture at all, which is only
     // true if the renderer passes its band list down to the upload.

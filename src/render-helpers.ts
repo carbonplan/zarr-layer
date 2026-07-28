@@ -324,7 +324,7 @@ export function ensureRegionGpuResources(
   region: RegionState,
   requiredBands?: readonly string[]
 ): boolean {
-  if (!region.data || !region.vertexArr || !region.pixCoordArr) return false
+  if (!region.vertexArr || !region.pixCoordArr) return false
 
   const bandRendering = !!requiredBands && requiredBands.length > 0
   let texturesReady: boolean
@@ -339,6 +339,9 @@ export function ensureRegionGpuResources(
     texturesReady = ensureBandTextures(gl, region, requiredBands)
   } else {
     pruneBandTextures(gl, EMPTY_BANDS, region)
+    // A region fetched for a band-sampling shader has no interleaved copy, so
+    // it stays undrawable here until the refetch that follows the switch.
+    if (!region.data) return false
     if (!region.texture) region.texture = gl.createTexture()
     if (!region.texture) return false
     if (!region.textureUploaded) {
