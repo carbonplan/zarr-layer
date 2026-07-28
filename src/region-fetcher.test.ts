@@ -60,15 +60,18 @@ async function makeHarness(
   const readsReleased = new Promise<void>((res) => {
     releaseReads = res
   })
-  // Optionally hold chunk reads open so tests can abort/invalidate mid-fetch.
-  const customStore = opts.gateReads
-    ? {
-        get: async (key: string) => {
-          if (key.includes('/c/')) await readsReleased
-          return memory.get(key)
-        },
+  // Chunk reads are counted so tests can assert a batch never dispatched, and
+  // optionally held open so tests can abort/invalidate mid-fetch.
+  const chunkReads: string[] = []
+  const customStore = {
+    get: async (key: string) => {
+      if (key.includes('/c/')) {
+        chunkReads.push(key)
+        if (opts.gateReads) await readsReleased
       }
-    : memory
+      return memory.get(key)
+    },
+  }
 
   const store = new ZarrStore({
     customStore,
@@ -96,6 +99,11 @@ async function makeHarness(
   const invalidate = vi.fn()
   const createRegionGeometry = vi.fn()
 
+  // fetchRegions runs synchronously up to its pre-flight staleness check, so
+  // `show()` is the one hook a test can use to simulate a level or selector
+  // change landing in that window.
+  let onBatchStart = () => {}
+
   const context: RegionFetcherContext = {
     zarrStore: store,
     dimIndices: store.describe().dimIndices,
@@ -110,7 +118,10 @@ async function makeHarness(
     fixedDataScale: 1,
     regionCache: cache,
     requestCanceller,
-    loadingDebouncer: { show: () => {}, hide: () => {} },
+    loadingDebouncer: {
+      show: () => onBatchStart(),
+      hide: () => {},
+    },
     getActiveLevel: () => level,
     getSelectorVersion: () => selectorVersion,
     getBandNames: () => ['temperature'],
@@ -129,12 +140,16 @@ async function makeHarness(
     invalidate,
     createRegionGeometry,
     releaseReads,
+    chunkReads,
     setLevel: (next: LevelRuntime | null) => {
       level = next
     },
     getLevel: () => level,
     setSelectorVersion: (v: number) => {
       selectorVersion = v
+    },
+    onBatchStart: (fn: () => void) => {
+      onBatchStart = fn
     },
   }
 }
@@ -190,6 +205,24 @@ describe('RegionFetcher', () => {
     )
   })
 
+  it('regenerates geometry when a refetch changes the region size', async () => {
+    const { fetcher, cache, createRegionGeometry, getLevel, setLevel } =
+      await makeHarness()
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    expect(region.width).toBe(4)
+    expect(createRegionGeometry).toHaveBeenCalledTimes(1)
+
+    // Same level index and cache key, larger regions: the cached region's mesh
+    // no longer matches its data, so it has to be rebuilt (and re-uploaded).
+    setLevel({ ...getLevel()!, regionSize: [HEIGHT, WIDTH] })
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+
+    expect(region.width).toBe(WIDTH)
+    expect(region.height).toBe(HEIGHT)
+    expect(createRegionGeometry).toHaveBeenCalledTimes(2)
+  })
+
   it('never lets an older fetch overwrite newer region data', async () => {
     const { fetcher, cache } = await makeHarness()
     // A region already refreshed by a newer selector version...
@@ -206,15 +239,27 @@ describe('RegionFetcher', () => {
   })
 
   it('cancels the whole batch when the level changed before dispatch', async () => {
-    const { fetcher, cache, context, getLevel } = await makeHarness()
-    // The getter serves the old level to the snapshot, then the new one to
-    // the pre-flight staleness check.
+    const { fetcher, cache, chunkReads, getLevel, setLevel, onBatchStart } =
+      await makeHarness()
     const original = getLevel()!
-    const swapped: LevelRuntime = { ...original, index: 1 }
-    let calls = 0
-    context.getActiveLevel = () => (calls++ === 0 ? original : swapped)
+    onBatchStart(() => setLevel({ ...original, index: 1 }))
 
     await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    // No read is issued at all: the pre-flight check drops the batch before
+    // dispatch rather than letting each fetch discard its own result.
+    expect(chunkReads).toEqual([])
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    expect(region.data).toBeNull()
+    expect(region.loading).toBe(false)
+  })
+
+  it('cancels the whole batch when the selector changed before dispatch', async () => {
+    const { fetcher, cache, chunkReads, setSelectorVersion, onBatchStart } =
+      await makeHarness()
+    onBatchStart(() => setSelectorVersion(1))
+
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    expect(chunkReads).toEqual([])
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.data).toBeNull()
     expect(region.loading).toBe(false)
