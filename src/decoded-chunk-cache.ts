@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import { MAX_CACHED_REGIONS } from './region-cache'
 
 /**
  * Insertion-order LRU bounded by entry count and by total bytes, whichever
@@ -9,6 +10,7 @@ import * as zarr from 'zarrita'
 const createLRU = <V>(
   maxEntries: number,
   maxBytes: number,
+  minEntries: number,
   sizeOf: (value: V) => number
 ) => {
   const store = new Map<string, { value: V; bytes: number }>()
@@ -34,11 +36,14 @@ const createLRU = <V>(
       const bytes = sizeOf(value)
       store.set(key, { value, bytes })
       totalBytes += bytes
-      // Keep the most recent entry even when it alone exceeds the budget,
-      // so a dataset with very large chunks caches one instead of none.
+      // The byte budget never shrinks the cache below the working set: a
+      // cache smaller than one viewport evicts chunks that are still being
+      // sliced, turning every selector change into a refetch storm. Holding
+      // the working set costs more memory than the budget asks for and is
+      // still bounded; thrashing it is not.
       while (
         store.size > maxEntries ||
-        (totalBytes > maxBytes && store.size > 1)
+        (totalBytes > maxBytes && store.size > minEntries)
       ) {
         const oldest = store.keys().next().value
         if (oldest === undefined) break
@@ -65,8 +70,15 @@ const createLRU = <V>(
 
 type AnyChunk = zarr.Chunk<zarr.DataType>
 
-/** Cap on decoded bytes held per store. */
+/** Soft cap on decoded bytes held per store, applied above the working set. */
 const DEFAULT_MAX_BYTES = 128 * 1024 * 1024
+
+/**
+ * Chunks the byte budget will never evict. One rendered region reads one
+ * chunk, so this mirrors the region cache's own cap: a smaller chunk cache
+ * would evict chunks that regions still in flight are slicing.
+ */
+const DEFAULT_MIN_ENTRIES = MAX_CACHED_REGIONS
 
 const chunkBytes = (chunk: AnyChunk): number => {
   const data = chunk.data as { byteLength?: number; length?: number }
@@ -194,10 +206,18 @@ const decodedChunkExtension = zarr.defineArrayExtension(
  * field so `zarr.open` auto-applies it to every array.
  */
 export const withDecodedChunkCaching = zarr.defineStoreExtension(
-  (_inner, opts: { maxEntries?: number; maxBytes?: number } = {}) => {
+  (
+    _inner,
+    opts: {
+      maxEntries?: number
+      maxBytes?: number
+      minEntries?: number
+    } = {}
+  ) => {
     const cache = createLRU<AnyChunk>(
       opts.maxEntries ?? 512,
       opts.maxBytes ?? DEFAULT_MAX_BYTES,
+      opts.minEntries ?? DEFAULT_MIN_ENTRIES,
       chunkBytes
     )
     const pending = new Map<string, PendingEntry>()

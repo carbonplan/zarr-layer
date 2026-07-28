@@ -55,6 +55,9 @@ interface BindBandTexturesOptions {
   ensureTexture?: (bandName: string) => WebGLTexture | null
 }
 
+/** Shared empty list so the no-bands prune allocates nothing per frame. */
+const EMPTY_BANDS: readonly string[] = []
+
 /** The per-band GPU bookkeeping carried on a region. */
 interface BandTextureState {
   bandTextures: Map<string, WebGLTexture>
@@ -62,16 +65,30 @@ interface BandTextureState {
   bandTexturesConfigured: Set<string>
 }
 
-/** Delete every band texture whose name is not in `wanted`. */
+/**
+ * Delete every band texture whose name is not in `wanted`. Runs per region on
+ * every render call, so it exits without allocating in the common case where
+ * the resident set already matches.
+ */
 function pruneBandTextures(
   gl: WebGL2RenderingContext,
-  wanted: Set<string>,
+  wanted: readonly string[],
   state: BandTextureState
 ): void {
-  for (const [name, tex] of state.bandTextures) {
-    if (wanted.has(name)) continue
+  const { bandTextures } = state
+  if (bandTextures.size === 0) return
+  if (
+    bandTextures.size === wanted.length &&
+    wanted.every((name) => bandTextures.has(name))
+  ) {
+    return
+  }
+
+  const keep = new Set(wanted)
+  for (const [name, tex] of bandTextures) {
+    if (keep.has(name)) continue
     gl.deleteTexture(tex)
-    state.bandTextures.delete(name)
+    bandTextures.delete(name)
     state.bandTexturesUploaded.delete(name)
     state.bandTexturesConfigured.delete(name)
   }
@@ -105,7 +122,7 @@ export function bindBandTextures(
   // (red, green -> nir, swir) replaces every name without changing the size.
   // Skipped when the caller owns the textures.
   if (!ensureTexture) {
-    pruneBandTextures(gl, new Set(customShaderConfig.bands), {
+    pruneBandTextures(gl, customShaderConfig.bands, {
       bandTextures,
       bandTexturesUploaded,
       bandTexturesConfigured,
@@ -254,7 +271,7 @@ function ensureBandTextures(
   region: RegionState,
   bands: readonly string[]
 ): boolean {
-  pruneBandTextures(gl, new Set(bands), region)
+  pruneBandTextures(gl, bands, region)
 
   for (const name of bands) {
     const data = region.bandData.get(name)
@@ -321,7 +338,7 @@ export function ensureRegionGpuResources(
     }
     texturesReady = ensureBandTextures(gl, region, requiredBands)
   } else {
-    pruneBandTextures(gl, new Set(), region)
+    pruneBandTextures(gl, EMPTY_BANDS, region)
     if (!region.texture) region.texture = gl.createTexture()
     if (!region.texture) return false
     if (!region.textureUploaded) {
