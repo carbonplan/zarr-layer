@@ -135,6 +135,7 @@ export class ZarrLayer {
   private tileNeedsRender: boolean = true
 
   private projectionChangeHandler: (() => void) | null = null
+  private mapRemoveHandler: (() => void) | null = null
   private resolveGl(
     map: MapLike,
     gl: WebGL2RenderingContext | WebGLRenderingContext | null
@@ -519,6 +520,15 @@ export class ZarrLayer {
     this.map = map
     const resolvedGl = this.resolveGl(map, gl)
     this.gl = resolvedGl
+
+    // `map.remove()` tears down the style without calling `onRemove`, so the
+    // layer releases its store and GPU resources off the map's own event.
+    // Registered before initialization so a failed init still leaves a hook.
+    this.mapRemoveHandler = () => this._disposeResources(resolvedGl)
+    if (typeof map.on === 'function') {
+      map.on('remove', this.mapRemoveHandler)
+    }
+
     this.invalidate = () => {
       this.tileNeedsRender = true
       if (map.triggerRepaint) map.triggerRepaint()
@@ -864,6 +874,7 @@ export class ZarrLayer {
   private _disposeResources(
     gl: WebGL2RenderingContext | WebGLRenderingContext
   ): void {
+    if (this.isRemoved) return
     this.isRemoved = true
 
     this.renderer?.dispose()
@@ -879,15 +890,18 @@ export class ZarrLayer {
       this.zarrStore = null
     }
 
-    if (
-      this.map &&
-      this.projectionChangeHandler &&
-      typeof this.map.off === 'function'
-    ) {
-      this.map.off('projectionchange', this.projectionChangeHandler)
-      this.map.off('style.load', this.projectionChangeHandler)
-      this.map.off('move', this.projectionChangeHandler)
+    if (this.map && typeof this.map.off === 'function') {
+      if (this.projectionChangeHandler) {
+        this.map.off('projectionchange', this.projectionChangeHandler)
+        this.map.off('style.load', this.projectionChangeHandler)
+        this.map.off('move', this.projectionChangeHandler)
+      }
+      if (this.mapRemoveHandler) {
+        this.map.off('remove', this.mapRemoveHandler)
+      }
     }
+    this.projectionChangeHandler = null
+    this.mapRemoveHandler = null
   }
 
   onRemove(_map: MapLike, gl: WebGL2RenderingContext | WebGLRenderingContext) {
