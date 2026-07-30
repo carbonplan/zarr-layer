@@ -17,6 +17,7 @@ import {
   parseGeoZarrAttrs,
   parseLayoutItemSpatial,
   boundsFromSpatialAttrs,
+  type AffineTransform,
   type GeoZarrAttrs,
   type SpatialExtent,
 } from './geozarr'
@@ -184,6 +185,8 @@ export class ZarrStore {
   private geoZarr: GeoZarrAttrs | null = null
   /** Per-level `spatial:shape` as declared, [height, width], before axis mapping. */
   private _declaredLevelShapes: ([number, number] | undefined)[] = []
+  /** Per-level `spatial:transform` as declared, indexed alongside the levels. */
+  private _declaredLevelTransforms: (AffineTransform | undefined)[] = []
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -759,6 +762,24 @@ export class ZarrStore {
   }
 
   /**
+   * The declaration to place the grid from.
+   *
+   * The array's own attributes come first. Failing those, the base level's
+   * `multiscales.layout` entry: a multiscale store's absolute georeferencing
+   * belongs on the layout entries, one per resolution, so that is where a
+   * pyramid declares where it sits. Its grid size comes from the base array
+   * either way, which is the level that entry describes.
+   */
+  private _effectiveSpatialAttrs(): GeoZarrAttrs | null {
+    const attrs = this.geoZarr
+    if (!attrs) return null
+    if (attrs.bbox || attrs.transform) return attrs
+
+    const baseTransform = this._declaredLevelTransforms[0]
+    return baseTransform ? { ...attrs, transform: baseTransform } : null
+  }
+
+  /**
    * The grid extent the store declares through the `spatial:` convention, in
    * the renderer's edge-to-edge terms and its -180–180 longitude range.
    *
@@ -766,8 +787,8 @@ export class ZarrStore {
    * the coordinate-array read as the fallback.
    */
   private _declaredSpatialExtent(): SpatialExtent | null {
-    const attrs = this.geoZarr
-    if (!attrs || (!attrs.bbox && !attrs.transform)) return null
+    const attrs = this._effectiveSpatialAttrs()
+    if (!attrs) return null
 
     if (attrs.transformType !== 'affine') {
       console.warn(
@@ -1138,10 +1159,10 @@ export class ZarrStore {
     const maxLevelIndex = levels.length - 1
 
     this.untiledLevels = layout.map((entry) => ({ asset: entry.asset }))
+    const perLevel = layout.map((entry) => parseLayoutItemSpatial(entry))
     // Applied once the dimension order is known; see `_applyDeclaredLevelShapes`.
-    this._declaredLevelShapes = layout.map(
-      (entry) => parseLayoutItemSpatial(entry).shape
-    )
+    this._declaredLevelShapes = perLevel.map((s) => s.shape)
+    this._declaredLevelTransforms = perLevel.map((s) => s.transform)
 
     this.multiscaleType = 'untiled'
 

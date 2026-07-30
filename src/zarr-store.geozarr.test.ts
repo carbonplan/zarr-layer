@@ -664,3 +664,98 @@ describe('level shapes from spatial:shape', () => {
     expect(d.untiledLevels[1].shape).toBeUndefined()
   })
 })
+
+describe('georeferencing declared on the layout entries', () => {
+  /**
+   * A pyramid whose absolute placement lives only on its `multiscales.layout`
+   * entries, which is where the multiscales convention puts it. Nothing on the
+   * group or the array says where the grid sits.
+   */
+  const layoutGeoStore = (layout: unknown[]) =>
+    buildMemoryZarrStore({
+      attributes: { multiscales: { layout } },
+      arrays: [0, 1].map((i) => ({
+        name: `${i}/temperature`,
+        shape: [4 >> i, 8 >> i],
+        chunkShape: [4 >> i, 8 >> i],
+        dimensionNames: ['lat', 'lon'],
+      })),
+    })
+
+  const describeLayoutGeo = async (layout: unknown[]) => {
+    const { keys, store: recorded } = recordReads(layoutGeoStore(layout))
+    const store = new ZarrStore({
+      customStore: recorded,
+      variable: 'temperature',
+      version: 3,
+    })
+    await store.initialized
+    return { d: store.describe(), keys }
+  }
+
+  it('places the grid from the base level transform', async () => {
+    const { d } = await describeLayoutGeo([
+      {
+        asset: '0',
+        'spatial:transform': GLOBAL_TRANSFORM,
+        'spatial:shape': [4, 8],
+      },
+      {
+        asset: '1',
+        'spatial:transform': [90, 0, -180, 0, -90, 90],
+        'spatial:shape': [2, 4],
+      },
+    ])
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.latIsAscending).toBe(false)
+  })
+
+  it('needs no coordinate arrays to do it', async () => {
+    const { keys } = await describeLayoutGeo([
+      {
+        asset: '0',
+        'spatial:transform': GLOBAL_TRANSFORM,
+        'spatial:shape': [4, 8],
+      },
+      { asset: '1', 'spatial:shape': [2, 4] },
+    ])
+
+    expect(keys.filter((k) => k.includes('lat') || k.includes('lon'))).toEqual(
+      []
+    )
+  })
+
+  it('lets a group-level declaration win over the layout entry', async () => {
+    const store = new ZarrStore({
+      customStore: buildMemoryZarrStore({
+        attributes: {
+          multiscales: {
+            layout: [
+              { asset: '0', 'spatial:transform': GLOBAL_TRANSFORM },
+              { asset: '1' },
+            ],
+          },
+          'spatial:bbox': [-10, -10, 10, 10],
+        },
+        arrays: [0, 1].map((i) => ({
+          name: `${i}/temperature`,
+          shape: [4 >> i, 8 >> i],
+          chunkShape: [4 >> i, 8 >> i],
+          dimensionNames: ['lat', 'lon'],
+        })),
+      }),
+      variable: 'temperature',
+      version: 3,
+      latIsAscending: false,
+    })
+    await store.initialized
+
+    expect(store.describe().xyLimits).toEqual({
+      xMin: -10,
+      xMax: 10,
+      yMin: -10,
+      yMax: 10,
+    })
+  })
+})
