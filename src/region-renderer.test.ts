@@ -141,12 +141,13 @@ function seedFallbackRegion(
  * `fetchRegions` marks its batch loading before it yields, so an in-flight
  * batch is already visible here. Hopping the macrotask queue until nothing is
  * loading keeps the tests independent of how many awaits deep the chain runs.
+ *
+ * Deliberately unbounded: a wall-clock bail-out would return early whenever
+ * parallel workers slow a fetch down, turning contention into a confusing
+ * assertion failure somewhere below. Vitest's own testTimeout is the backstop,
+ * and it reports a hang as a hang.
  */
-async function settle(
-  renderer: RegionRenderer,
-  timeoutMs = 2000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
+async function settle(renderer: RegionRenderer): Promise<void> {
   const fetching = () => {
     for (const region of seam(renderer).regionCache.values()) {
       if (region.loading) return true
@@ -155,7 +156,7 @@ async function settle(
   }
   do {
     await new Promise((resolve) => setTimeout(resolve, 0))
-  } while (fetching() && Date.now() < deadline)
+  } while (fetching())
 }
 
 async function makeRenderer() {
