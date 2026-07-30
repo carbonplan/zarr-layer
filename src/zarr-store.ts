@@ -10,7 +10,7 @@ import type {
   UntiledLevel,
   TransformRequest,
 } from './types'
-import type { XYLimits } from './map-utils'
+import { normalizeLongitudeExtent, type XYLimits } from './map-utils'
 import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
 import { parseGeoZarrAttrs, type GeoZarrAttrs } from './geozarr'
@@ -651,6 +651,11 @@ export class ZarrStore {
     }
   }
 
+  /** Whether x/y are longitude/latitude in degrees rather than projected units. */
+  private isGeographic(): boolean {
+    return !this.proj4 && this.crs !== 'EPSG:3857'
+  }
+
   private normalizeFillValue(value: unknown): number | null {
     if (value === undefined || value === null) return null
     if (typeof value === 'string') {
@@ -846,34 +851,14 @@ export class ZarrStore {
       const dy = Math.abs(y1 - y0)
 
       // Apply half-pixel expansion (coords are pixel centers, we need edge bounds)
-      let xMin = coordXMin - (Number.isFinite(dx) ? dx / 2 : 0)
-      let xMax = coordXMax + (Number.isFinite(dx) ? dx / 2 : 0)
+      const rawXMin = coordXMin - (Number.isFinite(dx) ? dx / 2 : 0)
+      const rawXMax = coordXMax + (Number.isFinite(dx) ? dx / 2 : 0)
       const yMin = coordYMin - (Number.isFinite(dy) ? dy / 2 : 0)
       const yMax = coordYMax + (Number.isFinite(dy) ? dy / 2 : 0)
 
-      // Normalize 0–360° longitude convention to -180–180°.
-      // Only applies when both bounds are > 180 (clearly 0–360° data, not
-      // projected meters) and within the degree range (xMax <= 360).
-      if (
-        xMin > 180 &&
-        xMax > 180 &&
-        xMax <= 360 &&
-        !this.proj4 &&
-        this.crs !== 'EPSG:3857'
-      ) {
-        xMin -= 360
-        xMax -= 360
-      }
-
-      // For global datasets, snap bounds to exactly ±180 to avoid antimeridian
-      // seams caused by grid alignment not landing on ±180. A truly global grid
-      // has extent = N * dx = 360°; use dx/2 tolerance for float32 precision.
-      // A dataset one cell short has extent = 360 - dx, which fails the check.
-      const lonExtent = xMax - xMin
-      if (Number.isFinite(dx) && Math.abs(lonExtent - 360) < dx / 2) {
-        if (Math.abs(xMin + 180) < dx) xMin = -180
-        if (Math.abs(xMax - 180) < dx) xMax = 180
-      }
+      const { xMin, xMax } = this.isGeographic()
+        ? normalizeLongitudeExtent(rawXMin, rawXMax, dx)
+        : { xMin: rawXMin, xMax: rawXMax }
 
       if (needsBounds) {
         this.xyLimits = { xMin, xMax, yMin, yMax }
