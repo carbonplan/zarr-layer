@@ -5,3 +5,4 @@ demo/node_modules/
 demo/.next/
 demo/.env.local
 dist/
+test-results.json
