@@ -197,6 +197,90 @@ export function parseGeoZarrAttrs(
   }
 }
 
+export interface SpatialExtent {
+  xMin: number
+  xMax: number
+  yMin: number
+  yMax: number
+  /** `null` when nothing declared settles which edge row 0 sits on. */
+  latIsAscending: boolean | null
+}
+
+/**
+ * Derive the grid's outer edges from what the `spatial:` convention declares.
+ *
+ * The result is edge-to-edge, matching what the renderer means by bounds, which
+ * is why `spatial:registration` is load-bearing: under `'pixel'` the declared
+ * coordinates already sit on cell boundaries, under `'node'` they sit on cell
+ * centers and everything moves out by half a cell.
+ *
+ * `spatial:bbox` wins the extent when both are declared, since it states the
+ * extent directly; `spatial:transform` still supplies the cell size and the row
+ * direction. Returns `null` when nothing declared pins the extent down: a
+ * rotated transform with no bbox, or a node-registered bbox on a grid too small
+ * to recover a cell size from.
+ */
+export function boundsFromSpatialAttrs(
+  attrs: GeoZarrAttrs,
+  grid: { nCols: number; nRows: number }
+): SpatialExtent | null {
+  if (attrs.transformType !== 'affine') return null
+
+  // A rotated grid's corners are not its min/max, so the transform tells us
+  // nothing usable about an axis-aligned extent.
+  const rotated =
+    !!attrs.transform && (attrs.transform[1] !== 0 || attrs.transform[3] !== 0)
+  const transform = rotated ? undefined : attrs.transform
+  const latIsAscending = transform ? transform[4] > 0 : null
+
+  if (attrs.bbox) {
+    const [xMin, yMin, xMax, yMax] = attrs.bbox
+    if (attrs.registration === 'pixel') {
+      return { xMin, yMin, xMax, yMax, latIsAscending }
+    }
+
+    // Node registration puts the bbox on the centers of the border cells, so
+    // half a cell is missing from each side. The transform gives the cell size
+    // outright; otherwise the bbox spans nCols - 1 whole cells.
+    const halfCell = (
+      resolution: number | undefined,
+      span: number,
+      count: number
+    ): number | null => {
+      if (resolution !== undefined) return Math.abs(resolution) / 2
+      return count > 1 ? span / (count - 1) / 2 : null
+    }
+    const halfX = halfCell(transform?.[0], xMax - xMin, grid.nCols)
+    const halfY = halfCell(transform?.[4], yMax - yMin, grid.nRows)
+    if (halfX === null || halfY === null) return null
+
+    return {
+      xMin: xMin - halfX,
+      xMax: xMax + halfX,
+      yMin: yMin - halfY,
+      yMax: yMax + halfY,
+      latIsAscending,
+    }
+  }
+
+  if (!transform) return null
+
+  const [a, , c, , e, f] = transform
+  // Under node registration the transform lands on the first cell's center.
+  const originX = attrs.registration === 'node' ? c - a / 2 : c
+  const originY = attrs.registration === 'node' ? f - e / 2 : f
+  const endX = originX + a * grid.nCols
+  const endY = originY + e * grid.nRows
+
+  return {
+    xMin: Math.min(originX, endX),
+    xMax: Math.max(originX, endX),
+    yMin: Math.min(originY, endY),
+    yMax: Math.max(originY, endY),
+    latIsAscending,
+  }
+}
+
 /**
  * Read the per-level `spatial:` attributes from one `multiscales.layout` entry.
  *

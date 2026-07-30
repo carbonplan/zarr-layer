@@ -301,3 +301,195 @@ describe('an unresolvable proj:code', () => {
     expect(d.crs).toBe('EPSG:3857')
   })
 })
+
+/**
+ * A 4-row by 8-column global grid on a 45 deg cell. Coordinates are cell
+ * centers ordered north-first, so the coordinate-array path yields an exactly
+ * global extent with row 0 at the north. The equivalent declaration is
+ * `spatial:transform` [45, 0, -180, 0, -45, 90] under pixel registration.
+ */
+const LAT_CENTERS = [67.5, 22.5, -22.5, -67.5]
+const LON_CENTERS = [-157.5, -112.5, -67.5, -22.5, 22.5, 67.5, 112.5, 157.5]
+const GLOBAL_TRANSFORM = [45, 0, -180, 0, -45, 90]
+const GLOBAL_LIMITS = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
+
+function spatialStore(arrayAttrs: Record<string, unknown>): MemoryStore {
+  return buildMemoryZarrStore({
+    arrays: [
+      {
+        name: 'temperature',
+        shape: [4, 8],
+        chunkShape: [4, 8],
+        dimensionNames: ['lat', 'lon'],
+        attributes: arrayAttrs,
+      },
+      {
+        name: 'lat',
+        shape: [4],
+        chunkShape: [4],
+        dimensionNames: ['lat'],
+        chunks: { '0': LAT_CENTERS },
+      },
+      {
+        name: 'lon',
+        shape: [8],
+        chunkShape: [8],
+        dimensionNames: ['lon'],
+        chunks: { '0': LON_CENTERS },
+      },
+    ],
+  })
+}
+
+/** Wraps a store so every key it is asked for can be inspected afterwards. */
+function recordReads(inner: MemoryStore) {
+  const keys: string[] = []
+  return {
+    keys,
+    store: {
+      get: async (key: string) => {
+        keys.push(key)
+        return inner.get(key)
+      },
+    },
+  }
+}
+
+async function describeSpatialStore(
+  arrayAttrs: Record<string, unknown>,
+  options: { bounds?: [number, number, number, number] } = {}
+) {
+  const { keys, store: recorded } = recordReads(spatialStore(arrayAttrs))
+  const store = new ZarrStore({
+    customStore: recorded,
+    variable: 'temperature',
+    version: 3,
+    ...options,
+  })
+  await store.initialized
+  return { d: store.describe(), keys }
+}
+
+describe('bounds from the spatial: convention', () => {
+  it('derives the extent and row direction from a transform', async () => {
+    const { d } = await describeSpatialStore({
+      'spatial:transform': GLOBAL_TRANSFORM,
+    })
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.latIsAscending).toBe(false)
+  })
+
+  it('never touches the coordinate arrays when a transform settles both', async () => {
+    const { keys } = await describeSpatialStore({
+      'spatial:transform': GLOBAL_TRANSFORM,
+    })
+
+    expect(
+      keys.filter((k) => k.startsWith('/lat') || k.startsWith('/lon'))
+    ).toEqual([])
+  })
+
+  it('lands exactly where the coordinate arrays would have', async () => {
+    // Half a cell of disagreement here would shift the raster silently.
+    const declared = await describeSpatialStore({
+      'spatial:transform': GLOBAL_TRANSFORM,
+    })
+    const read = await describeSpatialStore({})
+
+    expect(declared.d.xyLimits).toEqual(read.d.xyLimits)
+    expect(declared.d.latIsAscending).toBe(read.d.latIsAscending)
+  })
+
+  it('reads a bbox as the extent but still checks orientation', async () => {
+    const { d, keys } = await describeSpatialStore({
+      'spatial:bbox': [-180, -90, 180, 90],
+    })
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    // A bbox says nothing about which edge row 0 sits on, so the coordinate
+    // read still has to happen. Setting `latIsAscending` skips it.
+    expect(keys.some((k) => k.startsWith('/lat'))).toBe(true)
+  })
+
+  it('folds a 0-360 bbox into the range the renderer works in', async () => {
+    const { d } = await describeSpatialStore({
+      'spatial:bbox': [200, -90, 340, 90],
+      'spatial:transform': GLOBAL_TRANSFORM,
+    })
+
+    expect(d.xyLimits?.xMin).toBe(-160)
+    expect(d.xyLimits?.xMax).toBe(-20)
+  })
+
+  it('snaps a global bbox that misses the antimeridian by a hair', async () => {
+    const { d } = await describeSpatialStore({
+      'spatial:bbox': [-179.9999, -90, 180.0001, 90],
+      'spatial:transform': GLOBAL_TRANSFORM,
+    })
+
+    expect(d.xyLimits?.xMin).toBe(-180)
+    expect(d.xyLimits?.xMax).toBe(180)
+  })
+
+  it('shifts a node-registered grid out by half a cell', async () => {
+    // A 1 deg regional grid, well clear of the global snap below.
+    const { d } = await describeSpatialStore({
+      'spatial:transform': [1, 0, -100, 0, -1, 40],
+      'spatial:registration': 'node',
+    })
+
+    expect(d.xyLimits).toEqual({
+      xMin: -100.5,
+      xMax: -92.5,
+      yMin: 36.5,
+      yMax: 40.5,
+    })
+  })
+
+  it('snaps a node-registered global grid onto the antimeridian', async () => {
+    // Node registration puts this grid's edges at -202.5..157.5, a full 360 deg
+    // of coverage offset by half a cell. The global snap pulls it onto +/-180
+    // rather than leaving a seam. Its tolerance is a whole cell, so the half
+    // cell here is well inside it.
+    const { d } = await describeSpatialStore({
+      'spatial:transform': GLOBAL_TRANSFORM,
+      'spatial:registration': 'node',
+    })
+
+    expect(d.xyLimits?.xMin).toBe(-180)
+    expect(d.xyLimits?.xMax).toBe(180)
+  })
+
+  it('lets the bounds option win over a declared bbox', async () => {
+    const { d } = await describeSpatialStore(
+      { 'spatial:bbox': [-180, -90, 180, 90] },
+      { bounds: [-10, -10, 10, 10] }
+    )
+
+    expect(d.xyLimits).toEqual({ xMin: -10, xMax: 10, yMin: -10, yMax: 10 })
+  })
+
+  it('falls back to the coordinate arrays for a transform type it cannot map', async () => {
+    const warn = silenceWarnings()
+    const { d, keys } = await describeSpatialStore({
+      'spatial:transform': GLOBAL_TRANSFORM,
+      'spatial:transform_type': 'rpc',
+    })
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(keys.some((k) => k.startsWith('/lat'))).toBe(true)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('rpc'))
+  })
+
+  it('falls back to the coordinate arrays for a rotated transform', async () => {
+    const warn = silenceWarnings()
+    const { d, keys } = await describeSpatialStore({
+      'spatial:transform': [45, 1, -180, 1, -45, 90],
+    })
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(keys.some((k) => k.startsWith('/lat'))).toBe(true)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('rotated'))
+  })
+})

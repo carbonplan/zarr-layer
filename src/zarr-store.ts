@@ -13,7 +13,12 @@ import type {
 import { normalizeLongitudeExtent, type XYLimits } from './map-utils'
 import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
-import { parseGeoZarrAttrs, type GeoZarrAttrs } from './geozarr'
+import {
+  parseGeoZarrAttrs,
+  boundsFromSpatialAttrs,
+  type GeoZarrAttrs,
+  type SpatialExtent,
+} from './geozarr'
 import { normalizeBuiltinProjectionDef } from './projection-utils'
 
 interface PyramidMetadata {
@@ -696,6 +701,50 @@ export class ZarrStore {
     }
   }
 
+  /**
+   * The grid extent the store declares through the `spatial:` convention, in
+   * the renderer's edge-to-edge terms and its -180–180 longitude range.
+   *
+   * Returns null whenever the declaration doesn't settle the extent, leaving
+   * the coordinate-array read as the fallback.
+   */
+  private _declaredSpatialExtent(): SpatialExtent | null {
+    const attrs = this.geoZarr
+    if (!attrs || (!attrs.bbox && !attrs.transform)) return null
+
+    if (attrs.transformType !== 'affine') {
+      console.warn(
+        `[zarr-layer] Store declares spatial:transform_type "${attrs.transformType}", ` +
+          `which this layer cannot map to a grid. Reading bounds from coordinate arrays.`
+      )
+      return null
+    }
+
+    const { lon, lat } = this.dimIndices
+    if (!lon || !lat) return null
+
+    const extent = boundsFromSpatialAttrs(attrs, {
+      nCols: this.shape[lon.index],
+      nRows: this.shape[lat.index],
+    })
+    if (!extent) {
+      console.warn(
+        `[zarr-layer] Could not derive bounds from the store's spatial: attributes ` +
+          `(a rotated transform needs a spatial:bbox alongside it). ` +
+          `Reading bounds from coordinate arrays.`
+      )
+      return null
+    }
+
+    if (!this.isGeographic()) return extent
+
+    const cellWidth = (extent.xMax - extent.xMin) / this.shape[lon.index]
+    return {
+      ...extent,
+      ...normalizeLongitudeExtent(extent.xMin, extent.xMax, cellWidth),
+    }
+  }
+
   private async _loadSpatialMetadata() {
     // Apply explicit bounds first (takes precedence for all multiscale types)
     // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857/proj4)
@@ -726,8 +775,29 @@ export class ZarrStore {
     }
 
     // For untiled: determine what we still need to detect
-    const needsBounds = !this.xyLimits
-    const needsLatAscending = !this._latIsAscendingUserSet
+    let needsBounds = !this.xyLimits
+    let needsLatAscending = !this._latIsAscendingUserSet
+
+    // A store declaring the spatial: convention has already said where its grid
+    // sits, so take it at its word and skip the coordinate reads.
+    if (needsBounds || needsLatAscending) {
+      const declared = this._declaredSpatialExtent()
+      if (declared) {
+        if (needsBounds) {
+          this.xyLimits = {
+            xMin: declared.xMin,
+            xMax: declared.xMax,
+            yMin: declared.yMin,
+            yMax: declared.yMax,
+          }
+          needsBounds = false
+        }
+        if (needsLatAscending && declared.latIsAscending !== null) {
+          this.latIsAscending = declared.latIsAscending
+          needsLatAscending = false
+        }
+      }
+    }
 
     // If explicit bounds provided and user doesn't need latIsAscending detection, skip coord fetch
     // (respects user intent to avoid coord reads by providing bounds)

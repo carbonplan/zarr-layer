@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   parseGeoZarrAttrs,
   parseLayoutItemSpatial,
+  boundsFromSpatialAttrs,
   type GeoZarrAttrs,
 } from './geozarr'
 
@@ -173,4 +174,174 @@ describe('parseLayoutItemSpatial', () => {
       })
     }
   )
+})
+
+/**
+ * A 100-column by 50-row grid on a 10 m north-up transform, the shape
+ * `spatial:transform` is written for. Its edges are x 500000..501000 and
+ * y 4999500..5000000.
+ */
+const GRID = { nCols: 100, nRows: 50 }
+
+const attrs = (over: Partial<GeoZarrAttrs> = {}): GeoZarrAttrs => ({
+  registration: 'pixel',
+  transformType: 'affine',
+  ...over,
+})
+
+describe('boundsFromSpatialAttrs', () => {
+  it('walks a north-up transform out to the grid edges', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ transform: [10, 0, 5e5, 0, -10, 5e6] }),
+        GRID
+      )
+    ).toEqual({
+      xMin: 5e5,
+      xMax: 501000,
+      yMin: 4999500,
+      yMax: 5e6,
+      latIsAscending: false,
+    })
+  })
+
+  it('reads row direction off the sign of the y resolution', () => {
+    const south = boundsFromSpatialAttrs(
+      attrs({ transform: [10, 0, 5e5, 0, 10, 4999500] }),
+      GRID
+    )
+
+    expect(south).toEqual({
+      xMin: 5e5,
+      xMax: 501000,
+      yMin: 4999500,
+      yMax: 5e6,
+      latIsAscending: true,
+    })
+  })
+
+  it('pushes a node-registered transform out by half a cell', () => {
+    // The transform lands on the first cell center, so every edge moves out 5 m.
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ registration: 'node', transform: [10, 0, 5e5, 0, -10, 5e6] }),
+        GRID
+      )
+    ).toEqual({
+      xMin: 499995,
+      xMax: 500995,
+      yMin: 4999505,
+      yMax: 5000005,
+      latIsAscending: false,
+    })
+  })
+
+  it('takes a pixel-registered bbox as the edges outright', () => {
+    expect(
+      boundsFromSpatialAttrs(attrs({ bbox: [-180, -90, 180, 90] }), GRID)
+    ).toEqual({
+      xMin: -180,
+      yMin: -90,
+      xMax: 180,
+      yMax: 90,
+      latIsAscending: null,
+    })
+  })
+
+  it('expands a node-registered bbox using the span between border centers', () => {
+    // 10 columns of centers span 9 cells, so half a cell is 90/9/2 = 5.
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ registration: 'node', bbox: [0, 0, 90, 45] }),
+        { nCols: 10, nRows: 5 }
+      )
+    ).toEqual({
+      xMin: -5,
+      xMax: 95,
+      yMin: -5.625,
+      yMax: 50.625,
+      latIsAscending: null,
+    })
+  })
+
+  it('prefers the transform resolution over the bbox span for a node expansion', () => {
+    const both = boundsFromSpatialAttrs(
+      attrs({
+        registration: 'node',
+        bbox: [0, 0, 90, 45],
+        transform: [10, 0, 0, 0, -10, 45],
+      }),
+      { nCols: 10, nRows: 5 }
+    )
+
+    expect(both).toEqual({
+      xMin: -5,
+      xMax: 95,
+      yMin: -5,
+      yMax: 50,
+      latIsAscending: false,
+    })
+  })
+
+  it('lets the bbox set the extent while the transform sets the row direction', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ bbox: [0, 0, 90, 45], transform: [10, 0, 5e5, 0, -10, 5e6] }),
+        GRID
+      )
+    ).toEqual({
+      xMin: 0,
+      yMin: 0,
+      xMax: 90,
+      yMax: 45,
+      latIsAscending: false,
+    })
+  })
+
+  it('rejects a rotated transform, whose corners are not its extent', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ transform: [10, 1, 5e5, 1, -10, 5e6] }),
+        GRID
+      )
+    ).toBeNull()
+  })
+
+  it('still uses a bbox declared alongside a rotated transform', () => {
+    const rotated = boundsFromSpatialAttrs(
+      attrs({ bbox: [0, 0, 90, 45], transform: [10, 1, 5e5, 1, -10, 5e6] }),
+      GRID
+    )
+
+    expect(rotated).toEqual({
+      xMin: 0,
+      yMin: 0,
+      xMax: 90,
+      yMax: 45,
+      // The rotation makes the row direction unusable even for orientation.
+      latIsAscending: null,
+    })
+  })
+
+  it('rejects a transform type it cannot map to a grid', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ transformType: 'rpc', bbox: [0, 0, 90, 45] }),
+        GRID
+      )
+    ).toBeNull()
+  })
+
+  it('rejects a node-registered bbox on a grid too small to size a cell from', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ registration: 'node', bbox: [0, 0, 90, 45] }),
+        { nCols: 1, nRows: 1 }
+      )
+    ).toBeNull()
+  })
+
+  it('returns nothing when the store declares no extent at all', () => {
+    expect(boundsFromSpatialAttrs(attrs(), GRID)).toBeNull()
+  })
 })
