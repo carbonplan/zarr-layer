@@ -619,12 +619,43 @@ export class ZarrStore {
     return true
   }
 
+  /**
+   * The spatial dimension names to identify axes by.
+   *
+   * `spatial:dimensions` names them outright, ordered [y, x], which beats
+   * guessing from an alias list and is the only thing that works for a store
+   * whose axes are named something the alias list has never heard of. The
+   * constructor option still wins per axis.
+   */
+  private _resolveSpatialDimensions(): SpatialDimensions {
+    const declared = this.geoZarr?.dimensions
+    if (!declared) return this.spatialDimensions
+
+    const known = this.dimensions.map((d) => d.toLowerCase())
+    const missing = declared.filter((n) => !known.includes(n.toLowerCase()))
+    if (missing.length > 0) {
+      throw new Error(
+        `spatial:dimensions names [${missing.join(
+          ', '
+        )}], which the array does not have. Available: [${this.dimensions.join(
+          ', '
+        )}]`
+      )
+    }
+
+    const [lat, lon] = declared
+    return {
+      lat: this.spatialDimensions.lat ?? lat,
+      lon: this.spatialDimensions.lon ?? lon,
+    }
+  }
+
   private async _computeDimIndices() {
     if (this.dimensions.length === 0) return
 
     this.dimIndices = identifyDimensionIndices(
       this.dimensions,
-      this.spatialDimensions
+      this._resolveSpatialDimensions()
     )
 
     // Collect the actual names of identified spatial dimensions

@@ -493,3 +493,92 @@ describe('bounds from the spatial: convention', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('rotated'))
   })
 })
+
+/**
+ * A grid whose axes are named something the alias list has never heard of, so
+ * only `spatial:dimensions` can identify them.
+ */
+function namedAxesStore(arrayAttrs: Record<string, unknown>): MemoryStore {
+  return buildMemoryZarrStore({
+    arrays: [
+      {
+        name: 'temperature',
+        shape: [2, 4, 8],
+        chunkShape: [2, 4, 8],
+        dimensionNames: ['band', 'northing', 'easting'],
+        attributes: arrayAttrs,
+      },
+    ],
+  })
+}
+
+async function describeNamedAxes(
+  arrayAttrs: Record<string, unknown>,
+  spatialDimensions?: { lat?: string; lon?: string }
+) {
+  const store = new ZarrStore({
+    customStore: namedAxesStore(arrayAttrs),
+    variable: 'temperature',
+    version: 3,
+    bounds: [-100, 30, -92, 40],
+    latIsAscending: false,
+    spatialDimensions,
+  })
+  await store.initialized
+  return store.describe()
+}
+
+describe('axis identification from spatial:dimensions', () => {
+  it('identifies axes the alias list cannot', async () => {
+    const d = await describeNamedAxes({
+      'spatial:dimensions': ['northing', 'easting'],
+    })
+
+    expect(d.dimIndices.lat?.name).toBe('northing')
+    expect(d.dimIndices.lat?.index).toBe(1)
+    expect(d.dimIndices.lon?.name).toBe('easting')
+    expect(d.dimIndices.lon?.index).toBe(2)
+  })
+
+  it('leaves the alias heuristic in charge when nothing is declared', async () => {
+    const d = await describeNamedAxes({})
+
+    expect(d.dimIndices.lat).toBeUndefined()
+    expect(d.dimIndices.lon).toBeUndefined()
+  })
+
+  it('reads the declared order as [y, x]', async () => {
+    // Declared the other way round, the axes swap with it.
+    const d = await describeNamedAxes({
+      'spatial:dimensions': ['easting', 'northing'],
+    })
+
+    expect(d.dimIndices.lat?.name).toBe('easting')
+    expect(d.dimIndices.lon?.name).toBe('northing')
+  })
+
+  // Pointing an axis at the band dimension is nonsense geographically; it is
+  // picked precisely because the store would never resolve that axis there.
+  it.each([
+    ['lat' as const, 'lon' as const, 'easting'],
+    ['lon' as const, 'lat' as const, 'northing'],
+  ])(
+    'lets the spatialDimensions option win for %s alone',
+    async (overridden, untouched, stillDeclared) => {
+      const d = await describeNamedAxes(
+        { 'spatial:dimensions': ['northing', 'easting'] },
+        { [overridden]: 'band' }
+      )
+
+      expect(d.dimIndices[overridden]?.name).toBe('band')
+      // The axis the caller left alone still comes from the store.
+      expect(d.dimIndices[untouched]?.name).toBe(stillDeclared)
+    }
+  )
+
+  it('rejects a declaration naming dimensions the array does not have', async () => {
+    await expect(
+      describeNamedAxes({ 'spatial:dimensions': ['y', 'x'] })
+    ).rejects.toThrow(/spatial:dimensions names \[y, x\]/)
+  })
+})
