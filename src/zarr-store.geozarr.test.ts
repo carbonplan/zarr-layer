@@ -671,9 +671,12 @@ describe('georeferencing declared on the layout entries', () => {
    * entries, which is where the multiscales convention puts it. Nothing on the
    * group or the array says where the grid sits.
    */
-  const layoutGeoStore = (layout: unknown[]) =>
+  const layoutGeoStore = (
+    layout: unknown[],
+    groupAttrs: Record<string, unknown> = {}
+  ) =>
     buildMemoryZarrStore({
-      attributes: { multiscales: { layout } },
+      attributes: { multiscales: { layout }, ...groupAttrs },
       arrays: [0, 1].map((i) => ({
         name: `${i}/temperature`,
         shape: [4 >> i, 8 >> i],
@@ -682,8 +685,13 @@ describe('georeferencing declared on the layout entries', () => {
       })),
     })
 
-  const describeLayoutGeo = async (layout: unknown[]) => {
-    const { keys, store: recorded } = recordReads(layoutGeoStore(layout))
+  const describeLayoutGeo = async (
+    layout: unknown[],
+    groupAttrs: Record<string, unknown> = {}
+  ) => {
+    const { keys, store: recorded } = recordReads(
+      layoutGeoStore(layout, groupAttrs)
+    )
     const store = new ZarrStore({
       customStore: recorded,
       variable: 'temperature',
@@ -721,6 +729,21 @@ describe('georeferencing declared on the layout entries', () => {
       { asset: '1', 'spatial:shape': [2, 4] },
     ])
 
+    expect(keys.filter((k) => k.includes('lat') || k.includes('lon'))).toEqual(
+      []
+    )
+  })
+
+  it('takes the extent from a group bbox and the row direction from the entry', async () => {
+    // How EOPF Sentinel-2 declares itself: a bbox on the group, the transform
+    // only on the layout entries. Neither settles the grid alone.
+    const { d, keys } = await describeLayoutGeo(
+      [{ asset: '0', 'spatial:transform': GLOBAL_TRANSFORM }, { asset: '1' }],
+      { 'spatial:bbox': [-180, -90, 180, 90] }
+    )
+
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.latIsAscending).toBe(false)
     expect(keys.filter((k) => k.includes('lat') || k.includes('lon'))).toEqual(
       []
     )

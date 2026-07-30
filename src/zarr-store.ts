@@ -764,19 +764,23 @@ export class ZarrStore {
   /**
    * The declaration to place the grid from.
    *
-   * The array's own attributes come first. Failing those, the base level's
-   * `multiscales.layout` entry: a multiscale store's absolute georeferencing
-   * belongs on the layout entries, one per resolution, so that is where a
-   * pyramid declares where it sits. Its grid size comes from the base array
-   * either way, which is the level that entry describes.
+   * A pyramid's absolute georeferencing belongs on its `multiscales.layout`
+   * entries, one per resolution, so the base entry's transform stands in
+   * whenever the group or array declares none of its own. The two sources
+   * combine rather than compete: a group that states only a `spatial:bbox`
+   * still gets its row direction from that transform, which is the difference
+   * between placing the grid outright and falling back to coordinate reads.
+   *
+   * The grid size comes from the base array either way, which is the level
+   * that entry describes.
    */
   private _effectiveSpatialAttrs(): GeoZarrAttrs | null {
     const attrs = this.geoZarr
     if (!attrs) return null
-    if (attrs.bbox || attrs.transform) return attrs
 
-    const baseTransform = this._declaredLevelTransforms[0]
-    return baseTransform ? { ...attrs, transform: baseTransform } : null
+    const transform = attrs.transform ?? this._declaredLevelTransforms[0]
+    if (!attrs.bbox && !transform) return null
+    return transform === attrs.transform ? attrs : { ...attrs, transform }
   }
 
   /**
