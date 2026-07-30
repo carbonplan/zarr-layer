@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import proj4 from 'proj4'
 import { withDecodedChunkCaching } from './decoded-chunk-cache'
 import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
@@ -12,6 +13,8 @@ import type {
 import type { XYLimits } from './map-utils'
 import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
+import { parseGeoZarrAttrs, type GeoZarrAttrs } from './geozarr'
+import { normalizeBuiltinProjectionDef } from './projection-utils'
 
 interface PyramidMetadata {
   levels: string[]
@@ -44,6 +47,18 @@ interface UntiledMultiscaleMetadata {
   resampling_method?: string
   crs?: 'EPSG:4326' | 'EPSG:3857'
 }
+
+/**
+ * `proj4.defs` is a module-global registry, so a definition read out of one
+ * store's metadata needs a key no other layer on the page will reuse.
+ */
+let syntheticProjectionCount = 0
+
+/**
+ * A `proj:code` naming WGS84 lon/lat under its OGC identity. Same axis order
+ * as the renderer already assumes, so it maps straight onto the native path.
+ */
+const CRS84 = 'OGC:CRS84'
 
 type ZarrStoreType =
   | zarr.FetchStore
@@ -163,6 +178,8 @@ export class ZarrStore {
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
+  private _proj4Override: boolean = false // Track if proj4 was explicitly set by user
+  private geoZarr: GeoZarrAttrs | null = null
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -203,6 +220,7 @@ export class ZarrStore {
       this._latIsAscendingUserSet = true
     }
     this.proj4 = proj4 ?? null
+    this._proj4Override = !!proj4
     if (crs) {
       const normalized = crs.toUpperCase()
       if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
@@ -459,6 +477,9 @@ export class ZarrStore {
     const array = await this._getArray(basePath)
     const arrayAttrs = array.attrs as Record<string, unknown>
 
+    this.geoZarr = parseGeoZarrAttrs(rootAttrs, arrayAttrs)
+    await this._applyGeoZarrCrs(arrayAttrs)
+
     // zarrita's dimensionNames returns the unified answer for v2
     // (_ARRAY_DIMENSIONS) and v3 (dimension_names).
     this.dimensions = array.dimensionNames ?? []
@@ -473,6 +494,124 @@ export class ZarrStore {
       typeof arrayAttrs?.add_offset === 'number' ? arrayAttrs.add_offset : 0
 
     await this._computeDimIndices()
+  }
+
+  /**
+   * Resolve the CRS the store declares through the `proj:` convention, falling
+   * back to the CF grid-mapping variable when it declares none.
+   *
+   * A `proj:code` naming one of the two built-in CRSs is honored first: those
+   * render through a native path that needs no proj4 transformer, and a store
+   * naming one has already said everything we need. WKT2 and PROJJSON come
+   * next, since they describe the CRS in full and proj4 parses both without a
+   * lookup table. Only then does an unfamiliar code get looked up against
+   * proj4's built-in definitions.
+   *
+   * A declared CRS that stays unresolved is left alone rather than guessed at
+   * from bounds. Inferring a different CRS would silently contradict what the
+   * store said; rendering visibly wrong is the honest outcome, and
+   * `proj4.defs()` is the caller's remedy.
+   */
+  private async _applyGeoZarrCrs(
+    arrayAttrs: Record<string, unknown>
+  ): Promise<void> {
+    if (this._crsOverride || this._proj4Override) return
+
+    const declared = this.geoZarr?.crs
+    const code = declared?.code
+    const builtin =
+      code?.trim().toUpperCase() === CRS84
+        ? 'EPSG:4326'
+        : normalizeBuiltinProjectionDef(code)
+    if (builtin) {
+      this.crs = builtin
+      this._crsFromMetadata = true
+      return
+    }
+
+    if (
+      declared?.wkt2 &&
+      this._registerProjection(declared.wkt2, 'proj:wkt2')
+    ) {
+      return
+    }
+    if (
+      declared?.projjson &&
+      this._registerProjection(declared.projjson, 'proj:projjson')
+    ) {
+      return
+    }
+
+    if (code) {
+      this._crsFromMetadata = true
+      if (proj4.defs(code)) {
+        this.proj4 = code
+        return
+      }
+      console.warn(
+        `[zarr-layer] Store declares proj:code "${code}", which proj4 does not ` +
+          `know and which the store gives no proj:wkt2 or proj:projjson for. ` +
+          `Register it before creating the layer with ` +
+          `proj4.defs('${code}', '<proj4 string>') to render it correctly.`
+      )
+      return
+    }
+
+    await this._applyCfGridMappingCrs(arrayAttrs)
+  }
+
+  /**
+   * Read a WKT definition off the CF grid-mapping variable the data array
+   * points at. rioxarray writes the same WKT under both `crs_wkt` and
+   * `spatial_ref`.
+   */
+  private async _applyCfGridMappingCrs(
+    arrayAttrs: Record<string, unknown>
+  ): Promise<void> {
+    const gridMapping = arrayAttrs?.grid_mapping
+    if (typeof gridMapping !== 'string' || !gridMapping.trim()) return
+
+    const prefix = this.levels.length > 0 ? `${this.levels[0]}/` : ''
+    try {
+      const mapping = await this._getArray(`${prefix}${gridMapping.trim()}`)
+      const attrs = mapping.attrs as Record<string, unknown>
+      const wkt = [attrs?.crs_wkt, attrs?.spatial_ref].find(
+        (value): value is string =>
+          typeof value === 'string' && value.trim().length > 0
+      )
+      if (wkt) this._registerProjection(wkt, `${gridMapping}.crs_wkt`)
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Could not read grid mapping variable '${gridMapping}': `,
+        err
+      )
+    }
+  }
+
+  /**
+   * Register a full CRS definition under a key of our own and point the store
+   * at it. proj4 parses WKT2 strings and PROJJSON objects directly, so a store
+   * carrying either is self-describing with no lookup table.
+   */
+  private _registerProjection(
+    def: string | Record<string, unknown>,
+    source: string
+  ): boolean {
+    const key = `ZARRLAYER:${++syntheticProjectionCount}`
+    try {
+      proj4.defs(key, def as string)
+      if (!proj4.defs(key)) throw new Error('definition did not parse')
+      proj4(key, 'EPSG:4326')
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Could not use '${source}' from store metadata: ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+      return false
+    }
+    this.proj4 = key
+    this._crsFromMetadata = true
+    return true
   }
 
   private async _computeDimIndices() {
