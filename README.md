@@ -16,6 +16,37 @@ See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capa
 
 Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js). Arbitrary CRS support via [proj4](https://github.com/proj4js/proj4js) reprojection.
 
+### Self-describing stores
+
+A store that carries the zarr [`proj`](https://github.com/zarr-conventions/geo-proj) and [`spatial`](https://github.com/zarr-conventions/spatial) conventions needs no configuration: the layer reads its CRS, extent, orientation and axis names straight out of the metadata, with no coordinate-array reads at all.
+
+| Attribute                     | What it settles                                                                                                                                                         |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `proj:code`                   | The CRS by identifier. `EPSG:4326`, `EPSG:3857` and `OGC:CRS84` render natively; anything proj4 has a built-in definition for (all UTM zones, among others) reprojects. |
+| `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                                                  |
+| `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                                                |
+| `spatial:bbox`                | The extent, when the transform is absent or rotated.                                                                                                                    |
+| `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                                                    |
+| `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                                                          |
+| `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                                            |
+
+Declared attributes are authoritative. If a store publishes them, they are used as-is rather than checked against its coordinate arrays, so a store whose attributes disagree with its own data will render wrong rather than be quietly corrected.
+
+Constructor options always win over what the store declares: `crs`, `proj4`, `bounds`, `latIsAscending` and `spatialDimensions` each override the corresponding attribute.
+
+For a store declaring a `proj:code` proj4 doesn't know and no `proj:wkt2` or `proj:projjson`, the layer warns and leaves the CRS unresolved. Register the definition before creating the layer:
+
+```ts
+import proj4 from 'proj4'
+
+proj4.defs(
+  'EPSG:5070',
+  '+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=NAD83 +units=m'
+)
+```
+
+Where these attributes are absent the layer falls back to what it always did: reading the coordinate arrays for extent and orientation, matching dimension names against a list of common aliases, and inferring the CRS from the magnitude of the bounds. A CF `grid_mapping` variable is read for `crs_wkt` when no `proj:` attribute is present.
+
 ### Multiscales
 
 High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
@@ -223,6 +254,8 @@ new ZarrLayer({
 ## custom projections
 
 For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), provide a `proj4` definition string. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays). If you set `crs` to a non-`EPSG:4326`/`EPSG:3857` value without `proj4`, the renderer will warn and fall back to inferred CRS.
+
+None of this is needed for a store carrying the `proj` and `spatial` conventions — see [self-describing stores](#self-describing-stores).
 
 ```ts
 new ZarrLayer({
