@@ -582,3 +582,85 @@ describe('axis identification from spatial:dimensions', () => {
     ).rejects.toThrow(/spatial:dimensions names \[y, x\]/)
   })
 })
+
+/**
+ * A two-level pyramid carrying a time dimension, so a level's shape cannot just
+ * be the declared [height, width] pair — the non-spatial dimension has to
+ * survive and the spatial ones have to land in the array's own axis order.
+ */
+function levelShapeStore(layout: unknown[]): MemoryStore {
+  return buildMemoryZarrStore({
+    attributes: { multiscales: { layout, crs: 'EPSG:4326' } },
+    arrays: [0, 1].map((i) => ({
+      name: `${i}/temperature`,
+      shape: [2, 512 >> i, 1024 >> i],
+      chunkShape: [2, 512 >> i, 1024 >> i],
+      dimensionNames: ['time', 'lat', 'lon'],
+    })),
+  })
+}
+
+async function describeLevels(layout: unknown[]) {
+  const { keys, store: recorded } = recordReads(levelShapeStore(layout))
+  const store = new ZarrStore({
+    customStore: recorded,
+    variable: 'temperature',
+    version: 3,
+    bounds: [-180, -90, 180, 90],
+    latIsAscending: false,
+  })
+  await store.initialized
+  return { d: store.describe(), keys }
+}
+
+describe('level shapes from spatial:shape', () => {
+  it('substitutes the declared pair into the array axis order', async () => {
+    const { d } = await describeLevels([
+      { asset: '0', 'spatial:shape': [512, 1024] },
+      { asset: '1', 'spatial:shape': [256, 512] },
+    ])
+
+    // The time dimension is carried over from the base shape.
+    expect(d.untiledLevels).toEqual([
+      { asset: '0', shape: [2, 512, 1024] },
+      { asset: '1', shape: [2, 256, 512] },
+    ])
+  })
+
+  it('matches what opening the level array would have reported', async () => {
+    const { d } = await describeLevels([
+      { asset: '0', 'spatial:shape': [512, 1024] },
+      { asset: '1', 'spatial:shape': [256, 512] },
+    ])
+    const declared = d.untiledLevels[1].shape
+
+    const opened = await new ZarrStore({
+      customStore: levelShapeStore([{ asset: '0' }, { asset: '1' }]),
+      variable: 'temperature',
+      version: 3,
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+    }).initialized.then((s) => s.getUntiledLevelMetadata('1'))
+
+    expect(declared).toEqual(opened.shape)
+  })
+
+  it('never opens the deeper level to size the pyramid', async () => {
+    const { keys } = await describeLevels([
+      { asset: '0', 'spatial:shape': [512, 1024] },
+      { asset: '1', 'spatial:shape': [256, 512] },
+    ])
+
+    expect(keys).not.toContain('/1/temperature/zarr.json')
+  })
+
+  it('leaves a level that declares nothing for the renderer to fetch', async () => {
+    const { d } = await describeLevels([
+      { asset: '0', 'spatial:shape': [512, 1024] },
+      { asset: '1' },
+    ])
+
+    expect(d.untiledLevels[0].shape).toEqual([2, 512, 1024])
+    expect(d.untiledLevels[1].shape).toBeUndefined()
+  })
+})

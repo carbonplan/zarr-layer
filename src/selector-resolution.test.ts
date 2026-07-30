@@ -121,10 +121,7 @@ describe('resolveSelectionIndex', () => {
     mockedLoadDimensionValues.mockResolvedValue(['red', 'green', 'blue'])
     const context = makeContext({
       isMultiscale: true,
-      levels: [
-        { asset: '0', scale: [1, 1], translation: [0, 0] },
-        { asset: '1', scale: [2, 2], translation: [0, 0] },
-      ],
+      levels: [{ asset: '0' }, { asset: '1' }],
       coordLevelIndex: 1,
       zarrStore: {
         coordinates: {},
@@ -142,10 +139,7 @@ describe('resolveSelectionIndex', () => {
     mockedLoadDimensionValues.mockResolvedValue([1, 2])
     const context = makeContext({
       isMultiscale: true,
-      levels: [
-        { asset: '0', scale: [1, 1], translation: [0, 0] },
-        { asset: '1', scale: [2, 2], translation: [0, 0] },
-      ],
+      levels: [{ asset: '0' }, { asset: '1' }],
       coordLevelIndex: 9,
       zarrStore: {
         coordinates: {},

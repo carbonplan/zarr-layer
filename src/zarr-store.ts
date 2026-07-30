@@ -15,6 +15,7 @@ import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
 import {
   parseGeoZarrAttrs,
+  parseLayoutItemSpatial,
   boundsFromSpatialAttrs,
   type GeoZarrAttrs,
   type SpatialExtent,
@@ -40,10 +41,6 @@ interface Multiscale {
 // zarr-conventions/multiscales format (untiled multiscales)
 interface UntiledMultiscaleLayoutEntry {
   asset: string
-  transform?: {
-    scale?: [number, number]
-    translation?: [number, number]
-  }
   derived_from?: string
 }
 
@@ -185,6 +182,8 @@ export class ZarrStore {
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
   private _proj4Override: boolean = false // Track if proj4 was explicitly set by user
   private geoZarr: GeoZarrAttrs | null = null
+  /** Per-level `spatial:shape` as declared, [height, width], before axis mapping. */
+  private _declaredLevelShapes: ([number, number] | undefined)[] = []
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -499,6 +498,33 @@ export class ZarrStore {
       typeof arrayAttrs?.add_offset === 'number' ? arrayAttrs.add_offset : 0
 
     await this._computeDimIndices()
+    this._applyDeclaredLevelShapes()
+  }
+
+  /**
+   * Fill in each level's shape from the `spatial:shape` its layout entry
+   * declares, sparing the renderer an array open per level just to size the
+   * pyramid.
+   *
+   * `spatial:shape` is [height, width]; a level's shape follows the array's own
+   * dimension order and carries its non-spatial dimensions too, so the declared
+   * pair is substituted into the base shape rather than used directly.
+   */
+  private _applyDeclaredLevelShapes(): void {
+    if (this._declaredLevelShapes.length === 0 || this.shape.length === 0)
+      return
+
+    const { lat, lon } = this.dimIndices
+    if (!lat || !lon) return
+
+    this._declaredLevelShapes.forEach((declared, i) => {
+      const level = this.untiledLevels[i]
+      if (!declared || !level) return
+      const shape = [...this.shape]
+      shape[lat.index] = declared[0]
+      shape[lon.index] = declared[1]
+      level.shape = shape
+    })
   }
 
   /**
@@ -1073,11 +1099,7 @@ export class ZarrStore {
       // `_loadSpatialMetadata` (global extent, latIsAscending=false, no
       // coordinate-array reads).
       this.multiscaleType = pixelsPerTile ? 'tiled' : 'untiled'
-      this.untiledLevels = levels.map((level) => ({
-        asset: level,
-        scale: [1.0, 1.0] as [number, number],
-        translation: [0.0, 0.0] as [number, number],
-      }))
+      this.untiledLevels = levels.map((level) => ({ asset: level }))
       return { levels, maxLevelIndex, crs }
     }
 
@@ -1089,14 +1111,14 @@ export class ZarrStore {
    *
    * This format uses a `layout` array where each entry specifies:
    * - `asset`: path to the level (e.g., "0", "1", ...)
-   * - `transform`: optional scale/translation for georeferencing
+   * - `spatial:shape`: optional level dimensions as [height, width]
    *
    * Example metadata:
    * ```json
    * {
    *   "layout": [
-   *     { "asset": "0", "transform": { "scale": [1.0, 1.0], "translation": [0, 0] } },
-   *     { "asset": "1", "transform": { "scale": [2.0, 2.0], "translation": [0, 0] } }
+   *     { "asset": "0", "spatial:shape": [1024, 2048] },
+   *     { "asset": "1", "spatial:shape": [512, 1024] }
    *   ],
    *   "crs": "EPSG:4326"
    * }
@@ -1115,12 +1137,11 @@ export class ZarrStore {
     const levels = layout.map((entry) => entry.asset)
     const maxLevelIndex = levels.length - 1
 
-    // Build untiledLevels with transform info (shapes loaded lazily via getUntiledLevelMetadata)
-    this.untiledLevels = layout.map((entry) => ({
-      asset: entry.asset,
-      scale: entry.transform?.scale ?? [1.0, 1.0],
-      translation: entry.transform?.translation ?? [0.0, 0.0],
-    }))
+    this.untiledLevels = layout.map((entry) => ({ asset: entry.asset }))
+    // Applied once the dimension order is known; see `_applyDeclaredLevelShapes`.
+    this._declaredLevelShapes = layout.map(
+      (entry) => parseLayoutItemSpatial(entry).shape
+    )
 
     this.multiscaleType = 'untiled'
 

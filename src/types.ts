@@ -152,8 +152,6 @@ export type CRS = 'EPSG:4326' | 'EPSG:3857'
 // Untiled multiscale types (zarr-conventions/multiscales format)
 export interface UntiledLevel {
   asset: string
-  scale: [number, number]
-  translation: [number, number]
   shape?: number[]
   chunks?: number[]
   scaleFactor?: number

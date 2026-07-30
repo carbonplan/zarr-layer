@@ -223,14 +223,11 @@ describe('ZarrStore multiscale classification', () => {
     //    cement it — see the CRS-resolution test for the tiled default.
   })
 
-  it('classifies a zarr-conventions layout pyramid as untiled with transforms', async () => {
+  it('classifies a zarr-conventions layout pyramid as untiled', async () => {
     const store = new ZarrStore({
       customStore: pyramidStore(
         {
-          layout: [
-            { asset: '0', transform: { scale: [1, 1], translation: [0, 0] } },
-            { asset: '1', transform: { scale: [2, 2], translation: [0, 0] } },
-          ],
+          layout: [{ asset: '0' }, { asset: '1' }],
           crs: 'EPSG:4326',
         },
         ['0', '1']
@@ -246,10 +243,7 @@ describe('ZarrStore multiscale classification', () => {
     expect(d.multiscaleType).toBe('untiled')
     expect(d.levels).toEqual(['0', '1'])
     expect(d.crs).toBe('EPSG:4326')
-    expect(d.untiledLevels).toEqual([
-      { asset: '0', scale: [1, 1], translation: [0, 0] },
-      { asset: '1', scale: [2, 2], translation: [0, 0] },
-    ])
+    expect(d.untiledLevels).toEqual([{ asset: '0' }, { asset: '1' }])
   })
 
   it('resolves the CRS of a tiled OME-NGFF pyramid from the dataset crs field', async () => {

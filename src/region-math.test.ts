@@ -359,8 +359,6 @@ describe('getVisibleRegions', () => {
 describe('selectLevelForZoom', () => {
   const level = (asset: string, lonSize: number): UntiledLevel => ({
     asset,
-    scale: [1, 1],
-    translation: [0, 0],
     shape: [lonSize / 2, lonSize],
   })
   const projection4326 = createProjectionContext({
