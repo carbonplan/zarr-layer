@@ -481,3 +481,55 @@ describe('computeRegionMercatorBounds', () => {
     )
   })
 })
+
+describe('getRegionBounds with per-level extents', () => {
+  const DATASET = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 }
+
+  it('places a region against the dataset extent by default', () => {
+    expect(
+      getRegionBounds({
+        regionX: 0,
+        regionY: 0,
+        levelMeta: { width: 10, height: 10, regionSize: [10, 10] },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 0, xMax: 100, yMin: 0, yMax: 100 })
+  })
+
+  it("prefers the level's own extent when it declares one", () => {
+    // A floor-divided level covering 90 of the dataset's 100 units must not be
+    // stretched over the full extent.
+    expect(
+      getRegionBounds({
+        regionX: 0,
+        regionY: 0,
+        levelMeta: {
+          width: 10,
+          height: 10,
+          regionSize: [10, 10],
+          xyLimits: { xMin: 0, xMax: 90, yMin: 0, yMax: 90 },
+        },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 0, xMax: 90, yMin: 0, yMax: 90 })
+  })
+
+  it('scales sub-regions within the level extent', () => {
+    expect(
+      getRegionBounds({
+        regionX: 1,
+        regionY: 0,
+        levelMeta: {
+          width: 10,
+          height: 10,
+          regionSize: [10, 5],
+          xyLimits: { xMin: 0, xMax: 90, yMin: 0, yMax: 90 },
+        },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 45, xMax: 90, yMin: 0, yMax: 90 })
+  })
+})

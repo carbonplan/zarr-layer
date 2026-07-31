@@ -608,9 +608,12 @@ describe('axis identification from spatial:dimensions', () => {
  * be the declared [height, width] pair — the non-spatial dimension has to
  * survive and the spatial ones have to land in the array's own axis order.
  */
-function levelShapeStore(layout: unknown[]): MemoryStore {
+function levelShapeStore(
+  layout: unknown[],
+  rootAttrs: Record<string, unknown> = {}
+): MemoryStore {
   return buildMemoryZarrStore({
-    attributes: { multiscales: { layout, crs: 'EPSG:4326' } },
+    attributes: { multiscales: { layout, crs: 'EPSG:4326' }, ...rootAttrs },
     arrays: [0, 1].map((i) => ({
       name: `${i}/temperature`,
       shape: [2, 512 >> i, 1024 >> i],
@@ -620,8 +623,13 @@ function levelShapeStore(layout: unknown[]): MemoryStore {
   })
 }
 
-async function describeLevels(layout: unknown[]) {
-  const { keys, store: recorded } = recordReads(levelShapeStore(layout))
+async function describeLevels(
+  layout: unknown[],
+  rootAttrs: Record<string, unknown> = {}
+) {
+  const { keys, store: recorded } = recordReads(
+    levelShapeStore(layout, rootAttrs)
+  )
   const store = new ZarrStore({
     customStore: recorded,
     variable: 'temperature',
@@ -892,5 +900,76 @@ describe('a declaration on the level group', () => {
     expect(d.crs).toBe('EPSG:4326')
     expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
     expect(d.latIsAscending).toBe(false)
+  })
+})
+
+describe('per-level extents from the layout entries', () => {
+  it('gives each level the extent its own transform describes', async () => {
+    // Level 1 is floor-divided: 4 columns of 90 covers 360, but 2 columns of
+    // 180 starting at -180 stops at 180 -- while a 3-column level would not.
+    const { d } = await describeLevels([
+      {
+        asset: '0',
+        'spatial:transform': GLOBAL_TRANSFORM,
+        'spatial:shape': [4, 8],
+      },
+      {
+        asset: '1',
+        'spatial:transform': [90, 0, -180, 0, -90, 90],
+        'spatial:shape': [2, 3],
+      },
+    ])
+
+    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    // 3 columns x 90 = 270 wide, not the dataset's 360.
+    expect(d.untiledLevels[1].xyLimits).toEqual({
+      xMin: -180,
+      xMax: 90,
+      yMin: -90,
+      yMax: 90,
+    })
+  })
+
+  it('leaves a level with no declared transform without one', async () => {
+    const { d } = await describeLevels([
+      {
+        asset: '0',
+        'spatial:transform': GLOBAL_TRANSFORM,
+        'spatial:shape': [4, 8],
+      },
+      { asset: '1', 'spatial:shape': [2, 4] },
+    ])
+
+    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+  })
+})
+
+describe('a level extent competing with a dataset bbox', () => {
+  it("uses the level's own transform, not the dataset bbox", async () => {
+    // The bbox describes the base level. Applying it to level 1 would stretch
+    // that level's 270 units of coverage across the full 360.
+    const { d } = await describeLevels(
+      [
+        {
+          asset: '0',
+          'spatial:transform': GLOBAL_TRANSFORM,
+          'spatial:shape': [4, 8],
+        },
+        {
+          asset: '1',
+          'spatial:transform': [90, 0, -180, 0, -90, 90],
+          'spatial:shape': [2, 3],
+        },
+      ],
+      { 'spatial:bbox': [-180, -90, 180, 90] }
+    )
+
+    expect(d.untiledLevels[1].xyLimits).toEqual({
+      xMin: -180,
+      xMax: 90,
+      yMin: -90,
+      yMax: 90,
+    })
   })
 })

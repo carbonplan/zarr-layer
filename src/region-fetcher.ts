@@ -105,6 +105,7 @@ export class RegionFetcher {
       width: level.width,
       height: level.height,
       regionSize: level.regionSize,
+      xyLimits: level.xyLimits,
       selectorVersion: this.context.getSelectorVersion(),
       bandNames: [...this.context.getBandNames()],
       baseMultiValueDims: level.baseMultiValueDims.map((dim) => ({
@@ -308,6 +309,7 @@ export class RegionFetcher {
           width: snapshot.width,
           height: snapshot.height,
           regionSize: snapshot.regionSize,
+          xyLimits: snapshot.xyLimits,
         }
         const geoBounds = this.context.getRegionBounds(
           regionX,
@@ -392,6 +394,7 @@ export class RegionFetcher {
         width: snapshot.width,
         height: snapshot.height,
         regionSize: [...snapshot.regionSize] as [number, number],
+        xyLimits: snapshot.xyLimits,
       }
 
       region.textureUploaded = false

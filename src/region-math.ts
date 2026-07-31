@@ -264,11 +264,12 @@ export function getRegionBounds({
   latIsAscending: boolean
 }): SourceBounds {
   const { width, height, regionSize } = levelMeta
-  // xyLimits is assumed constant across all multiscale levels (same geographic extent).
-  // If per-level bounds are ever needed, add xyLimits to LevelMeta type.
-  if (!xyLimits) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+  // A level that declares its own extent is placed against that; the dataset
+  // extent describes the base level and would stretch any level covering less.
+  const limits = levelMeta.xyLimits ?? xyLimits
+  if (!limits) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
   const [regionH, regionW] = regionSize
-  const { xMin, xMax, yMin, yMax } = xyLimits
+  const { xMin, xMax, yMin, yMax } = limits
   const pxXStart = regionX * regionW
   const pxXEnd = Math.min(pxXStart + regionW, width)
   const pxYStart = regionY * regionH

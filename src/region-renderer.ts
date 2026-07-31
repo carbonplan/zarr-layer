@@ -176,6 +176,7 @@ export class RegionRenderer {
             width: existing.width,
             height: existing.height,
             regionSize: existing.regionSize,
+            xyLimits: existing.xyLimits,
             reusedArray: true,
           }
         }
@@ -192,6 +193,9 @@ export class RegionRenderer {
           width,
           height,
           regionSize: this.getRegionSize(zarrArray) ?? [height, width],
+          xyLimits: this.isMultiscale
+            ? this.levels[levelIndex]?.xyLimits
+            : undefined,
           reusedArray: false,
         }
       },

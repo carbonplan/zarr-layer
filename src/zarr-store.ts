@@ -506,6 +506,7 @@ export class ZarrStore {
 
     await this._computeDimIndices()
     this._applyDeclaredLevelShapes()
+    this._applyDeclaredLevelExtents()
   }
 
   /**
@@ -531,6 +532,43 @@ export class ZarrStore {
       shape[lat.index] = declared[0]
       shape[lon.index] = declared[1]
       level.shape = shape
+    })
+  }
+
+  /**
+   * Give each level the extent its own `spatial:transform` describes.
+   *
+   * Levels of a pyramid normally share the dataset extent, but floor division
+   * leaves a coarse level covering a partial trailing cell less, and the
+   * convention permits levels to differ outright. Placing a level against the
+   * dataset extent instead of its own stretches it by that difference.
+   */
+  private _applyDeclaredLevelExtents(): void {
+    const attrs = this.geoZarr
+    if (!attrs) return
+
+    this._declaredLevelTransforms.forEach((transform, i) => {
+      const level = this.untiledLevels[i]
+      const shape = this._declaredLevelShapes[i]
+      if (!level || !transform || !shape) return
+
+      const [nRows, nCols] = shape
+      // The level's own transform places it; a dataset-wide bbox describes the
+      // base level and would defeat the point.
+      const extent = boundsFromSpatialAttrs(
+        { ...attrs, transform, bbox: undefined },
+        { nCols, nRows }
+      )
+      if (!extent) return
+
+      const { xMin, xMax, yMin, yMax } = extent
+      level.xyLimits = this.isGeographic()
+        ? {
+            yMin,
+            yMax,
+            ...normalizeLongitudeExtent(xMin, xMax, (xMax - xMin) / nCols),
+          }
+        : { xMin, xMax, yMin, yMax }
     })
   }
 

@@ -1,5 +1,5 @@
 import type * as zarr from 'zarrita'
-import type { MercatorBounds, Wgs84Bounds } from './map-utils'
+import type { MercatorBounds, Wgs84Bounds, XYLimits } from './map-utils'
 
 /** State for a single region (chunk/shard) in region-based loading */
 export interface RegionState {
@@ -51,9 +51,8 @@ export type LevelMeta = {
   width: number
   height: number
   regionSize: [number, number]
-  // xyLimits omitted - assumed constant across levels for now.
-  // TODO: If heterogeneous pyramids with per-level bounds are needed,
-  // add xyLimits here and store per-region.
+  /** This level's own extent, when it declares one. Falls back to the dataset's. */
+  xyLimits?: XYLimits
 }
 
 /** Snapshot of level state captured at fetch start to prevent race conditions */
@@ -70,6 +69,7 @@ export interface LevelSnapshot {
   width: number
   height: number
   regionSize: [number, number]
+  xyLimits?: XYLimits
   selectorVersion: number
   bandNames: string[]
 }
@@ -89,6 +89,7 @@ export interface LevelRuntime {
   width: number
   height: number
   regionSize: [number, number]
+  xyLimits?: XYLimits
   baseSliceArgs: (number | zarr.Slice)[]
   baseMultiValueDims: Array<{
     dimIndex: number

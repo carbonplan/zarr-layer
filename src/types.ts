@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import type { XYLimits } from './map-utils'
 
 /** Bounds tuple: [xMin, yMin, xMax, yMax] */
 export type Bounds = [number, number, number, number]
@@ -152,6 +153,13 @@ export type CRS = 'EPSG:4326' | 'EPSG:3857'
 // Untiled multiscale types (zarr-conventions/multiscales format)
 export interface UntiledLevel {
   asset: string
+  /**
+   * Extent of this level alone, from its own `spatial:transform`. Levels of a
+   * pyramid usually share the dataset extent, but a floor-divided level covers
+   * a partial trailing cell less, and the convention permits larger
+   * differences. Absent when the store declares no per-level transform.
+   */
+  xyLimits?: XYLimits
   shape?: number[]
   chunks?: number[]
   scaleFactor?: number
