@@ -238,6 +238,48 @@ describe('queryData with a per-level extent', () => {
     const viaLevel = await queryData(eastern, point(90, 0), { time: 10 })
     expect(viaLevel.temp).toEqual([20])
   })
+
+  it('guards antimeridian crossings against the level extent, not the dataset one', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { context } = await makeQueryHarness()
+      // The dataset extent stays within range; only the level's own extent
+      // crosses. The two-strip path is unsupported for such a raster, so the
+      // guard must consult the extent the pixel-span mapping would use.
+      const wrapped: QueryContext = {
+        ...context,
+        level: {
+          ...context.level!,
+          xyLimits: { xMin: 0, xMax: 360, yMin: -90, yMax: 90 },
+        },
+      }
+      const result = await queryData(
+        wrapped,
+        {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [130, 50],
+              [230, 50],
+              [230, 80],
+              [130, 80],
+              [130, 50],
+            ],
+          ],
+        },
+        { time: 10 }
+      )
+
+      expect(wrapped.antimeridianWarnings.has('raster-extent-crossing')).toBe(
+        true
+      )
+      // Single-fetched against the 0-360 extent: centers 157.5 and 202.5 are
+      // pixels 3 and 4 of the top row.
+      expect(result.temp).toEqual([3, 4])
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })
 
 describe('mergeQueryResults', () => {

@@ -288,10 +288,11 @@ export async function queryData(
     return singleFetch(queryGeometry)
   }
 
-  // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in meters)
+  // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in
+  // meters). Checked against the same extent the pixel-span mapping uses.
   if (
     context.projection.kind === 'epsg4326' &&
-    rasterExtentCrossesAntimeridian('EPSG:4326', context.xyLimits)
+    rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
   ) {
     if (!context.antimeridianWarnings.has('raster-extent-crossing')) {
       context.antimeridianWarnings.add('raster-extent-crossing')
