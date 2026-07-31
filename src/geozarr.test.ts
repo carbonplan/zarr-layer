@@ -76,6 +76,50 @@ describe('parseGeoZarrAttrs', () => {
     expect(attrs.registration).toBe('node')
   })
 
+  it('lets the nearest source in the chain win', () => {
+    const attrs = parseGeoZarrAttrs(
+      { 'proj:code': 'EPSG:4326', 'spatial:registration': 'node' },
+      { 'proj:code': 'EPSG:3857' },
+      { 'spatial:transform': TRANSFORM }
+    )
+
+    // The level group beats the root; the array declares no proj: at all.
+    expect(attrs.crs?.code).toBe('EPSG:3857')
+    // Untouched all the way down, so the root's value still applies.
+    expect(attrs.registration).toBe('node')
+    expect(attrs.transform).toEqual(TRANSFORM)
+  })
+
+  it('takes a proj: declaration whole from the nearest source', () => {
+    const attrs = parseGeoZarrAttrs(
+      { 'proj:code': 'EPSG:4326', 'proj:wkt2': 'GEOGCRS["WGS 84"]' },
+      { 'proj:code': 'EPSG:32631' }
+    )
+
+    // Blending the level's code with the root's wkt2 would compose two
+    // different coordinate systems.
+    expect(attrs.crs).toEqual({
+      code: 'EPSG:32631',
+      wkt2: undefined,
+      projjson: undefined,
+    })
+  })
+
+  it('overrides spatial: one property at a time', () => {
+    const attrs = parseGeoZarrAttrs(
+      {
+        'spatial:bbox': [0, 0, 90, 45],
+        'spatial:dimensions': ['y', 'x'],
+        'spatial:registration': 'node',
+      },
+      { 'spatial:bbox': [10, 10, 20, 20] }
+    )
+
+    expect(attrs.bbox).toEqual([10, 10, 20, 20])
+    expect(attrs.dimensions).toEqual(['y', 'x'])
+    expect(attrs.registration).toBe('node')
+  })
+
   it('carries a code-only CRS through without a wkt2 or projjson', () => {
     const attrs = parseGeoZarrAttrs({ 'proj:code': 'EPSG:5070' }, undefined)
 

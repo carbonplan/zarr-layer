@@ -802,3 +802,95 @@ describe('georeferencing declared on the layout entries', () => {
     })
   })
 })
+
+/**
+ * `proj:` inherits only to a group's direct child arrays, so a pyramid whose
+ * levels are groups may restate it on each level group rather than at the
+ * store root. Both placements are sanctioned by the convention.
+ */
+describe('a declaration on the level group', () => {
+  const levelGroupStore = (
+    rootAttrs: Record<string, unknown>,
+    levelAttrs: Record<string, unknown>
+  ) => {
+    const spec = buildMemoryZarrStore({
+      attributes: { multiscales: { layout: [{ asset: '0' }] }, ...rootAttrs },
+      arrays: [
+        {
+          name: '0/temperature',
+          shape: [4, 8],
+          chunkShape: [4, 8],
+          dimensionNames: ['lat', 'lon'],
+        },
+      ],
+    })
+    // Give the level group its own attributes.
+    const enc = new TextEncoder()
+    const inner = spec.get.bind(spec)
+    return {
+      get: async (key: string) => {
+        if (key === '/0/zarr.json') {
+          return enc.encode(
+            JSON.stringify({
+              zarr_format: 3,
+              node_type: 'group',
+              attributes: levelAttrs,
+            })
+          )
+        }
+        return inner(key)
+      },
+    }
+  }
+
+  const describeLevelGroup = async (
+    rootAttrs: Record<string, unknown>,
+    levelAttrs: Record<string, unknown>
+  ) => {
+    const store = new ZarrStore({
+      customStore: levelGroupStore(rootAttrs, levelAttrs),
+      variable: 'temperature',
+      version: 3,
+      latIsAscending: false,
+    })
+    await store.initialized
+    return store.describe()
+  }
+
+  it('is read when the root declares nothing', async () => {
+    const d = await describeLevelGroup(
+      {},
+      {
+        'proj:code': 'EPSG:32631',
+        'spatial:transform': [45, 0, -180, 0, -45, 90],
+      }
+    )
+
+    expect(d.proj4).toBe('EPSG:32631')
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+  })
+
+  it('wins over the root, being nearer the array', async () => {
+    const d = await describeLevelGroup(
+      { 'proj:code': 'EPSG:4326', 'spatial:bbox': [-180, -90, 180, 90] },
+      { 'proj:code': 'EPSG:32631' }
+    )
+
+    expect(d.proj4).toBe('EPSG:32631')
+  })
+
+  it('leaves the root in charge of what it does not restate', async () => {
+    const d = await describeLevelGroup(
+      {
+        'proj:code': 'EPSG:4326',
+        'spatial:bbox': [-180, -90, 180, 90],
+        'spatial:registration': 'pixel',
+      },
+      { 'spatial:transform': [45, 0, -180, 0, -45, 90] }
+    )
+
+    expect(d.crs).toBe('EPSG:4326')
+    expect(d.xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.latIsAscending).toBe(false)
+  })
+})

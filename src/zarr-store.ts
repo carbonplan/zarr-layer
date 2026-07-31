@@ -484,7 +484,11 @@ export class ZarrStore {
     const array = await this._getArray(basePath)
     const arrayAttrs = array.attrs as Record<string, unknown>
 
-    this.geoZarr = parseGeoZarrAttrs(rootAttrs, arrayAttrs)
+    this.geoZarr = parseGeoZarrAttrs(
+      rootAttrs,
+      await this._readBaseLevelGroupAttrs(),
+      arrayAttrs
+    )
     await this._applyGeoZarrCrs(arrayAttrs)
 
     // zarrita's dimensionNames returns the unified answer for v2
@@ -528,6 +532,30 @@ export class ZarrStore {
       shape[lon.index] = declared[1]
       level.shape = shape
     })
+  }
+
+  /**
+   * Attributes of the group holding the base level's arrays.
+   *
+   * `proj:` inherits only to a group's direct child arrays, so a pyramid whose
+   * levels are groups may restate it on each of them instead of at the root.
+   * That group sits between the two we already read, and is one metadata
+   * lookup -- served from cache on a consolidated store, and never per level.
+   */
+  private async _readBaseLevelGroupAttrs(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    if (this.levels.length === 0 || !this.root) return undefined
+    try {
+      const openFunc = resolveOpenFunc(this.version)
+      const group = await openFunc(this.root.resolve(this.levels[0]), {
+        kind: 'group',
+      })
+      return group.attrs as Record<string, unknown>
+    } catch {
+      // A level that isn't a group at all just contributes nothing.
+      return undefined
+    }
   }
 
   /**

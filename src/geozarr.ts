@@ -59,12 +59,17 @@ const warn = (message: string): void => {
 }
 
 /**
- * Array attributes override the group's, following `proj:`'s inheritance model:
- * a group's attributes apply to its direct child arrays unless the array
- * declares its own.
+ * The nearest source declaring `key` wins, sources being ordered outermost
+ * first. `spatial:` is overridden a property at a time, so a level that
+ * restates only its own transform keeps the rest of what it inherits.
  */
-const pick = (group: Attrs, array: Attrs, key: string): unknown =>
-  array?.[key] !== undefined ? array[key] : group?.[key]
+const pick = (sources: Attrs[], key: string): unknown => {
+  for (let i = sources.length - 1; i >= 0; i--) {
+    const value = sources[i]?.[key]
+    if (value !== undefined) return value
+  }
+  return undefined
+}
 
 function asString(value: unknown, key: string): string | undefined {
   if (value === undefined || value === null) return undefined
@@ -161,31 +166,44 @@ function asRegistration(value: unknown): Registration {
   return 'pixel'
 }
 
-function parseCrs(group: Attrs, array: Attrs): GeoZarrCrs | undefined {
-  const code = asString(pick(group, array, 'proj:code'), 'proj:code')
-  const wkt2 = asString(pick(group, array, 'proj:wkt2'), 'proj:wkt2')
-  const projjson = asObject(
-    pick(group, array, 'proj:projjson'),
-    'proj:projjson'
-  )
-  if (!code && !wkt2 && !projjson) return undefined
-  return { code, wkt2, projjson }
+const PROJ_KEYS = ['proj:code', 'proj:wkt2', 'proj:projjson'] as const
+
+/**
+ * Unlike `spatial:`, a `proj:` declaration is taken whole from the nearest
+ * source that makes one. The three forms describe a single CRS, so blending a
+ * level's `proj:code` with an ancestor's `proj:wkt2` could silently compose two
+ * different coordinate systems.
+ */
+function parseCrs(sources: Attrs[]): GeoZarrCrs | undefined {
+  for (let i = sources.length - 1; i >= 0; i--) {
+    const source = sources[i]
+    if (!source || !PROJ_KEYS.some((k) => source[k] !== undefined)) continue
+    const code = asString(source['proj:code'], 'proj:code')
+    const wkt2 = asString(source['proj:wkt2'], 'proj:wkt2')
+    const projjson = asObject(source['proj:projjson'], 'proj:projjson')
+    if (!code && !wkt2 && !projjson) return undefined
+    return { code, wkt2, projjson }
+  }
+  return undefined
 }
 
 /**
- * Read the `proj:` and `spatial:` attributes a store declares for one array.
+ * Read the `proj:` and `spatial:` attributes that apply to one array.
+ *
+ * Sources are given outermost first -- typically the store root, then the
+ * level's own group, then the array -- and the nearest declaration wins. The
+ * `proj:` convention inherits to a group's direct child arrays only, so a
+ * pyramid may legitimately restate it on each level group rather than at the
+ * root; passing the whole chain covers either placement.
  *
  * `registration` and `transformType` always come back populated, defaulting to
- * the spec's `'pixel'` and `'affine'`. Everything else is absent when the store
- * doesn't declare it or declares it malformed.
+ * the spec's `'pixel'` and `'affine'`. Everything else is absent when nothing
+ * declares it or what is declared is malformed.
  */
-export function parseGeoZarrAttrs(
-  groupAttrs: Attrs,
-  arrayAttrs: Attrs
-): GeoZarrAttrs {
-  const spatial = (key: string) => pick(groupAttrs, arrayAttrs, key)
+export function parseGeoZarrAttrs(...sources: Attrs[]): GeoZarrAttrs {
+  const spatial = (key: string) => pick(sources, key)
   return {
-    crs: parseCrs(groupAttrs, arrayAttrs),
+    crs: parseCrs(sources),
     bbox: asBbox(spatial('spatial:bbox')),
     transform: asTransform(spatial('spatial:transform')),
     shape: asShape(spatial('spatial:shape')),
