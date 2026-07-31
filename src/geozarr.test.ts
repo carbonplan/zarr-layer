@@ -139,6 +139,15 @@ describe('parseGeoZarrAttrs', () => {
     expect(attrs.transform).toEqual(rotated)
   })
 
+  it('preserves a quarter-turn transform, whose resolutions are both zero', () => {
+    const quarterTurn = [0, 10, 500000, 10, 0, 5000000]
+    const attrs = parseGeoZarrAttrs(undefined, {
+      'spatial:transform': quarterTurn,
+    })
+
+    expect(attrs.transform).toEqual(quarterTurn)
+  })
+
   it('reports a non-affine transform type verbatim', () => {
     const attrs = parseGeoZarrAttrs(undefined, {
       'spatial:transform_type': 'rpc',
@@ -358,6 +367,15 @@ describe('boundsFromSpatialAttrs', () => {
     expect(
       boundsFromSpatialAttrs(
         attrs({ bbox: [0, 0, 90, 45], transform: [10, 1, 5e5, 1, -10, 5e6] }),
+        GRID
+      )
+    ).toBeNull()
+  })
+
+  it('rejects a quarter-turn rotated grid the same way', () => {
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ bbox: [0, 0, 90, 45], transform: [0, 10, 5e5, 10, 0, 5e6] }),
         GRID
       )
     ).toBeNull()

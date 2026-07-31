@@ -122,10 +122,11 @@ function asTransform(value: unknown): AffineTransform | undefined {
   const nums = asNumbers(value, 'spatial:transform', 6)
   if (!nums) return undefined
   const [a, b, c, d, e, f] = nums
-  if (a === 0 || e === 0) {
-    warn(
-      `Ignoring 'spatial:transform': resolution coefficients must be non-zero.`
-    )
+  // An axis with zero resolution and zero rotation maps every index to one
+  // coordinate. A zero resolution alone is a quarter-turn rotation, kept
+  // intact so the rotation handling sees it.
+  if ((a === 0 && b === 0) || (d === 0 && e === 0)) {
+    warn(`Ignoring 'spatial:transform': it collapses an axis.`)
     return undefined
   }
   return [a, b, c, d, e, f]
