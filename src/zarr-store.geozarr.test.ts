@@ -965,6 +965,66 @@ describe('per-level extents from the layout entries', () => {
     })
   })
 
+  it('declines a level whose row direction contradicts the dataset', async () => {
+    // The renderer draws every level in the dataset's row direction. A level
+    // declaring the opposite cannot be honored, so its extent is dropped with
+    // a warning rather than placed as if its rows ran the other way.
+    const warn = silenceWarnings()
+    const { d } = await describeLevels(
+      [
+        {
+          asset: '0',
+          'spatial:transform': GLOBAL_TRANSFORM,
+          'spatial:shape': [4, 8],
+        },
+        {
+          asset: '1',
+          'spatial:transform': [90, 0, -180, 0, 90, -90],
+          'spatial:shape': [2, 4],
+        },
+      ],
+      { bounds: null }
+    )
+
+    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('row direction'))
+  })
+
+  it('keeps extents of a consistent store under a latIsAscending override', async () => {
+    // The harness overrides latIsAscending to false against south-up
+    // transforms. The override changes how rows are drawn, not what the
+    // store's transforms declare about placement, so extents survive.
+    const warn = silenceWarnings()
+    const { d } = await describeLevels(
+      [
+        {
+          asset: '0',
+          'spatial:transform': [45, 0, -180, 0, 45, -90],
+          'spatial:shape': [4, 8],
+        },
+        {
+          asset: '1',
+          'spatial:transform': [90, 0, -180, 0, 90, -90],
+          'spatial:shape': [2, 3],
+        },
+      ],
+      { bounds: null }
+    )
+
+    expect(d.latIsAscending).toBe(false)
+    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.untiledLevels[1].xyLimits).toEqual({
+      xMin: -180,
+      xMax: 90,
+      yMin: -90,
+      yMax: 90,
+    })
+    expect(warn).not.toHaveBeenCalledWith(
+      expect.stringContaining('row direction')
+    )
+  })
+
   it('leaves a level with no declared transform without one', async () => {
     const { d } = await describeLevels(
       [

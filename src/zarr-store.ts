@@ -301,6 +301,9 @@ export class ZarrStore {
     await this._loadMetadata()
 
     await this._loadSpatialMetadata()
+    // After spatial metadata, so a level whose declared row direction
+    // contradicts the dataset's resolved one can be recognized and declined.
+    this._applyDeclaredLevelExtents()
     await this._loadCoordinates()
 
     return this
@@ -518,7 +521,6 @@ export class ZarrStore {
 
     await this._computeDimIndices()
     this._applyDeclaredLevelShapes()
-    this._applyDeclaredLevelExtents()
   }
 
   /**
@@ -570,7 +572,10 @@ export class ZarrStore {
    *
    * Returns nothing when the caller supplied explicit `bounds`: those override
    * the store's georeferencing wholesale, and re-deriving a level extent from
-   * the same metadata would quietly reinstate what was overridden.
+   * the same metadata would quietly reinstate what was overridden. Also
+   * declines a transform whose row direction contradicts the store's own
+   * declared one, since the renderer draws every level in a single row
+   * direction and cannot honor what that transform declares.
    */
   private _deriveLevelExtent(
     index: number,
@@ -588,6 +593,25 @@ export class ZarrStore {
       { nCols, nRows }
     )
     if (!extent) return undefined
+
+    // Consistency is measured against the store's own declared direction, not
+    // the renderer's: a caller's `latIsAscending` override changes how rows
+    // are drawn, not what the store's transforms declare about placement.
+    const base = this._effectiveSpatialAttrs()?.transform
+    const baseAscending = base ? base[4] > 0 : this.latIsAscending
+    if (
+      extent.latIsAscending !== null &&
+      extent.latIsAscending !== baseAscending
+    ) {
+      console.warn(
+        `[zarr-layer] Level '${
+          this.untiledLevels[index]?.asset ?? index
+        }' declares a spatial:transform whose row direction contradicts the ` +
+          `rest of the store's. Every level renders in one row direction, so ` +
+          `this one may appear flipped; its declared extent is ignored.`
+      )
+      return undefined
+    }
 
     const { xMin, xMax, yMin, yMax } = extent
     return this.isGeographic()
