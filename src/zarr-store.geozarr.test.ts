@@ -177,6 +177,16 @@ describe('CRS from the proj: convention', () => {
     expect(d.proj4).toBe('EPSG:32631')
   })
 
+  it('normalizes a lowercase proj:code before looking it up', async () => {
+    // proj4's registry is keyed on the uppercase form, and the built-in codes
+    // already accept either case.
+    const d = await describeGeoStore({
+      arrayAttrs: { 'proj:code': 'epsg:32631' },
+    })
+
+    expect(d.proj4).toBe('EPSG:32631')
+  })
+
   it('registers proj:wkt2 and reprojects through it', async () => {
     const d = await describeGeoStore({
       arrayAttrs: { 'proj:wkt2': ALBERS_WKT2 },
@@ -575,6 +585,16 @@ describe('axis identification from spatial:dimensions', () => {
       expect(d.dimIndices[untouched]?.name).toBe(stillDeclared)
     }
   )
+
+  it('lets an override repair an axis the store declared wrongly', async () => {
+    const d = await describeNamedAxes(
+      { 'spatial:dimensions': ['bogus', 'easting'] },
+      { lat: 'northing' }
+    )
+
+    expect(d.dimIndices.lat?.name).toBe('northing')
+    expect(d.dimIndices.lon?.name).toBe('easting')
+  })
 
   it('rejects a declaration naming dimensions the array does not have', async () => {
     await expect(

@@ -307,20 +307,16 @@ describe('boundsFromSpatialAttrs', () => {
     ).toBeNull()
   })
 
-  it('still uses a bbox declared alongside a rotated transform', () => {
-    const rotated = boundsFromSpatialAttrs(
-      attrs({ bbox: [0, 0, 90, 45], transform: [10, 1, 5e5, 1, -10, 5e6] }),
-      GRID
-    )
-
-    expect(rotated).toEqual({
-      xMin: 0,
-      yMin: 0,
-      xMax: 90,
-      yMax: 45,
-      // The rotation makes the row direction unusable even for orientation.
-      latIsAscending: null,
-    })
+  it('rejects a rotated grid even when a bbox encloses it', () => {
+    // The bbox bounds the rotated footprint, but the renderer maps rows and
+    // columns linearly across it, which would draw the raster unrotated and
+    // stretched to the corners.
+    expect(
+      boundsFromSpatialAttrs(
+        attrs({ bbox: [0, 0, 90, 45], transform: [10, 1, 5e5, 1, -10, 5e6] }),
+        GRID
+      )
+    ).toBeNull()
   })
 
   it('rejects a transform type it cannot map to a grid', () => {

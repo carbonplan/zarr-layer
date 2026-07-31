@@ -578,8 +578,11 @@ export class ZarrStore {
 
     if (code) {
       this._crsFromMetadata = true
-      if (proj4.defs(code)) {
-        this.proj4 = code
+      // proj4's registry is keyed on the canonical uppercase form, so a store
+      // writing "epsg:32631" needs normalizing to find it.
+      const registered = proj4.defs(code) ? code : code.toUpperCase()
+      if (proj4.defs(registered)) {
+        this.proj4 = registered
         return
       }
       console.warn(
@@ -660,8 +663,18 @@ export class ZarrStore {
     const declared = this.geoZarr?.dimensions
     if (!declared) return this.spatialDimensions
 
+    const [declaredLat, declaredLon] = declared
+    const lat = this.spatialDimensions.lat ?? declaredLat
+    const lon = this.spatialDimensions.lon ?? declaredLon
+
+    // Only the declarations actually being used are worth rejecting. An axis
+    // the caller overrode is repaired already, and a bad override is the
+    // caller's own error, which `identifyDimensionIndices` reports.
     const known = this.dimensions.map((d) => d.toLowerCase())
-    const missing = declared.filter((n) => !known.includes(n.toLowerCase()))
+    const missing = [
+      this.spatialDimensions.lat ? null : declaredLat,
+      this.spatialDimensions.lon ? null : declaredLon,
+    ].filter((n): n is string => !!n && !known.includes(n.toLowerCase()))
     if (missing.length > 0) {
       throw new Error(
         `spatial:dimensions names [${missing.join(
@@ -672,11 +685,7 @@ export class ZarrStore {
       )
     }
 
-    const [lat, lon] = declared
-    return {
-      lat: this.spatialDimensions.lat ?? lat,
-      lon: this.spatialDimensions.lon ?? lon,
-    }
+    return { lat, lon }
   }
 
   private async _computeDimIndices() {
@@ -811,8 +820,9 @@ export class ZarrStore {
     })
     if (!extent) {
       console.warn(
-        `[zarr-layer] Could not derive bounds from the store's spatial: attributes ` +
-          `(a rotated transform needs a spatial:bbox alongside it). ` +
+        `[zarr-layer] Could not derive bounds from the store's spatial: attributes. ` +
+          `A rotated transform has no axis-aligned placement this layer can render, ` +
+          `and a node-registered bbox needs a cell size to expand by. ` +
           `Reading bounds from coordinate arrays.`
       )
       return null

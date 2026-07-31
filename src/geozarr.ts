@@ -226,11 +226,18 @@ export function boundsFromSpatialAttrs(
 ): SpatialExtent | null {
   if (attrs.transformType !== 'affine') return null
 
-  // A rotated grid's corners are not its min/max, so the transform tells us
-  // nothing usable about an axis-aligned extent.
-  const rotated =
-    !!attrs.transform && (attrs.transform[1] !== 0 || attrs.transform[3] !== 0)
-  const transform = rotated ? undefined : attrs.transform
+  // Rotated grids have no axis-aligned placement at all. The renderer maps rows
+  // and columns linearly across the extent with no rotation term, so a bbox --
+  // which merely encloses the rotated footprint -- would render the raster
+  // unrotated and stretched to fill it. Decline rather than misplace it.
+  if (
+    attrs.transform &&
+    (attrs.transform[1] !== 0 || attrs.transform[3] !== 0)
+  ) {
+    return null
+  }
+
+  const transform = attrs.transform
   const latIsAscending = transform ? transform[4] > 0 : null
 
   if (attrs.bbox) {
