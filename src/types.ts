@@ -118,7 +118,7 @@ export interface ZarrLayerOptions {
   renderingMode?: '2d' | '3d'
   onLoadingStateChange?: LoadingStateCallback
   /**
-   * Proj4 definition string for reprojection (untiled mode only).
+   * Proj4 definition string for reprojection.
    * When provided, bounds are interpreted as source CRS units and data is reprojected to Web Mercator.
    * Example: "+proj=lcc +lat_1=38.5 +lat_2=38.5 +lat_0=38.5 +lon_0=-97.5 +x_0=0 +y_0=0 +R=6371229 +units=m +no_defs"
    */

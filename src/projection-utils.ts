@@ -1,7 +1,99 @@
 import proj4 from 'proj4'
-import type { MercatorBounds } from './map-utils'
+import type { MercatorBounds, XYLimits } from './map-utils'
 import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
-import type { Bounds } from './types'
+import type { Bounds, CRS } from './types'
+
+export type ProjectionKind = 'epsg4326' | 'epsg3857' | 'custom-proj4'
+
+export type ProjectionContext = {
+  kind: ProjectionKind
+  def: string
+  toMercator: ProjectionTransformer | null
+  toWGS84: ReturnType<typeof createWGS84ToSourceTransformer> | null
+  to4326: ReturnType<typeof createTransformerTo4326> | null
+}
+
+export function createProjectionContext({
+  crs,
+  proj4def,
+  xyLimits,
+}: {
+  crs: CRS
+  proj4def: string | null
+  xyLimits: XYLimits | null
+}): ProjectionContext {
+  const kind = resolveProjectionKind(crs, proj4def)
+  const def = resolveProjectionDef(crs, proj4def)
+  if (!xyLimits) {
+    return { kind, def, toMercator: null, toWGS84: null, to4326: null }
+  }
+
+  const bounds: Bounds = [
+    xyLimits.xMin,
+    xyLimits.yMin,
+    xyLimits.xMax,
+    xyLimits.yMax,
+  ]
+  const rawMercatorTransformer = createTransformer(def, bounds)
+  // Wrap the source→3857 forward so lat=±90° inputs (common for global
+  // EPSG:4326 rasters) are clamped to ±MERCATOR_LAT_LIMIT before proj4
+  // sees them. Without this, `sampleEdgesToMercatorBounds` silently
+  // drops the polar edge samples and produces too-tight mercator bounds.
+  const toMercator =
+    kind === 'epsg4326'
+      ? {
+          ...rawMercatorTransformer,
+          forward: (x: number, y: number): [number, number] =>
+            rawMercatorTransformer.forward(
+              x,
+              Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, y))
+            ),
+        }
+      : rawMercatorTransformer
+
+  return {
+    kind,
+    def,
+    toMercator,
+    toWGS84: createWGS84ToSourceTransformer(def),
+    to4326: createTransformerTo4326(def, bounds),
+  }
+}
+
+export function normalizeBuiltinProjectionDef(
+  def: string | null | undefined
+): CRS | null {
+  if (!def) return null
+  const normalized = def.trim().toUpperCase()
+  return normalized === 'EPSG:4326' || normalized === 'EPSG:3857'
+    ? normalized
+    : null
+}
+
+export function resolveProjectionKind(
+  crs: CRS,
+  proj4def: string | null
+): ProjectionKind {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) {
+    return builtinProj4Def === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+  }
+  if (proj4def?.trim()) {
+    return 'custom-proj4'
+  }
+  return crs === 'EPSG:3857' ? 'epsg3857' : 'epsg4326'
+}
+
+export function resolveProjectionDef(
+  crs: CRS,
+  proj4def: string | null
+): string {
+  const builtinProj4Def = normalizeBuiltinProjectionDef(proj4def)
+  if (builtinProj4Def) return builtinProj4Def
+  const trimmedProj4Def = proj4def?.trim()
+  if (trimmedProj4Def) return trimmedProj4Def
+  return crs
+}
 
 /**
  * Clamp WGS84 lon/lat to the source CRS's valid input range so a subsequent

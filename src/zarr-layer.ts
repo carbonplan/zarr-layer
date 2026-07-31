@@ -135,6 +135,7 @@ export class ZarrLayer {
   private tileNeedsRender: boolean = true
 
   private projectionChangeHandler: (() => void) | null = null
+  private mapRemoveHandler: (() => void) | null = null
   private resolveGl(
     map: MapLike,
     gl: WebGL2RenderingContext | WebGLRenderingContext | null
@@ -349,14 +350,7 @@ export class ZarrLayer {
     this.customFrag = customFrag
     this.customUniforms = uniforms || {}
 
-    this.bandNames = getBands(variable, this.normalizedSelector)
-    if (this.bandNames.length > 1 || customFrag) {
-      this.customShaderConfig = {
-        bands: this.bandNames,
-        customFrag: customFrag,
-        customUniforms: this.customUniforms,
-      }
-    }
+    this.refreshCustomShaderConfig()
 
     if (fillValue !== undefined) this._fillValue = fillValue
     this.onLoadingStateChange = onLoadingStateChange
@@ -364,6 +358,25 @@ export class ZarrLayer {
     this.transformRequest = transformRequest
     this.customStore = store
     this.renderPoles = renderPoles
+  }
+
+  /**
+   * Recompute the band list and the shader variant it implies. More than one
+   * band, or any custom fragment, means the shader samples per-band textures
+   * rather than the main one, which the renderer needs to know so it can skip
+   * building data only the main texture would consume.
+   */
+  private refreshCustomShaderConfig(): void {
+    this.bandNames = getBands(this.variable, this.normalizedSelector)
+    this.customShaderConfig =
+      this.bandNames.length > 1 || this.customFrag
+        ? {
+            bands: this.bandNames,
+            customFrag: this.customFrag,
+            customUniforms: this.customUniforms,
+          }
+        : null
+    this.regionRenderer?.setRendersFromBandTextures(!!this.customShaderConfig)
   }
 
   private emitLoadingState(): void {
@@ -485,16 +498,7 @@ export class ZarrLayer {
     this.selector = selector
     this.normalizedSelector = normalized
 
-    this.bandNames = getBands(this.variable, this.normalizedSelector)
-    if (this.bandNames.length > 1 || this.customFrag) {
-      this.customShaderConfig = {
-        bands: this.bandNames,
-        customFrag: this.customFrag,
-        customUniforms: this.customUniforms,
-      }
-    } else {
-      this.customShaderConfig = null
-    }
+    this.refreshCustomShaderConfig()
 
     if (this.regionRenderer) {
       await this.regionRenderer.setSelector(this.normalizedSelector)
@@ -516,6 +520,15 @@ export class ZarrLayer {
     this.map = map
     const resolvedGl = this.resolveGl(map, gl)
     this.gl = resolvedGl
+
+    // `map.remove()` tears down the style without calling `onRemove`, so the
+    // layer releases its store and GPU resources off the map's own event.
+    // Registered before initialization so a failed init still leaves a hook.
+    this.mapRemoveHandler = () => this._disposeResources(resolvedGl)
+    if (typeof map.on === 'function') {
+      map.on('remove', this.mapRemoveHandler)
+    }
+
     this.invalidate = () => {
       this.tileNeedsRender = true
       if (map.triggerRepaint) map.triggerRepaint()
@@ -593,6 +606,9 @@ export class ZarrLayer {
     // Lock immediately after the renderer captures the value, before async initialize()
     this.dataScaleLocked = true
 
+    // The shader variant was resolved during initialize(), before this
+    // renderer existed, so hand it over before the first fetch.
+    this.regionRenderer.setRendersFromBandTextures(!!this.customShaderConfig)
     this.regionRenderer.setLoadingCallback(this.handleChunkLoadingChange)
     await this.regionRenderer.initialize()
 
@@ -637,16 +653,7 @@ export class ZarrLayer {
       this.normalizedSelector = normalizeSelector(this.selector)
       await this.loadInitialDimensionValues()
 
-      this.bandNames = getBands(this.variable, this.normalizedSelector)
-      if (this.bandNames.length > 1 || this.customFrag) {
-        this.customShaderConfig = {
-          bands: this.bandNames,
-          customFrag: this.customFrag,
-          customUniforms: this.customUniforms,
-        }
-      } else {
-        this.customShaderConfig = null
-      }
+      this.refreshCustomShaderConfig()
     } catch (err) {
       // Clean up partially-initialized store before re-throwing
       if (this.zarrStore) {
@@ -867,6 +874,7 @@ export class ZarrLayer {
   private _disposeResources(
     gl: WebGL2RenderingContext | WebGLRenderingContext
   ): void {
+    if (this.isRemoved) return
     this.isRemoved = true
 
     this.renderer?.dispose()
@@ -882,15 +890,18 @@ export class ZarrLayer {
       this.zarrStore = null
     }
 
-    if (
-      this.map &&
-      this.projectionChangeHandler &&
-      typeof this.map.off === 'function'
-    ) {
-      this.map.off('projectionchange', this.projectionChangeHandler)
-      this.map.off('style.load', this.projectionChangeHandler)
-      this.map.off('move', this.projectionChangeHandler)
+    if (this.map && typeof this.map.off === 'function') {
+      if (this.projectionChangeHandler) {
+        this.map.off('projectionchange', this.projectionChangeHandler)
+        this.map.off('style.load', this.projectionChangeHandler)
+        this.map.off('move', this.projectionChangeHandler)
+      }
+      if (this.mapRemoveHandler) {
+        this.map.off('remove', this.mapRemoveHandler)
+      }
     }
+    this.projectionChangeHandler = null
+    this.mapRemoveHandler = null
   }
 
   onRemove(_map: MapLike, gl: WebGL2RenderingContext | WebGLRenderingContext) {
