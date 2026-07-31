@@ -158,13 +158,11 @@ export async function queryData(
   options?: QueryOptions
 ): Promise<QueryResult> {
   const desc = context.zarrStore.describe()
-  const sourceBounds: Bounds | null = context.xyLimits
-    ? [
-        context.xyLimits.xMin,
-        context.xyLimits.yMin,
-        context.xyLimits.xMax,
-        context.xyLimits.yMax,
-      ]
+  // Queries index into the active level, so they must map through whatever
+  // extent that level is drawn against.
+  const queryLimits = context.level?.xyLimits ?? context.xyLimits
+  const sourceBounds: Bounds | null = queryLimits
+    ? [queryLimits.xMin, queryLimits.yMin, queryLimits.xMax, queryLimits.yMax]
     : null
   const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
     desc.dimensions,

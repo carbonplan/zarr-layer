@@ -623,9 +623,41 @@ function levelShapeStore(
   })
 }
 
+/**
+ * `bounds` defaults to the dataset extent for layouts that declare only
+ * shapes. Cases exercising per-level extents pass `null`, since explicit
+ * bounds deliberately suppress them.
+ */
+async function describeLevelsWithStore(
+  layout: unknown[],
+  {
+    rootAttrs = {},
+    bounds = [-180, -90, 180, 90] as [number, number, number, number] | null,
+  }: {
+    rootAttrs?: Record<string, unknown>
+    bounds?: [number, number, number, number] | null
+  } = {}
+) {
+  const store = new ZarrStore({
+    customStore: levelShapeStore(layout, rootAttrs),
+    variable: 'temperature',
+    version: 3,
+    ...(bounds ? { bounds } : {}),
+    latIsAscending: false,
+  })
+  await store.initialized
+  return { d: store.describe(), store }
+}
+
 async function describeLevels(
   layout: unknown[],
-  rootAttrs: Record<string, unknown> = {}
+  {
+    rootAttrs = {},
+    bounds = [-180, -90, 180, 90] as [number, number, number, number] | null,
+  }: {
+    rootAttrs?: Record<string, unknown>
+    bounds?: [number, number, number, number] | null
+  } = {}
 ) {
   const { keys, store: recorded } = recordReads(
     levelShapeStore(layout, rootAttrs)
@@ -634,7 +666,7 @@ async function describeLevels(
     customStore: recorded,
     variable: 'temperature',
     version: 3,
-    bounds: [-180, -90, 180, 90],
+    ...(bounds ? { bounds } : {}),
     latIsAscending: false,
   })
   await store.initialized
@@ -907,18 +939,21 @@ describe('per-level extents from the layout entries', () => {
   it('gives each level the extent its own transform describes', async () => {
     // Level 1 is floor-divided: 4 columns of 90 covers 360, but 2 columns of
     // 180 starting at -180 stops at 180 -- while a 3-column level would not.
-    const { d } = await describeLevels([
-      {
-        asset: '0',
-        'spatial:transform': GLOBAL_TRANSFORM,
-        'spatial:shape': [4, 8],
-      },
-      {
-        asset: '1',
-        'spatial:transform': [90, 0, -180, 0, -90, 90],
-        'spatial:shape': [2, 3],
-      },
-    ])
+    const { d } = await describeLevels(
+      [
+        {
+          asset: '0',
+          'spatial:transform': GLOBAL_TRANSFORM,
+          'spatial:shape': [4, 8],
+        },
+        {
+          asset: '1',
+          'spatial:transform': [90, 0, -180, 0, -90, 90],
+          'spatial:shape': [2, 3],
+        },
+      ],
+      { bounds: null }
+    )
 
     expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
     // 3 columns x 90 = 270 wide, not the dataset's 360.
@@ -931,14 +966,17 @@ describe('per-level extents from the layout entries', () => {
   })
 
   it('leaves a level with no declared transform without one', async () => {
-    const { d } = await describeLevels([
-      {
-        asset: '0',
-        'spatial:transform': GLOBAL_TRANSFORM,
-        'spatial:shape': [4, 8],
-      },
-      { asset: '1', 'spatial:shape': [2, 4] },
-    ])
+    const { d } = await describeLevels(
+      [
+        {
+          asset: '0',
+          'spatial:transform': GLOBAL_TRANSFORM,
+          'spatial:shape': [4, 8],
+        },
+        { asset: '1', 'spatial:shape': [2, 4] },
+      ],
+      { bounds: null }
+    )
 
     expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
     expect(d.untiledLevels[1].xyLimits).toBeUndefined()
@@ -962,12 +1000,80 @@ describe('a level extent competing with a dataset bbox', () => {
           'spatial:shape': [2, 3],
         },
       ],
-      { 'spatial:bbox': [-180, -90, 180, 90] }
+      { rootAttrs: { 'spatial:bbox': [-180, -90, 180, 90] }, bounds: null }
     )
 
     expect(d.untiledLevels[1].xyLimits).toEqual({
       xMin: -180,
       xMax: 90,
+      yMin: -90,
+      yMax: 90,
+    })
+  })
+})
+
+describe('explicit bounds against per-level extents', () => {
+  it('suppresses per-level extents when the caller supplies bounds', async () => {
+    // `bounds` overrides the store's georeferencing. Re-deriving level extents
+    // from the same metadata would quietly reinstate what was overridden.
+    const { keys, store: recorded } = recordReads(
+      levelShapeStore([
+        {
+          asset: '0',
+          'spatial:transform': GLOBAL_TRANSFORM,
+          'spatial:shape': [4, 8],
+        },
+        {
+          asset: '1',
+          'spatial:transform': [90, 0, -180, 0, -90, 90],
+          'spatial:shape': [2, 3],
+        },
+      ])
+    )
+    const store = new ZarrStore({
+      customStore: recorded,
+      variable: 'temperature',
+      version: 3,
+      bounds: [-10, -10, 10, 10],
+      latIsAscending: false,
+    })
+    await store.initialized
+    const d = store.describe()
+
+    expect(d.xyLimits).toEqual({ xMin: -10, xMax: 10, yMin: -10, yMax: 10 })
+    expect(d.untiledLevels.every((l) => l.xyLimits === undefined)).toBe(true)
+    expect(keys.length).toBeGreaterThan(0)
+  })
+})
+
+describe('a level transform without a declared shape', () => {
+  it('derives the extent once the real shape is loaded', async () => {
+    // The fixture's arrays are 512x1024 and 256x512, so a global extent means
+    // cells of 360/1024 and 360/512 degrees.
+    const { d, store } = await describeLevelsWithStore(
+      [
+        {
+          asset: '0',
+          'spatial:transform': [0.3515625, 0, -180, 0, -0.3515625, 90],
+          'spatial:shape': [512, 1024],
+        },
+        // Transform but no spatial:shape: the extent cannot be worked out
+        // until the array itself is opened.
+        {
+          asset: '1',
+          'spatial:transform': [0.703125, 0, -180, 0, -0.703125, 90],
+        },
+      ],
+      { bounds: null }
+    )
+
+    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+
+    await store.getUntiledLevelMetadata('1')
+
+    expect(d.untiledLevels[1].xyLimits).toEqual({
+      xMin: -180,
+      xMax: 180,
       yMin: -90,
       yMax: 90,
     })

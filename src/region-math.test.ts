@@ -482,6 +482,45 @@ describe('computeRegionMercatorBounds', () => {
   })
 })
 
+describe('getVisibleRegions with per-level extents', () => {
+  it('generates candidates against the extent it verifies with', () => {
+    // The level covers the eastern hemisphere across 20 region columns, and
+    // the viewport sits over its western end. Index math run against the
+    // dataset extent points at columns 10-14; the margin widens that to 8-16,
+    // so the leading columns are never even considered and the west edge of
+    // the level goes missing.
+    const levelLimits = { xMin: 0, xMax: 180, yMin: -90, yMax: 90 }
+    const regions = getVisibleRegions({
+      map: {
+        getBounds: () => ({
+          getWest: () => 1,
+          getEast: () => 89,
+          toArray: () => [
+            [1, -89],
+            [89, 89],
+          ],
+        }),
+        getZoom: () => 2,
+      } as never,
+      xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+      levelMeta: {
+        width: 100,
+        height: 100,
+        regionSize: [5, 5],
+        xyLimits: levelLimits,
+      },
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: levelLimits,
+      }),
+      latIsAscending: false,
+    })
+
+    expect(regions.some((r) => r.regionX === 0)).toBe(true)
+  })
+})
+
 describe('getRegionBounds with per-level extents', () => {
   const DATASET = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 }
 

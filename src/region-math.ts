@@ -68,6 +68,9 @@ export function getVisibleRegions({
   const { width, height, regionSize } = levelMeta
   const [[west, south], [east, north]] = bounds
   const [regionH, regionW] = regionSize
+  // Candidate index math and the verification below must agree on the extent,
+  // or a level placed against its own bounds can generate no candidates at all.
+  const limits = levelMeta.xyLimits ?? xyLimits
   // For projected data, use a two-pass approach:
   // 1. Forward-transform viewport edges to source CRS to find candidate
   //    regions via index math (O(1) proj4 cost, may include false
@@ -86,7 +89,7 @@ export function getVisibleRegions({
     regionH,
     width,
     height,
-    xyLimits,
+    xyLimits: limits,
     latIsAscending,
   })
 

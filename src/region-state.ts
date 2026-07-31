@@ -101,5 +101,5 @@ export interface LevelRuntime {
 
 export type QueryLevelSnapshot = Pick<
   LevelRuntime,
-  'index' | 'zarrArray' | 'width' | 'height'
+  'index' | 'zarrArray' | 'width' | 'height' | 'xyLimits'
 >

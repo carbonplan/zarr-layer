@@ -411,6 +411,18 @@ export class ZarrStore {
       }
     }
 
+    // A level may declare its transform without a `spatial:shape`, in which
+    // case its extent can only be worked out once the real shape is known.
+    const index = this.untiledLevels.findIndex((l) => l.asset === levelAsset)
+    const level = this.untiledLevels[index]
+    const { lat, lon } = this.dimIndices
+    if (level && !level.xyLimits && lat && lon) {
+      level.xyLimits = this._deriveLevelExtent(index, [
+        array.shape[lat.index],
+        array.shape[lon.index],
+      ])
+    }
+
     return {
       shape: array.shape,
       chunks: array.chunks,
@@ -544,32 +556,47 @@ export class ZarrStore {
    * dataset extent instead of its own stretches it by that difference.
    */
   private _applyDeclaredLevelExtents(): void {
-    const attrs = this.geoZarr
-    if (!attrs) return
-
-    this._declaredLevelTransforms.forEach((transform, i) => {
-      const level = this.untiledLevels[i]
+    this._declaredLevelTransforms.forEach((_, i) => {
       const shape = this._declaredLevelShapes[i]
-      if (!level || !transform || !shape) return
-
-      const [nRows, nCols] = shape
-      // The level's own transform places it; a dataset-wide bbox describes the
-      // base level and would defeat the point.
-      const extent = boundsFromSpatialAttrs(
-        { ...attrs, transform, bbox: undefined },
-        { nCols, nRows }
-      )
-      if (!extent) return
-
-      const { xMin, xMax, yMin, yMax } = extent
-      level.xyLimits = this.isGeographic()
-        ? {
-            yMin,
-            yMax,
-            ...normalizeLongitudeExtent(xMin, xMax, (xMax - xMin) / nCols),
-          }
-        : { xMin, xMax, yMin, yMax }
+      if (!shape) return
+      const extent = this._deriveLevelExtent(i, shape)
+      if (extent) this.untiledLevels[i].xyLimits = extent
     })
+  }
+
+  /**
+   * The extent level `index` covers, from its own `spatial:transform` and the
+   * given `[rows, cols]`.
+   *
+   * Returns nothing when the caller supplied explicit `bounds`: those override
+   * the store's georeferencing wholesale, and re-deriving a level extent from
+   * the same metadata would quietly reinstate what was overridden.
+   */
+  private _deriveLevelExtent(
+    index: number,
+    shape: [number, number]
+  ): XYLimits | undefined {
+    const attrs = this.geoZarr
+    const transform = this._declaredLevelTransforms[index]
+    if (!attrs || !transform || this.explicitBounds) return undefined
+
+    const [nRows, nCols] = shape
+    // The level's own transform places it; a dataset-wide bbox describes the
+    // base level and would defeat the point.
+    const extent = boundsFromSpatialAttrs(
+      { ...attrs, transform, bbox: undefined },
+      { nCols, nRows }
+    )
+    if (!extent) return undefined
+
+    const { xMin, xMax, yMin, yMax } = extent
+    return this.isGeographic()
+      ? {
+          yMin,
+          yMax,
+          ...normalizeLongitudeExtent(xMin, xMax, (xMax - xMin) / nCols),
+        }
+      : { xMin, xMax, yMin, yMax }
   }
 
   /**

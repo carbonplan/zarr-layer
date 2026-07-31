@@ -1222,6 +1222,7 @@ export class RegionRenderer {
               zarrArray: activeLevel.zarrArray,
               width: activeLevel.width,
               height: activeLevel.height,
+              xyLimits: activeLevel.xyLimits,
             }
           : null,
         projection: this.projection,
