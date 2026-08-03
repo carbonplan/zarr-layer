@@ -229,15 +229,26 @@ export class ZarrStore {
     this.proj4 = proj4 ?? null
     this._proj4Override = !!proj4
     if (crs) {
-      const normalized = crs.toUpperCase()
-      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
-        this.crs = normalized
+      const builtin =
+        crs.trim().toUpperCase() === CRS84
+          ? 'EPSG:4326'
+          : normalizeBuiltinProjectionDef(crs)
+      if (builtin) {
+        this.crs = builtin
         this._crsOverride = true
       } else if (!this.proj4) {
-        console.warn(
-          `[zarr-layer] CRS "${crs}" requires 'proj4' to render correctly. ` +
-            `Falling back to inferred CRS.`
-        )
+        const registered = this._registeredProjectionCode(crs)
+        if (registered) {
+          this.proj4 = registered
+          this._crsOverride = true
+        } else {
+          console.warn(
+            `[zarr-layer] CRS "${crs}" is not one proj4 has a definition ` +
+              `for. Pass 'proj4', or register the code first with ` +
+              `proj4.defs('${crs}', '<proj4 string>'). Falling back to ` +
+              `inferred CRS.`
+          )
+        }
       }
     }
     this.transformRequest = transformRequest
@@ -648,6 +659,17 @@ export class ZarrStore {
   }
 
   /**
+   * A code proj4 can already transform under: one of its built-in definitions
+   * (all UTM zones among them) or one registered with `proj4.defs` before the
+   * layer was created. The registry is keyed on the canonical uppercase form,
+   * so "epsg:32631" needs normalizing to be found.
+   */
+  private _registeredProjectionCode(code: string): string | null {
+    const key = proj4.defs(code) ? code : code.trim().toUpperCase()
+    return proj4.defs(key) ? key : null
+  }
+
+  /**
    * Resolve the CRS the store declares through the `proj:` convention, falling
    * back to the CF grid-mapping variable when it declares none.
    *
@@ -695,10 +717,8 @@ export class ZarrStore {
 
     if (code) {
       this._crsFromMetadata = true
-      // proj4's registry is keyed on the canonical uppercase form, so a store
-      // writing "epsg:32631" needs normalizing to find it.
-      const registered = proj4.defs(code) ? code : code.toUpperCase()
-      if (proj4.defs(registered)) {
+      const registered = this._registeredProjectionCode(code)
+      if (registered) {
         this.proj4 = registered
         return
       }

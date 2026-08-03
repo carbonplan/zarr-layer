@@ -281,6 +281,46 @@ describe('CRS resolution precedence', () => {
   })
 })
 
+describe('the crs option without a proj4 string', () => {
+  it('resolves through proj4 built-ins', async () => {
+    const d = await describeGeoStore({}, { crs: 'EPSG:32631' })
+
+    expect(d.proj4).toBe('EPSG:32631')
+  })
+
+  it('normalizes a lowercase code before looking it up', async () => {
+    const d = await describeGeoStore({}, { crs: 'epsg:32631' })
+
+    expect(d.proj4).toBe('EPSG:32631')
+  })
+
+  it('wins over the store attributes', async () => {
+    const d = await describeGeoStore(
+      { arrayAttrs: { 'proj:wkt2': ALBERS_WKT2 } },
+      { crs: 'EPSG:32631' }
+    )
+
+    expect(d.proj4).toBe('EPSG:32631')
+  })
+
+  it('resolves a definition the consumer registered', async () => {
+    proj4.defs('TEST:ALBERS', ALBERS_PROJ4)
+    const d = await describeGeoStore({}, { crs: 'TEST:ALBERS' })
+
+    expect(d.proj4).toBe('TEST:ALBERS')
+  })
+
+  it('warns naming the proj4.defs remedy for a code proj4 does not know', async () => {
+    const warn = silenceWarnings()
+    const d = await describeGeoStore({}, { crs: 'EPSG:5070' })
+
+    expect(d.proj4).toBeNull()
+    const message = warn.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(message).toContain('EPSG:5070')
+    expect(message).toContain('proj4.defs')
+  })
+})
+
 describe('an unresolvable proj:code', () => {
   it('warns naming the code and the proj4.defs remedy', async () => {
     const warn = silenceWarnings()
