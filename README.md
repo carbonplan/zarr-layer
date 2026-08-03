@@ -253,7 +253,7 @@ new ZarrLayer({
 
 ## custom projections
 
-For datasets in non-standard projections (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. Any code proj4 ships a definition for (all UTM zones, among others) or that you have registered with `proj4.defs` resolves with no further configuration; for anything else, provide a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
+For datasets in projections beyond the two native CRSs (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. Any code proj4 ships a definition for (all UTM zones, among others) or that you have registered with `proj4.defs` resolves with no further configuration; for anything else, provide a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
 
 None of this is needed for a store carrying the `proj` and `spatial` conventions — see [self-describing stores](#self-describing-stores).
 
