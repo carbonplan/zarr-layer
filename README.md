@@ -20,15 +20,15 @@ Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js
 
 A store that carries the zarr [`proj`](https://github.com/zarr-conventions/geo-proj) and [`spatial`](https://github.com/zarr-conventions/spatial) conventions needs no configuration: the layer reads its CRS, extent, orientation and axis names straight out of the metadata, with no coordinate-array reads at all.
 
-| Attribute                     | What it settles                                                                                                                                                         |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `proj:code`                   | The CRS by identifier. `EPSG:4326`, `EPSG:3857` and `OGC:CRS84` render natively; anything proj4 has a built-in definition for (all UTM zones, among others) reprojects. |
-| `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                                                  |
-| `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                                                |
-| `spatial:bbox`                | The extent, when the transform is absent or rotated.                                                                                                                    |
-| `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                                                    |
-| `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                                                          |
-| `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                                            |
+| Attribute                     | What it settles                                                                                                                              |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `proj:code`                   | The CRS by identifier: `EPSG:4326`, `EPSG:3857`, `OGC:CRS84`, or anything proj4 has a built-in definition for (all UTM zones, among others). |
+| `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                       |
+| `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                     |
+| `spatial:bbox`                | The extent, when the transform is absent or rotated.                                                                                         |
+| `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                         |
+| `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                               |
+| `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                 |
 
 Declared attributes are authoritative. If a store publishes them, they are used as-is rather than checked against its coordinate arrays, so a store whose attributes disagree with its own data will render wrong rather than be quietly corrected.
 
