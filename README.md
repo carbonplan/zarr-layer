@@ -123,7 +123,7 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
-| crs | string | auto | CRS identifier. `EPSG:4326`/`EPSG:3857` render natively; any other code proj4 has a definition for (all UTM zones, among others) or that was registered with `proj4.defs` reprojects without a `proj4` string. |
+| crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Any code proj4 has a definition for (all UTM zones, among others) or that was registered with `proj4.defs` works without a `proj4` string. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
 | bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857). These are interpreted as edge bounds (not center-to-center) |
 | latIsAscending | boolean | auto | Latitude orientation |
@@ -253,7 +253,7 @@ new ZarrLayer({
 
 ## custom projections
 
-For datasets in projections beyond the two native CRSs (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. Any code proj4 ships a definition for (all UTM zones, among others) or that you have registered with `proj4.defs` resolves with no further configuration; for anything else, provide a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
+Datasets in EPSG:4326 or EPSG:3857 need no CRS configuration. For anything else (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. Any code proj4 ships a definition for (all UTM zones, among others) or that you have registered with `proj4.defs` resolves with no further configuration; for anything else, provide a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
 
 None of this is needed for a store carrying the `proj` and `spatial` conventions — see [self-describing stores](#self-describing-stores).
 
