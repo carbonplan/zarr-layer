@@ -673,9 +673,11 @@ export class ZarrStore {
    * Resolve the CRS the store declares through the `proj:` convention, falling
    * back to the CF grid-mapping variable when it declares none.
    *
-   * A `proj:code` naming one of the two built-in CRSs is honored first: those
-   * render through a native path that needs no proj4 transformer, and a store
-   * naming one has already said everything we need. WKT2 and PROJJSON come
+   * A `proj:code` naming one of the two built-in CRSs is honored first: it
+   * keeps `crs` set rather than `proj4`, which is what the geographic
+   * behaviors -- longitude folding, antimeridian query splitting, pole
+   * rendering -- key off, and it needs no synthetic registration for a CRS
+   * proj4 already knows. WKT2 and PROJJSON come
    * next, since they describe the CRS in full and proj4 parses both without a
    * lookup table. Only then does an unfamiliar code get looked up against
    * proj4's built-in definitions.
