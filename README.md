@@ -25,7 +25,7 @@ A store that carries the zarr [`proj`](https://github.com/zarr-conventions/geo-p
 | `proj:code`                   | The CRS by identifier: `EPSG:4326`, `EPSG:3857`, `OGC:CRS84`, or anything proj4 has a built-in definition for (all UTM zones, among others). |
 | `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                       |
 | `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                     |
-| `spatial:bbox`                | The extent, when the transform is absent or rotated.                                                                                         |
+| `spatial:bbox`                | The extent, winning over the transform's when both are declared.                                                                             |
 | `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                         |
 | `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                               |
 | `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                 |
