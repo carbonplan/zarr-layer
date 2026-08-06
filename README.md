@@ -20,30 +20,21 @@ Supports v2 and v3 zarr stores via [zarrita](https://github.com/manzt/zarrita.js
 
 A store that carries the zarr [`proj`](https://github.com/zarr-conventions/geo-proj) and [`spatial`](https://github.com/zarr-conventions/spatial) conventions needs no configuration: the layer reads its CRS, extent, orientation and axis names straight out of the metadata, with no coordinate-array reads at all.
 
-| Attribute                     | What it settles                                                                                                                              |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `proj:code`                   | The CRS by identifier: `EPSG:4326`, `EPSG:3857`, `OGC:CRS84`, or anything proj4 has a built-in definition for (all UTM zones, among others). |
-| `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                       |
-| `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                     |
-| `spatial:bbox`                | The extent, winning over the transform's when both are declared.                                                                             |
-| `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                         |
-| `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                               |
-| `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                 |
+| Attribute                     | What it settles                                                                                                                                          |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `proj:code`                   | The CRS by identifier: `EPSG:4326`, `EPSG:3857`, `OGC:CRS84`, the WGS84 UTM zones (`EPSG:326xx`/`EPSG:327xx`), or any code registered with `proj4.defs`. |
+| `proj:wkt2` / `proj:projjson` | The CRS in full, for codes proj4 doesn't ship. No lookup table needed.                                                                                   |
+| `spatial:transform`           | The extent and which edge row 0 sits on.                                                                                                                 |
+| `spatial:bbox`                | The extent, winning over the transform's when both are declared.                                                                                         |
+| `spatial:registration`        | Whether the declared coordinates fall on cell edges (`pixel`, the default) or cell centers (`node`).                                                     |
+| `spatial:dimensions`          | Which array dimensions are y and x, for axes not named something recognizable.                                                                           |
+| `spatial:shape`               | Each pyramid level's size, on `multiscales.layout` entries, sparing an array open per level.                                                             |
 
 Declared attributes are authoritative. If a store publishes them, they are used as-is rather than checked against its coordinate arrays, so a store whose attributes disagree with its own data will render wrong rather than be quietly corrected.
 
 Constructor options always win over what the store declares: `crs`, `proj4`, `bounds`, `latIsAscending` and `spatialDimensions` each override the corresponding attribute.
 
-For a store declaring a `proj:code` proj4 doesn't know and no `proj:wkt2` or `proj:projjson`, the layer warns and leaves the CRS unresolved. Register the definition before creating the layer:
-
-```ts
-import proj4 from 'proj4'
-
-proj4.defs(
-  'EPSG:5070',
-  '+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=NAD83 +units=m'
-)
-```
+For a store declaring a `proj:code` proj4 doesn't know and no `proj:wkt2` or `proj:projjson`, the layer warns and leaves the CRS unresolved. Pass the definition as the `proj4` prop, or register the code with proj4 to have the store's own declaration resolve (see [registering a CRS](#registering-a-crs)).
 
 Where these attributes are absent the layer falls back to what it always did: reading the coordinate arrays for extent and orientation, matching dimension names against a list of common aliases, and inferring the CRS from the magnitude of the bounds. A CF `grid_mapping` variable is read for `crs_wkt` when no `proj:` attribute is present.
 
@@ -123,7 +114,7 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
-| crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Any code proj4 has a definition for (all UTM zones, among others) or that was registered with `proj4.defs` works without a `proj4` string. |
+| crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Codes proj4 defines (the WGS84 UTM zones, among others) or that were registered with `proj4.defs` work without a `proj4` string. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
 | bounds | array | auto | `[xMin, yMin, xMax, yMax]` in source CRS units (degrees for EPSG:4326, meters for EPSG:3857). These are interpreted as edge bounds (not center-to-center) |
 | latIsAscending | boolean | auto | Latitude orientation |
@@ -253,9 +244,9 @@ new ZarrLayer({
 
 ## custom projections
 
-Datasets in EPSG:4326 or EPSG:3857 need no CRS configuration. For anything else (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. Any code proj4 ships a definition for (all UTM zones, among others) or that you have registered with `proj4.defs` resolves with no further configuration; for anything else, provide a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
+Datasets in EPSG:4326 or EPSG:3857 need no CRS configuration. For anything else (e.g., Lambert Conformal Conic, UTM), set `crs` to the code. It resolves with no further configuration if proj4 defines that code or you registered it yourself; otherwise pass a `proj4` definition string alongside it, or the renderer will warn and fall back to inferred CRS. Specifying `bounds` in source CRS units is recommended for performance (otherwise derived from coordinate arrays).
 
-None of this is needed for a store carrying the `proj` and `spatial` conventions — see [self-describing stores](#self-describing-stores).
+None of this is needed for a store carrying the `proj` and `spatial` conventions (see [self-describing stores](#self-describing-stores)).
 
 ```ts
 new ZarrLayer({
@@ -271,6 +262,22 @@ new ZarrLayer({
 ```
 
 The data will be reprojected to Web Mercator for display using GPU-accelerated mesh reprojection powered by [@developmentseed/raster-reproject](https://github.com/developmentseed/deck.gl-raster). Find proj4 strings at [epsg.io](https://epsg.io/) or in your dataset's metadata.
+
+### registering a CRS
+
+proj4 defines only a small set of codes out of the box: `EPSG:4326`, `EPSG:4269`, `EPSG:3857` (with its aliases), `EPSG:5041`, `EPSG:5042`, and the 120 WGS84 UTM zones (`EPSG:32601`-`EPSG:32660` north, `EPSG:32701`-`EPSG:32760` south). Everything else needs a definition from you, including national grids like `EPSG:27700` and `EPSG:2154`, and the UTM zones on other datums, which look built-in but aren't: NAD83 (`EPSG:269xx`) and ETRS89 (`EPSG:258xx`) are separate codes from their WGS84 counterparts.
+
+Pass it as the `proj4` prop, which takes precedence over `crs` and over anything the store declares. Or register it with proj4 before creating the layer, which lets a store's own `proj:code` resolve with no per-layer configuration:
+
+```ts
+import proj4 from 'proj4'
+
+proj4.defs('EPSG:25833', '+proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs')
+```
+
+Registering pays off only when you don't know which store is in which CRS ahead of time; otherwise the prop is simpler. `proj4.defs` also accepts WKT2 and PROJJSON. Note that zarr-layer imports proj4 rather than bundling its own copy, so your `proj4` import is the registry it reads, as long as your bundler resolves both to one copy.
+
+A store declaring `proj:wkt2` or `proj:projjson` carries its own definition and needs none of this.
 
 ## queries
 
