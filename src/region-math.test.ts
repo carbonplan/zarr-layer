@@ -359,8 +359,6 @@ describe('getVisibleRegions', () => {
 describe('selectLevelForZoom', () => {
   const level = (asset: string, lonSize: number): UntiledLevel => ({
     asset,
-    scale: [1, 1],
-    translation: [0, 0],
     shape: [lonSize / 2, lonSize],
   })
   const projection4326 = createProjectionContext({
@@ -481,5 +479,96 @@ describe('computeRegionMercatorBounds', () => {
     expect(computeRegionMercatorBounds(meters, p3857)).toEqual(
       boundsToMercatorNorm(meters, 'EPSG:3857')
     )
+  })
+})
+
+describe('getVisibleRegions with per-level extents', () => {
+  it('generates candidates against the extent it verifies with', () => {
+    // The level covers the eastern hemisphere across 20 region columns, and
+    // the viewport sits over its western end. Index math run against the
+    // dataset extent points at columns 10-14; the margin widens that to 8-16,
+    // so the leading columns are never even considered and the west edge of
+    // the level goes missing.
+    const levelLimits = { xMin: 0, xMax: 180, yMin: -90, yMax: 90 }
+    const regions = getVisibleRegions({
+      map: {
+        getBounds: () => ({
+          getWest: () => 1,
+          getEast: () => 89,
+          toArray: () => [
+            [1, -89],
+            [89, 89],
+          ],
+        }),
+        getZoom: () => 2,
+      } as never,
+      xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+      levelMeta: {
+        width: 100,
+        height: 100,
+        regionSize: [5, 5],
+        xyLimits: levelLimits,
+      },
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: levelLimits,
+      }),
+      latIsAscending: false,
+    })
+
+    expect(regions.some((r) => r.regionX === 0)).toBe(true)
+  })
+})
+
+describe('getRegionBounds with per-level extents', () => {
+  const DATASET = { xMin: 0, xMax: 100, yMin: 0, yMax: 100 }
+
+  it('places a region against the dataset extent by default', () => {
+    expect(
+      getRegionBounds({
+        regionX: 0,
+        regionY: 0,
+        levelMeta: { width: 10, height: 10, regionSize: [10, 10] },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 0, xMax: 100, yMin: 0, yMax: 100 })
+  })
+
+  it("prefers the level's own extent when it declares one", () => {
+    // A floor-divided level covering 90 of the dataset's 100 units must not be
+    // stretched over the full extent.
+    expect(
+      getRegionBounds({
+        regionX: 0,
+        regionY: 0,
+        levelMeta: {
+          width: 10,
+          height: 10,
+          regionSize: [10, 10],
+          xyLimits: { xMin: 0, xMax: 90, yMin: 0, yMax: 90 },
+        },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 0, xMax: 90, yMin: 0, yMax: 90 })
+  })
+
+  it('scales sub-regions within the level extent', () => {
+    expect(
+      getRegionBounds({
+        regionX: 1,
+        regionY: 0,
+        levelMeta: {
+          width: 10,
+          height: 10,
+          regionSize: [10, 5],
+          xyLimits: { xMin: 0, xMax: 90, yMin: 0, yMax: 90 },
+        },
+        xyLimits: DATASET,
+        latIsAscending: true,
+      })
+    ).toEqual({ xMin: 45, xMax: 90, yMin: 0, yMax: 90 })
   })
 })

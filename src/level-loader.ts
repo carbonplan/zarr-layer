@@ -4,7 +4,7 @@ import type { NormalizedSelector } from './types'
 
 type ResolvedLevel = Pick<
   LevelRuntime,
-  'zarrArray' | 'width' | 'height' | 'regionSize'
+  'zarrArray' | 'width' | 'height' | 'regionSize' | 'xyLimits'
 > & { reusedArray: boolean }
 
 export type LevelLoaderContext = {
@@ -119,6 +119,7 @@ export class LevelLoader {
         width: resolved.width,
         height: resolved.height,
         regionSize: resolved.regionSize,
+        xyLimits: resolved.xyLimits,
         baseSliceArgs,
         baseMultiValueDims,
       }

@@ -218,6 +218,70 @@ describe('queryData', () => {
  * coordinates taken from the first strip.
  */
 
+describe('queryData with a per-level extent', () => {
+  it('maps through the level extent rather than the dataset one', async () => {
+    const { context } = await makeQueryHarness()
+    // Read against the dataset extent, 90E sits three quarters across: pixel
+    // (6, 2), value 2*8 + 6.
+    const viaDataset = await queryData(context, point(90, 0), { time: 10 })
+    expect(viaDataset.temp).toEqual([22])
+
+    // Told the level covers only the eastern hemisphere, the same point is its
+    // midpoint: pixel (4, 2), value 2*8 + 4.
+    const eastern: QueryContext = {
+      ...context,
+      level: {
+        ...context.level!,
+        xyLimits: { xMin: 0, xMax: 180, yMin: -90, yMax: 90 },
+      },
+    }
+    const viaLevel = await queryData(eastern, point(90, 0), { time: 10 })
+    expect(viaLevel.temp).toEqual([20])
+  })
+
+  it('guards antimeridian crossings against the level extent, not the dataset one', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { context } = await makeQueryHarness()
+      // The dataset extent stays within range; only the level's own extent
+      // crosses. The two-strip path is unsupported for such a raster, so the
+      // guard must consult the extent the pixel-span mapping would use.
+      const wrapped: QueryContext = {
+        ...context,
+        level: {
+          ...context.level!,
+          xyLimits: { xMin: 0, xMax: 360, yMin: -90, yMax: 90 },
+        },
+      }
+      const result = await queryData(
+        wrapped,
+        {
+          type: 'Polygon',
+          coordinates: [
+            [
+              [130, 50],
+              [230, 50],
+              [230, 80],
+              [130, 80],
+              [130, 50],
+            ],
+          ],
+        },
+        { time: 10 }
+      )
+
+      expect(wrapped.antimeridianWarnings.has('raster-extent-crossing')).toBe(
+        true
+      )
+      // Single-fetched against the 0-360 extent: centers 157.5 and 202.5 are
+      // pixels 3 and 4 of the top row.
+      expect(result.temp).toEqual([3, 4])
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})
+
 describe('mergeQueryResults', () => {
   it('concatenates values and spatial coordinates', () => {
     const west: QueryResult = {

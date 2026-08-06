@@ -107,6 +107,43 @@ export interface XYLimits {
   yMax: number
 }
 
+/**
+ * Put a longitude extent into the -180–180 representation the renderer works
+ * in. Only meaningful for a geographic CRS; callers hold that check.
+ *
+ * Two corrections, neither of them a judgment about the source. A 0–360 extent
+ * is folded, since that convention is just as correct and xarray writes it. A
+ * global extent landing within a cell of ±180 is snapped onto it, which is what
+ * keeps a seam from opening at the antimeridian when the grid doesn't divide
+ * evenly.
+ *
+ * @param cellWidth - Longitude span of one cell, the tolerance for both checks.
+ */
+export function normalizeLongitudeExtent(
+  xMin: number,
+  xMax: number,
+  cellWidth: number
+): { xMin: number; xMax: number } {
+  let lo = xMin
+  let hi = xMax
+
+  // Both edges past 180 but still within the degree range is 0–360 data
+  // rather than projected meters.
+  if (lo > 180 && hi > 180 && hi <= 360) {
+    lo -= 360
+    hi -= 360
+  }
+
+  // A truly global grid spans exactly N * cellWidth = 360°; one a cell short
+  // spans 360 - cellWidth and fails the check.
+  if (Number.isFinite(cellWidth) && Math.abs(hi - lo - 360) < cellWidth / 2) {
+    if (Math.abs(lo + 180) < cellWidth) lo = -180
+    if (Math.abs(hi - 180) < cellWidth) hi = 180
+  }
+
+  return { xMin: lo, xMax: hi }
+}
+
 export function boundsToMercatorNorm(
   xyLimits: { xMin: number; xMax: number; yMin: number; yMax: number },
   crs: 'EPSG:4326' | 'EPSG:3857' | null

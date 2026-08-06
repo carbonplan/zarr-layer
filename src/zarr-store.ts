@@ -1,4 +1,5 @@
 import * as zarr from 'zarrita'
+import proj4 from 'proj4'
 import { withDecodedChunkCaching } from './decoded-chunk-cache'
 import type { Readable, AsyncReadable } from '@zarrita/storage'
 import type {
@@ -9,9 +10,18 @@ import type {
   UntiledLevel,
   TransformRequest,
 } from './types'
-import type { XYLimits } from './map-utils'
+import { normalizeLongitudeExtent, type XYLimits } from './map-utils'
 import { WEB_MERCATOR_EXTENT } from './constants'
 import { identifyDimensionIndices, resolveOpenFunc } from './zarr-utils'
+import {
+  parseGeoZarrAttrs,
+  parseLayoutItemSpatial,
+  boundsFromSpatialAttrs,
+  type AffineTransform,
+  type GeoZarrAttrs,
+  type SpatialExtent,
+} from './geozarr'
+import { normalizeBuiltinProjectionDef } from './projection-utils'
 
 interface PyramidMetadata {
   levels: string[]
@@ -32,10 +42,6 @@ interface Multiscale {
 // zarr-conventions/multiscales format (untiled multiscales)
 interface UntiledMultiscaleLayoutEntry {
   asset: string
-  transform?: {
-    scale?: [number, number]
-    translation?: [number, number]
-  }
   derived_from?: string
 }
 
@@ -44,6 +50,18 @@ interface UntiledMultiscaleMetadata {
   resampling_method?: string
   crs?: 'EPSG:4326' | 'EPSG:3857'
 }
+
+/**
+ * `proj4.defs` is a module-global registry, so a definition read out of one
+ * store's metadata needs a key no other layer on the page will reuse.
+ */
+let syntheticProjectionCount = 0
+
+/**
+ * A `proj:code` naming WGS84 lon/lat under its OGC identity. Same axis order
+ * as the renderer already assumes, so it maps straight onto the native path.
+ */
+const CRS84 = 'OGC:CRS84'
 
 type ZarrStoreType =
   | zarr.FetchStore
@@ -163,6 +181,12 @@ export class ZarrStore {
   proj4: string | null = null
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
+  private _proj4Override: boolean = false // Track if proj4 was explicitly set by user
+  private geoZarr: GeoZarrAttrs | null = null
+  /** Per-level `spatial:shape` as declared, [height, width], before axis mapping. */
+  private _declaredLevelShapes: ([number, number] | undefined)[] = []
+  /** Per-level `spatial:transform` as declared, indexed alongside the levels. */
+  private _declaredLevelTransforms: (AffineTransform | undefined)[] = []
 
   store: ZarrStoreType | null = null
   root: zarr.Location<ZarrStoreType> | null = null
@@ -203,16 +227,28 @@ export class ZarrStore {
       this._latIsAscendingUserSet = true
     }
     this.proj4 = proj4 ?? null
+    this._proj4Override = !!proj4
     if (crs) {
-      const normalized = crs.toUpperCase()
-      if (normalized === 'EPSG:4326' || normalized === 'EPSG:3857') {
-        this.crs = normalized
+      const builtin =
+        crs.trim().toUpperCase() === CRS84
+          ? 'EPSG:4326'
+          : normalizeBuiltinProjectionDef(crs)
+      if (builtin) {
+        this.crs = builtin
         this._crsOverride = true
       } else if (!this.proj4) {
-        console.warn(
-          `[zarr-layer] CRS "${crs}" requires 'proj4' to render correctly. ` +
-            `Falling back to inferred CRS.`
-        )
+        const registered = this._registeredProjectionCode(crs)
+        if (registered) {
+          this.proj4 = registered
+          this._crsOverride = true
+        } else {
+          console.warn(
+            `[zarr-layer] CRS "${crs}" is not one proj4 has a definition ` +
+              `for. Pass 'proj4', or register the code first with ` +
+              `proj4.defs('${crs}', '<proj4 string>'). Falling back to ` +
+              `inferred CRS.`
+          )
+        }
       }
     }
     this.transformRequest = transformRequest
@@ -276,6 +312,9 @@ export class ZarrStore {
     await this._loadMetadata()
 
     await this._loadSpatialMetadata()
+    // After spatial metadata, so a level whose declared row direction
+    // contradicts the dataset's resolved one can be recognized and declined.
+    this._applyDeclaredLevelExtents()
     await this._loadCoordinates()
 
     return this
@@ -386,6 +425,18 @@ export class ZarrStore {
       }
     }
 
+    // A level may declare its transform without a `spatial:shape`, in which
+    // case its extent can only be worked out once the real shape is known.
+    const index = this.untiledLevels.findIndex((l) => l.asset === levelAsset)
+    const level = this.untiledLevels[index]
+    const { lat, lon } = this.dimIndices
+    if (level && !level.xyLimits && lat && lon) {
+      level.xyLimits = this._deriveLevelExtent(index, [
+        array.shape[lat.index],
+        array.shape[lon.index],
+      ])
+    }
+
     return {
       shape: array.shape,
       chunks: array.chunks,
@@ -459,6 +510,13 @@ export class ZarrStore {
     const array = await this._getArray(basePath)
     const arrayAttrs = array.attrs as Record<string, unknown>
 
+    this.geoZarr = parseGeoZarrAttrs(
+      rootAttrs,
+      await this._readBaseLevelGroupAttrs(),
+      arrayAttrs
+    )
+    await this._applyGeoZarrCrs(arrayAttrs)
+
     // zarrita's dimensionNames returns the unified answer for v2
     // (_ARRAY_DIMENSIONS) and v3 (dimension_names).
     this.dimensions = array.dimensionNames ?? []
@@ -473,6 +531,300 @@ export class ZarrStore {
       typeof arrayAttrs?.add_offset === 'number' ? arrayAttrs.add_offset : 0
 
     await this._computeDimIndices()
+    this._applyDeclaredLevelShapes()
+  }
+
+  /**
+   * Fill in each level's shape from the `spatial:shape` its layout entry
+   * declares, sparing the renderer an array open per level just to size the
+   * pyramid.
+   *
+   * `spatial:shape` is [height, width]; a level's shape follows the array's own
+   * dimension order and carries its non-spatial dimensions too, so the declared
+   * pair is substituted into the base shape rather than used directly.
+   */
+  private _applyDeclaredLevelShapes(): void {
+    if (this._declaredLevelShapes.length === 0 || this.shape.length === 0)
+      return
+
+    const { lat, lon } = this.dimIndices
+    if (!lat || !lon) return
+
+    this._declaredLevelShapes.forEach((declared, i) => {
+      const level = this.untiledLevels[i]
+      if (!declared || !level) return
+      const shape = [...this.shape]
+      shape[lat.index] = declared[0]
+      shape[lon.index] = declared[1]
+      level.shape = shape
+    })
+  }
+
+  /**
+   * Give each level the extent its own `spatial:transform` describes.
+   *
+   * Levels of a pyramid normally share the dataset extent, but floor division
+   * leaves a coarse level covering a partial trailing cell less, and the
+   * convention permits levels to differ outright. Placing a level against the
+   * dataset extent instead of its own stretches it by that difference.
+   */
+  private _applyDeclaredLevelExtents(): void {
+    this._declaredLevelTransforms.forEach((_, i) => {
+      const shape = this._declaredLevelShapes[i]
+      if (!shape) return
+      const extent = this._deriveLevelExtent(i, shape)
+      if (extent) this.untiledLevels[i].xyLimits = extent
+    })
+  }
+
+  /**
+   * The extent level `index` covers, from its own `spatial:transform` and the
+   * given `[rows, cols]`.
+   *
+   * Returns nothing when the caller supplied explicit `bounds`: those override
+   * the store's georeferencing wholesale, and re-deriving a level extent from
+   * the same metadata would quietly reinstate what was overridden. Also
+   * declines a transform whose row direction contradicts the store's own
+   * declared one, since the renderer draws every level in a single row
+   * direction and cannot honor what that transform declares.
+   */
+  private _deriveLevelExtent(
+    index: number,
+    shape: [number, number]
+  ): XYLimits | undefined {
+    const attrs = this.geoZarr
+    const transform = this._declaredLevelTransforms[index]
+    if (!attrs || !transform || this.explicitBounds) return undefined
+
+    const [nRows, nCols] = shape
+    // The level's own transform places it; a dataset-wide bbox describes the
+    // base level and would defeat the point.
+    const extent = boundsFromSpatialAttrs(
+      { ...attrs, transform, bbox: undefined },
+      { nCols, nRows }
+    )
+    if (!extent) return undefined
+
+    // Consistency is measured against the store's own declared direction, not
+    // the renderer's: a caller's `latIsAscending` override changes how rows
+    // are drawn, not what the store's transforms declare about placement.
+    const base = this._effectiveSpatialAttrs()?.transform
+    const baseAscending = base ? base[4] > 0 : this.latIsAscending
+    if (
+      extent.latIsAscending !== null &&
+      extent.latIsAscending !== baseAscending
+    ) {
+      console.warn(
+        `[zarr-layer] Level '${
+          this.untiledLevels[index]?.asset ?? index
+        }' declares a spatial:transform whose row direction contradicts the ` +
+          `rest of the store's. Every level renders in one row direction, so ` +
+          `this one may appear flipped; its declared extent is ignored.`
+      )
+      return undefined
+    }
+
+    const { xMin, xMax, yMin, yMax } = extent
+    return this.isGeographic()
+      ? {
+          yMin,
+          yMax,
+          ...normalizeLongitudeExtent(xMin, xMax, (xMax - xMin) / nCols),
+        }
+      : { xMin, xMax, yMin, yMax }
+  }
+
+  /**
+   * Attributes of the group holding the base level's arrays.
+   *
+   * `proj:` inherits only to a group's direct child arrays, so a pyramid whose
+   * levels are groups may restate it on each of them instead of at the root.
+   * That group sits between the two we already read, and is one metadata
+   * lookup -- served from cache on a consolidated store, and never per level.
+   */
+  private async _readBaseLevelGroupAttrs(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    if (this.levels.length === 0 || !this.root) return undefined
+    try {
+      const openFunc = resolveOpenFunc(this.version)
+      const group = await openFunc(this.root.resolve(this.levels[0]), {
+        kind: 'group',
+      })
+      return group.attrs as Record<string, unknown>
+    } catch {
+      // A level that isn't a group at all just contributes nothing.
+      return undefined
+    }
+  }
+
+  /**
+   * A code proj4 can already transform under: one of its built-in definitions
+   * (all UTM zones among them) or one registered with `proj4.defs` before the
+   * layer was created. The registry is keyed on the canonical uppercase form,
+   * so "epsg:32631" needs normalizing to be found.
+   */
+  private _registeredProjectionCode(code: string): string | null {
+    const key = proj4.defs(code) ? code : code.trim().toUpperCase()
+    return proj4.defs(key) ? key : null
+  }
+
+  /**
+   * Resolve the CRS the store declares through the `proj:` convention, falling
+   * back to the CF grid-mapping variable when it declares none.
+   *
+   * A `proj:code` naming one of the two built-in CRSs is honored first: it
+   * keeps `crs` set rather than `proj4`, which is what the geographic
+   * behaviors -- longitude folding, antimeridian query splitting, pole
+   * rendering -- key off, and it needs no synthetic registration for a CRS
+   * proj4 already knows. WKT2 and PROJJSON come
+   * next, since they describe the CRS in full and proj4 parses both without a
+   * lookup table. Only then does an unfamiliar code get looked up against
+   * proj4's built-in definitions.
+   *
+   * A declared CRS that stays unresolved is left alone rather than guessed at
+   * from bounds. Inferring a different CRS would silently contradict what the
+   * store said; rendering visibly wrong is the honest outcome, and
+   * `proj4.defs()` is the caller's remedy.
+   */
+  private async _applyGeoZarrCrs(
+    arrayAttrs: Record<string, unknown>
+  ): Promise<void> {
+    if (this._crsOverride || this._proj4Override) return
+
+    const declared = this.geoZarr?.crs
+    const code = declared?.code
+    const builtin =
+      code?.trim().toUpperCase() === CRS84
+        ? 'EPSG:4326'
+        : normalizeBuiltinProjectionDef(code)
+    if (builtin) {
+      this.crs = builtin
+      this._crsFromMetadata = true
+      return
+    }
+
+    if (
+      declared?.wkt2 &&
+      this._registerProjection(declared.wkt2, 'proj:wkt2')
+    ) {
+      return
+    }
+    if (
+      declared?.projjson &&
+      this._registerProjection(declared.projjson, 'proj:projjson')
+    ) {
+      return
+    }
+
+    if (code) {
+      this._crsFromMetadata = true
+      const registered = this._registeredProjectionCode(code)
+      if (registered) {
+        this.proj4 = registered
+        return
+      }
+      console.warn(
+        `[zarr-layer] Store declares proj:code "${code}", which proj4 does not ` +
+          `know and which the store gives no proj:wkt2 or proj:projjson for. ` +
+          `Register it before creating the layer with ` +
+          `proj4.defs('${code}', '<proj4 string>') to render it correctly.`
+      )
+      return
+    }
+
+    await this._applyCfGridMappingCrs(arrayAttrs)
+  }
+
+  /**
+   * Read a WKT definition off the CF grid-mapping variable the data array
+   * points at. rioxarray writes the same WKT under both `crs_wkt` and
+   * `spatial_ref`.
+   */
+  private async _applyCfGridMappingCrs(
+    arrayAttrs: Record<string, unknown>
+  ): Promise<void> {
+    const gridMapping = arrayAttrs?.grid_mapping
+    if (typeof gridMapping !== 'string' || !gridMapping.trim()) return
+
+    const prefix = this.levels.length > 0 ? `${this.levels[0]}/` : ''
+    try {
+      const mapping = await this._getArray(`${prefix}${gridMapping.trim()}`)
+      const attrs = mapping.attrs as Record<string, unknown>
+      const wkt = [attrs?.crs_wkt, attrs?.spatial_ref].find(
+        (value): value is string =>
+          typeof value === 'string' && value.trim().length > 0
+      )
+      if (wkt) this._registerProjection(wkt, `${gridMapping}.crs_wkt`)
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Could not read grid mapping variable '${gridMapping}': `,
+        err
+      )
+    }
+  }
+
+  /**
+   * Register a full CRS definition under a key of our own and point the store
+   * at it. proj4 parses WKT2 strings and PROJJSON objects directly, so a store
+   * carrying either is self-describing with no lookup table.
+   */
+  private _registerProjection(
+    def: string | Record<string, unknown>,
+    source: string
+  ): boolean {
+    const key = `ZARRLAYER:${++syntheticProjectionCount}`
+    try {
+      proj4.defs(key, def as string)
+      if (!proj4.defs(key)) throw new Error('definition did not parse')
+      proj4(key, 'EPSG:4326')
+    } catch (err) {
+      console.warn(
+        `[zarr-layer] Could not use '${source}' from store metadata: ` +
+          `${err instanceof Error ? err.message : err}`
+      )
+      return false
+    }
+    this.proj4 = key
+    this._crsFromMetadata = true
+    return true
+  }
+
+  /**
+   * The spatial dimension names to identify axes by.
+   *
+   * `spatial:dimensions` names them outright, ordered [y, x], which beats
+   * guessing from an alias list and is the only thing that works for a store
+   * whose axes are named something the alias list has never heard of. The
+   * constructor option still wins per axis.
+   */
+  private _resolveSpatialDimensions(): SpatialDimensions {
+    const declared = this.geoZarr?.dimensions
+    if (!declared) return this.spatialDimensions
+
+    const [declaredLat, declaredLon] = declared
+    const lat = this.spatialDimensions.lat ?? declaredLat
+    const lon = this.spatialDimensions.lon ?? declaredLon
+
+    // Only the declarations actually being used are worth rejecting. An axis
+    // the caller overrode is repaired already, and a bad override is the
+    // caller's own error, which `identifyDimensionIndices` reports.
+    const known = this.dimensions.map((d) => d.toLowerCase())
+    const missing = [
+      this.spatialDimensions.lat ? null : declaredLat,
+      this.spatialDimensions.lon ? null : declaredLon,
+    ].filter((n): n is string => !!n && !known.includes(n.toLowerCase()))
+    if (missing.length > 0) {
+      throw new Error(
+        `spatial:dimensions names [${missing.join(
+          ', '
+        )}], which the array does not have. Available: [${this.dimensions.join(
+          ', '
+        )}]`
+      )
+    }
+
+    return { lat, lon }
   }
 
   private async _computeDimIndices() {
@@ -480,7 +832,7 @@ export class ZarrStore {
 
     this.dimIndices = identifyDimensionIndices(
       this.dimensions,
-      this.spatialDimensions
+      this._resolveSpatialDimensions()
     )
 
     // Collect the actual names of identified spatial dimensions
@@ -510,6 +862,11 @@ export class ZarrStore {
         array: null,
       }
     }
+  }
+
+  /** Whether x/y are longitude/latitude in degrees rather than projected units. */
+  private isGeographic(): boolean {
+    return !this.proj4 && this.crs !== 'EPSG:3857'
   }
 
   private normalizeFillValue(value: unknown): number | null {
@@ -552,6 +909,73 @@ export class ZarrStore {
     }
   }
 
+  /**
+   * The declaration to place the grid from.
+   *
+   * A pyramid's absolute georeferencing belongs on its `multiscales.layout`
+   * entries, one per resolution, so the base entry's transform stands in
+   * whenever the group or array declares none of its own. The two sources
+   * combine rather than compete: a group that states only a `spatial:bbox`
+   * still gets its row direction from that transform, which is the difference
+   * between placing the grid outright and falling back to coordinate reads.
+   *
+   * The grid size comes from the base array either way, which is the level
+   * that entry describes.
+   */
+  private _effectiveSpatialAttrs(): GeoZarrAttrs | null {
+    const attrs = this.geoZarr
+    if (!attrs) return null
+
+    const transform = attrs.transform ?? this._declaredLevelTransforms[0]
+    if (!attrs.bbox && !transform) return null
+    return transform === attrs.transform ? attrs : { ...attrs, transform }
+  }
+
+  /**
+   * The grid extent the store declares through the `spatial:` convention, in
+   * the renderer's edge-to-edge terms and its -180–180 longitude range.
+   *
+   * Returns null whenever the declaration doesn't settle the extent, leaving
+   * the coordinate-array read as the fallback.
+   */
+  private _declaredSpatialExtent(): SpatialExtent | null {
+    const attrs = this._effectiveSpatialAttrs()
+    if (!attrs) return null
+
+    if (attrs.transformType !== 'affine') {
+      console.warn(
+        `[zarr-layer] Store declares spatial:transform_type "${attrs.transformType}", ` +
+          `which this layer cannot map to a grid. Reading bounds from coordinate arrays.`
+      )
+      return null
+    }
+
+    const { lon, lat } = this.dimIndices
+    if (!lon || !lat) return null
+
+    const extent = boundsFromSpatialAttrs(attrs, {
+      nCols: this.shape[lon.index],
+      nRows: this.shape[lat.index],
+    })
+    if (!extent) {
+      console.warn(
+        `[zarr-layer] Could not derive bounds from the store's spatial: attributes. ` +
+          `A rotated transform has no axis-aligned placement this layer can render, ` +
+          `and a node-registered bbox needs a cell size to expand by. ` +
+          `Reading bounds from coordinate arrays.`
+      )
+      return null
+    }
+
+    if (!this.isGeographic()) return extent
+
+    const cellWidth = (extent.xMax - extent.xMin) / this.shape[lon.index]
+    return {
+      ...extent,
+      ...normalizeLongitudeExtent(extent.xMin, extent.xMax, cellWidth),
+    }
+  }
+
   private async _loadSpatialMetadata() {
     // Apply explicit bounds first (takes precedence for all multiscale types)
     // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857/proj4)
@@ -582,8 +1006,29 @@ export class ZarrStore {
     }
 
     // For untiled: determine what we still need to detect
-    const needsBounds = !this.xyLimits
-    const needsLatAscending = !this._latIsAscendingUserSet
+    let needsBounds = !this.xyLimits
+    let needsLatAscending = !this._latIsAscendingUserSet
+
+    // A store declaring the spatial: convention has already said where its grid
+    // sits, so take it at its word and skip the coordinate reads.
+    if (needsBounds || needsLatAscending) {
+      const declared = this._declaredSpatialExtent()
+      if (declared) {
+        if (needsBounds) {
+          this.xyLimits = {
+            xMin: declared.xMin,
+            xMax: declared.xMax,
+            yMin: declared.yMin,
+            yMax: declared.yMax,
+          }
+          needsBounds = false
+        }
+        if (needsLatAscending && declared.latIsAscending !== null) {
+          this.latIsAscending = declared.latIsAscending
+          needsLatAscending = false
+        }
+      }
+    }
 
     // If explicit bounds provided and user doesn't need latIsAscending detection, skip coord fetch
     // (respects user intent to avoid coord reads by providing bounds)
@@ -707,34 +1152,14 @@ export class ZarrStore {
       const dy = Math.abs(y1 - y0)
 
       // Apply half-pixel expansion (coords are pixel centers, we need edge bounds)
-      let xMin = coordXMin - (Number.isFinite(dx) ? dx / 2 : 0)
-      let xMax = coordXMax + (Number.isFinite(dx) ? dx / 2 : 0)
+      const rawXMin = coordXMin - (Number.isFinite(dx) ? dx / 2 : 0)
+      const rawXMax = coordXMax + (Number.isFinite(dx) ? dx / 2 : 0)
       const yMin = coordYMin - (Number.isFinite(dy) ? dy / 2 : 0)
       const yMax = coordYMax + (Number.isFinite(dy) ? dy / 2 : 0)
 
-      // Normalize 0–360° longitude convention to -180–180°.
-      // Only applies when both bounds are > 180 (clearly 0–360° data, not
-      // projected meters) and within the degree range (xMax <= 360).
-      if (
-        xMin > 180 &&
-        xMax > 180 &&
-        xMax <= 360 &&
-        !this.proj4 &&
-        this.crs !== 'EPSG:3857'
-      ) {
-        xMin -= 360
-        xMax -= 360
-      }
-
-      // For global datasets, snap bounds to exactly ±180 to avoid antimeridian
-      // seams caused by grid alignment not landing on ±180. A truly global grid
-      // has extent = N * dx = 360°; use dx/2 tolerance for float32 precision.
-      // A dataset one cell short has extent = 360 - dx, which fails the check.
-      const lonExtent = xMax - xMin
-      if (Number.isFinite(dx) && Math.abs(lonExtent - 360) < dx / 2) {
-        if (Math.abs(xMin + 180) < dx) xMin = -180
-        if (Math.abs(xMax - 180) < dx) xMax = 180
-      }
+      const { xMin, xMax } = this.isGeographic()
+        ? normalizeLongitudeExtent(rawXMin, rawXMax, dx)
+        : { xMin: rawXMin, xMax: rawXMax }
 
       if (needsBounds) {
         this.xyLimits = { xMin, xMax, yMin, yMax }
@@ -848,11 +1273,7 @@ export class ZarrStore {
       // `_loadSpatialMetadata` (global extent, latIsAscending=false, no
       // coordinate-array reads).
       this.multiscaleType = pixelsPerTile ? 'tiled' : 'untiled'
-      this.untiledLevels = levels.map((level) => ({
-        asset: level,
-        scale: [1.0, 1.0] as [number, number],
-        translation: [0.0, 0.0] as [number, number],
-      }))
+      this.untiledLevels = levels.map((level) => ({ asset: level }))
       return { levels, maxLevelIndex, crs }
     }
 
@@ -864,14 +1285,14 @@ export class ZarrStore {
    *
    * This format uses a `layout` array where each entry specifies:
    * - `asset`: path to the level (e.g., "0", "1", ...)
-   * - `transform`: optional scale/translation for georeferencing
+   * - `spatial:shape`: optional level dimensions as [height, width]
    *
    * Example metadata:
    * ```json
    * {
    *   "layout": [
-   *     { "asset": "0", "transform": { "scale": [1.0, 1.0], "translation": [0, 0] } },
-   *     { "asset": "1", "transform": { "scale": [2.0, 2.0], "translation": [0, 0] } }
+   *     { "asset": "0", "spatial:shape": [1024, 2048] },
+   *     { "asset": "1", "spatial:shape": [512, 1024] }
    *   ],
    *   "crs": "EPSG:4326"
    * }
@@ -890,12 +1311,11 @@ export class ZarrStore {
     const levels = layout.map((entry) => entry.asset)
     const maxLevelIndex = levels.length - 1
 
-    // Build untiledLevels with transform info (shapes loaded lazily via getUntiledLevelMetadata)
-    this.untiledLevels = layout.map((entry) => ({
-      asset: entry.asset,
-      scale: entry.transform?.scale ?? [1.0, 1.0],
-      translation: entry.transform?.translation ?? [0.0, 0.0],
-    }))
+    this.untiledLevels = layout.map((entry) => ({ asset: entry.asset }))
+    const perLevel = layout.map((entry) => parseLayoutItemSpatial(entry))
+    // Applied once the dimension order is known; see `_applyDeclaredLevelShapes`.
+    this._declaredLevelShapes = perLevel.map((s) => s.shape)
+    this._declaredLevelTransforms = perLevel.map((s) => s.transform)
 
     this.multiscaleType = 'untiled'
 
