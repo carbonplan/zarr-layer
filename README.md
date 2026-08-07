@@ -6,8 +6,6 @@
 Custom layer for rendering Zarr datasets in MapLibre or Mapbox GL, inspired (and borrowing significant code and concepts from)
 [zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium), [@carbonplan/maps](https://github.com/carbonplan/maps), and [deck-gl-raster](https://github.com/developmentseed/deck.gl-raster). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports rendering to globe and mercator projections for both MapLibre and Mapbox. Input data are reprojected on the fly.
 
-This is an active experiment so expect to run into some bugs! Please report them.
-
 ## demo
 
 See the [demo](https://zarr-layer.demo.carbonplan.org/) for a quick tour of capabilities. Code for the demo is in the `/demo` folder.
