@@ -29,6 +29,7 @@ import type {
   NormalizedSelector,
   ZarrLayerOptions,
   TransformRequest,
+  OnAuthError,
 } from './types'
 import type { RenderContext } from './renderer-types'
 import { RegionRenderer } from './region-renderer'
@@ -182,6 +183,7 @@ export class ZarrLayer {
   private initError: Error | null = null
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
+  private onAuthError: OnAuthError | undefined
   private customStore: Readable | undefined
   private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
@@ -297,6 +299,7 @@ export class ZarrLayer {
     onLoadingStateChange,
     proj4,
     transformRequest,
+    onAuthError,
     store,
     renderPoles = false,
   }: ZarrLayerOptions) {
@@ -356,6 +359,7 @@ export class ZarrLayer {
     this.onLoadingStateChange = onLoadingStateChange
     this.proj4 = proj4
     this.transformRequest = transformRequest
+    this.onAuthError = onAuthError
     this.customStore = store
     this.renderPoles = renderPoles
   }
@@ -630,6 +634,7 @@ export class ZarrLayer {
         coordinateKeys: Object.keys(this.selector),
         proj4: this.proj4,
         transformRequest: this.transformRequest,
+        onAuthError: this.onAuthError,
         customStore: this.customStore,
       })
 

@@ -121,6 +121,7 @@ map.on('load', () => {
 | uniforms | object | - | Shader uniform values (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
+| onAuthError | function | - | Called with the HTTP status when a signed request fails with expired credentials (see [authentication](#authentication)) |
 | renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on EPSG:3857 data. MapLibre always renders to the poles. |
 
 ## methods
@@ -332,6 +333,20 @@ transformRequest: async (url) => ({
   url: await getPresignedUrl(url),
 })
 ```
+
+### expired credentials
+
+Credentials signed into a request expire mid-session. Those failures are otherwise invisible, because the layer treats a rejected read as a missing chunk and renders a hole. `onAuthError` surfaces the status so you can refresh and re-add the layer:
+
+```ts
+onAuthError: async (status) => {
+  await refreshCredentials()
+  map.removeLayer(layer.id)
+  map.addLayer(newLayerWithFreshCredentials())
+}
+```
+
+It fires on 400 and 401 only, and at most once per store, so a burst of concurrent chunk failures triggers a single refresh. 400 is included because expired temporary AWS credentials return `ExpiredToken`/`InvalidToken` as a 400, often with no readable body on HEAD probes or CORS-gated responses. 403 is excluded: S3 and CloudFront return it for genuinely absent chunks, which sparse pyramids hit routinely. Without a handler, a 400 propagates as an error rather than being read as a missing chunk.
 
 ## custom stores
 

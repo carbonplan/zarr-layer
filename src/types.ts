@@ -22,6 +22,13 @@ export type TransformRequest = (
   options?: TransformRequestOptions
 ) => RequestParameters | Promise<RequestParameters>
 
+/**
+ * Called when a `transformRequest` request fails with a credential-shaped
+ * status, so the consumer can refresh credentials and re-add the layer.
+ * Expired temporary AWS credentials return 400, not 401, so both count.
+ */
+export type OnAuthError = (status: number) => void
+
 export type ColormapArray = number[][] | string[]
 
 export type SelectorValue = number | number[] | string | string[]
@@ -130,6 +137,8 @@ export interface ZarrLayerOptions {
    * When provided, the store cache is bypassed to prevent credential sharing between layers.
    */
   transformRequest?: TransformRequest
+  /** Credential-expiry hook for `transformRequest`. See {@link OnAuthError}. */
+  onAuthError?: OnAuthError
   /**
    * Enable full polar coverage in Mapbox globe view for untiled EPSG:4326 or
    * proj4 datasets. Has no effect on tiled or EPSG:3857 data.
