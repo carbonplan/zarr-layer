@@ -9,6 +9,7 @@ import type {
   CRS,
   UntiledLevel,
   TransformRequest,
+  OnAuthError,
 } from './types'
 import { normalizeLongitudeExtent, type XYLimits } from './map-utils'
 import { WEB_MERCATOR_EXTENT } from './constants'
@@ -81,6 +82,7 @@ interface ZarrStoreOptions {
   latIsAscending?: boolean | null
   proj4?: string
   transformRequest?: TransformRequest
+  onAuthError?: OnAuthError
   /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
   customStore?: Readable | AsyncReadable
 }
@@ -113,11 +115,15 @@ interface StoreDescription {
  */
 const createFetchStore = (
   url: string,
-  transformRequest?: TransformRequest
+  transformRequest?: TransformRequest,
+  onAuthError?: OnAuthError
 ): zarr.FetchStore => {
   if (!transformRequest) {
     return new zarr.FetchStore(url)
   }
+  // One notification per store: an expiry burst fans out into many concurrent
+  // failures, and recovery re-adds the layer with a fresh store anyway.
+  let authErrorSignaled = false
   return new zarr.FetchStore(url, {
     async fetch(request: Request): Promise<Response> {
       const { url: transformedUrl, ...overrides } = await transformRequest(
@@ -141,6 +147,15 @@ const createFetchStore = (
           headers: mergedHeaders,
         })
       )
+      // Masked to a missing chunk only when a handler is set, so callers who
+      // don't opt in still see the failure.
+      if ((response.status === 400 || response.status === 401) && onAuthError) {
+        if (!authErrorSignaled) {
+          authErrorSignaled = true
+          onAuthError(response.status)
+        }
+        return new Response(null, { status: 404 })
+      }
       // Remap 403 to 404 for S3/CloudFront compatibility: these services
       // return 403 (not 404) for missing or inaccessible paths.
       if (response.status === 403) {
@@ -159,6 +174,7 @@ export class ZarrStore {
   private explicitBounds: Bounds | null
   coordinateKeys: string[]
   private transformRequest?: TransformRequest
+  private onAuthError?: OnAuthError
   private customStore?: Readable | AsyncReadable
 
   dimensions: string[] = []
@@ -208,6 +224,7 @@ export class ZarrStore {
     latIsAscending = null,
     proj4,
     transformRequest,
+    onAuthError,
     customStore,
   }: ZarrStoreOptions) {
     if (!source && !customStore) {
@@ -252,6 +269,7 @@ export class ZarrStore {
       }
     }
     this.transformRequest = transformRequest
+    this.onAuthError = onAuthError
     this.customStore = customStore
 
     this.initialized = this._initialize()
@@ -298,7 +316,7 @@ export class ZarrStore {
           ? { format: 'v3' }
           : undefined
       this.store = (await zarr.extendStore(
-        createFetchStore(this.source, this.transformRequest),
+        createFetchStore(this.source, this.transformRequest, this.onAuthError),
         (store) =>
           zarr
             .withMaybeConsolidatedMetadata(store, consolidatedOpts)

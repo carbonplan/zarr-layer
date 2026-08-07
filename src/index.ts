@@ -7,6 +7,7 @@ export type {
   LoadingStateCallback,
   Selector,
   TransformRequest,
+  OnAuthError,
   RequestParameters,
 } from './types'
 
