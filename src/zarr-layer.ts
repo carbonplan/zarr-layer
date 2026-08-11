@@ -1036,14 +1036,15 @@ export class ZarrLayer {
   /**
    * Query all data values within a geographic region.
    *
-   * Waits for the layer to become queryable, so it can be called straight
-   * after `map.addLayer()` with no render pass in between. An empty result
-   * therefore always means the geometry found no data.
+   * Waits for metadata and a committed resolution level, so it can be called
+   * straight after `map.addLayer()` with no render pass in between. An unready
+   * layer therefore never answers with an empty result. A chunk read that
+   * fails still does — see `fetchQueryData`.
    *
    * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
    * @param selector - Optional selector to override the layer's selector.
-   * @throws {ZarrLayerNotReadyError} if the layer failed to initialize, was
-   *   removed, or was never added to a map.
+   * @throws {ZarrLayerNotReadyError} if the layer failed to initialize, could
+   *   not load a level, was removed, or was never added to a map.
    * @returns Promise resolving to the query result matching carbonplan/maps structure.
    */
   async queryData(
