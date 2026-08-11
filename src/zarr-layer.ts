@@ -1056,6 +1056,17 @@ export class ZarrLayer {
       this.resolveReadiness(),
       options?.signal
     )
-    return regionRenderer.queryData(geometry, selector, options)
+    const result = await regionRenderer.queryData(geometry, selector, options)
+    // Readiness held when the query started, but a removal landing while it ran
+    // disposes the renderer and clears its level, and the inner path answers
+    // empty once there is no level to index. Checked here so a layer that went
+    // away can never come back as "no data here".
+    if (this.isRemoved || this.regionRenderer !== regionRenderer) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer was removed while the query was in flight'
+      )
+    }
+    return result
   }
 }

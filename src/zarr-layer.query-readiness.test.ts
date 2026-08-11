@@ -548,6 +548,40 @@ describe('queryData failure reporting', () => {
     await expect(pending).rejects.toThrow(/removed while it was becoming ready/)
   })
 
+  it('rejects when the layer is removed while a query is in flight', async () => {
+    // Readiness passes, then removal lands mid-query. What the inner path
+    // does next depends on exactly when disposal lands: it answers empty if
+    // the committed level is already cleared, and otherwise finishes the read
+    // and returns data from a torn-down layer. Neither belongs to the caller,
+    // so the check is on the way out rather than at one of those two moments.
+    let releaseChunk = () => {}
+    const chunkGate = new Promise<void>((resolve) => {
+      releaseChunk = resolve
+    })
+    const backing = samefieldPyramid()
+    const layer = makeLayer({
+      store: {
+        get: async (key: string) => {
+          if (key.startsWith('/1/temperature/c/')) await chunkGate
+          return backing.get(key)
+        },
+      },
+    })
+    const map = staticMap()
+    const gl = createRecordingGl()
+    layer.onAdd(map, gl)
+    await layer.ready
+
+    const pending = layer.queryData(point)
+    await tick()
+    layer.onRemove(map, gl)
+    releaseChunk()
+
+    await expect(pending).rejects.toThrow(
+      /removed while the query was in flight/
+    )
+  })
+
   it('rejects when the finest level cannot be opened', async () => {
     // Levels wide enough that zoom 0 draws the coarse one, so the render
     // level commits normally and only the finest read fails. Shapes are
