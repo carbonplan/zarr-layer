@@ -322,7 +322,7 @@ const result = await layer.queryData(geometry, selector, {
 
 By default a query reads the level the map is currently drawing, so results agree with what the user sees and zooming out coarsens them. Pass `level: 'finest'` to always read the highest-resolution level in the store, which is what you want when the answer shouldn't depend on the camera — sampling point features, for instance.
 
-`'finest'` reads a level the renderer may not hold, so it can cost an extra fetch, and on a deep pyramid at low zoom that fetch is much larger than the default's. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
+`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
 
 ### query readiness
 

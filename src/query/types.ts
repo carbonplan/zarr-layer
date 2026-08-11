@@ -99,9 +99,10 @@ export interface QueryTransformOptions {
  * level in the store regardless of zoom — what you want when the answer
  * should not depend on the camera, such as sampling point features.
  *
- * `'finest'` reads a level the renderer may not hold, so it can cost an
- * extra fetch, and on a deep pyramid at low zoom that fetch is much larger
- * than the one `'current'` would make.
+ * `'finest'` reads a level the renderer may not hold, so it fetches cold
+ * rather than reusing chunks the render path already cached. A point costs
+ * about one chunk either way — it selects a single pixel at any resolution —
+ * while a polygon covers quadratically more pixels the finer the level.
  */
 export type QueryLevel = 'current' | 'finest'
 
