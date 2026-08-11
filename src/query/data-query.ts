@@ -16,6 +16,7 @@ import {
   type DimensionValuesCache,
 } from '../selector-resolution'
 import { normalizeSelector } from '../zarr-utils'
+import { wrapError } from '../errors'
 import { queryRegionUntiled, findSpatialDimNames } from './region-query'
 import {
   computePixelBoundsFromGeometry,
@@ -70,7 +71,7 @@ export async function fetchQueryData(
   channels: number
   channelLabels: (string | number)[][]
   multiValueDimNames: string[]
-} | null> {
+}> {
   try {
     const { sliceArgs: baseSliceArgs, multiValueDims } =
       await buildSliceArgsForSelector(
@@ -145,8 +146,9 @@ export async function fetchQueryData(
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err
-    console.error('Error fetching query data:', err)
-    return null
+    // Propagated, not swallowed: a read that failed is not a region that holds
+    // no data, and returning empty here makes the two indistinguishable.
+    throw wrapError('[ZarrLayer] failed to read query data', err)
   }
 }
 
@@ -198,7 +200,7 @@ export async function queryData(
     geom: QueryGeometry,
     pixelBounds: PixelRect,
     opts?: QueryOptions
-  ): Promise<QueryResult | null> => {
+  ): Promise<QueryResult> => {
     const fetched = await fetchQueryData(
       context,
       level,
@@ -206,7 +208,6 @@ export async function queryData(
       pixelBounds,
       opts?.signal
     )
-    if (!fetched) return null
 
     const { minX, minY, maxX, maxY } = pixelBounds
     const [xMin0, yMin0] = pixelToSourceCRS(
@@ -265,8 +266,7 @@ export async function queryData(
       context.projection.toWGS84 ?? undefined
     )
     if (!pixelBounds) return emptyResult()
-    const result = await runStrip(geom, pixelBounds, options)
-    return result ?? emptyResult()
+    return runStrip(geom, pixelBounds, options)
   }
 
   const { geometry: processedGeometry, bbox: wrappedBbox } =
@@ -320,10 +320,8 @@ export async function queryData(
     ? await runStrip(processedGeometry, spans.east, options)
     : null
 
-  // If either requested strip failed, return empty rather than partial data
-  if ((spans.west && !westResult) || (spans.east && !eastResult)) {
-    return emptyResult()
-  }
+  // A strip is null only when the wrapped bbox produced no span on that side;
+  // a strip that failed to read threw rather than coming back empty.
   if (!westResult && !eastResult) return emptyResult()
   if (!westResult || !eastResult) return (westResult ?? eastResult)!
 

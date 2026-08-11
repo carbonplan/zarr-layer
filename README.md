@@ -328,6 +328,8 @@ By default a query reads the level the map is currently drawing, so results agre
 
 `queryData` waits for metadata and a committed resolution level, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. Readiness failures — initialization failure, failure to load a level, removal from the map, or querying before the layer was added — reject with a `ZarrLayerNotReadyError` rather than returning empty. Initialization failures carry the underlying error on `.cause`.
 
+Failed reads reject as well, so an empty result means the geometry found no data.
+
 `layer.ready` exposes the same wait as a promise, for uses other than queries:
 
 ```ts

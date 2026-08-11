@@ -1037,9 +1037,9 @@ export class ZarrLayer {
    * Query all data values within a geographic region.
    *
    * Waits for metadata and a committed resolution level, so it can be called
-   * straight after `map.addLayer()` with no render pass in between. An unready
-   * layer therefore never answers with an empty result. A chunk read that
-   * fails still does — see `fetchQueryData`.
+   * straight after `map.addLayer()` with no render pass in between. Neither an
+   * unready layer nor a failed read answers with an empty result, so an empty
+   * result means the geometry found no data.
    *
    * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
    * @param selector - Optional selector to override the layer's selector.
