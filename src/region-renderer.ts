@@ -70,6 +70,7 @@ import {
 } from './region-cache'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader } from './level-loader'
+import { wrapError } from './errors'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -1284,13 +1285,14 @@ export class RegionRenderer {
         xyLimits: opened.xyLimits,
       }
     } catch (err) {
-      console.error(
-        `Failed to open level ${
+      // Propagated, not swallowed: an unreachable or malformed finest asset
+      // must not come back looking like a geometry that found no data.
+      throw wrapError(
+        `[ZarrLayer] failed to open level ${
           this.levels[finest]?.asset ?? finest
-        } for query:`,
+        } for query`,
         err
       )
-      return null
     }
   }
 

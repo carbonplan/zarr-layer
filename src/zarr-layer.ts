@@ -474,7 +474,7 @@ export class ZarrLayer {
     // Queries and `ready` track the new dataset from here on, so a call that
     // lands mid-swap waits for the new store rather than reading the old one.
     this.readyPromise = null
-    this.initPromise = this._setVariableAsync(variable)
+    this.initPromise = this.trackInit(this._setVariableAsync(variable))
     await this.initPromise
   }
 
@@ -540,7 +540,25 @@ export class ZarrLayer {
     map: MapLike,
     gl: WebGL2RenderingContext | WebGLRenderingContext
   ): void {
-    this.initPromise = this._onAddAsync(map, gl)
+    this.initPromise = this.trackInit(this._onAddAsync(map, gl))
+  }
+
+  /**
+   * Funnel an initialization run into `initError` so `initPromise` always
+   * fulfills. `_onAddAsync` does its own error handling once running, but it
+   * can reject before reaching that — `resolveGl` throws on a context that
+   * isn't WebGL2 — and a rejection here would otherwise escape `ready` and
+   * `queryData` raw, and go unhandled when nobody awaits either.
+   */
+  private trackInit(run: Promise<void>): Promise<void> {
+    return run.catch((err) => {
+      this.initError = err instanceof Error ? err : new Error(String(err))
+      console.error(
+        `[zarr-layer] Failed to initialize: ${this.initError.message}`
+      )
+      this.metadataLoading = false
+      this.emitLoadingState()
+    })
   }
 
   private async _onAddAsync(
@@ -976,14 +994,33 @@ export class ZarrLayer {
         { cause: this.initError }
       )
     }
-    if (this.isRemoved || !this.regionRenderer) {
+    const regionRenderer = this.regionRenderer
+    if (this.isRemoved || !regionRenderer) {
       throw new ZarrLayerNotReadyError(
         this.id,
         'layer has been removed from the map'
       )
     }
-    await this.regionRenderer.ensureQueryableLevel()
-    return this.regionRenderer
+    // Held in a local because a removal landing during the await nulls the
+    // field out from under us.
+    const level = await regionRenderer.ensureQueryableLevel()
+    if (this.isRemoved || this.regionRenderer !== regionRenderer) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer was removed while it was becoming ready'
+      )
+    }
+    if (!level) {
+      // No level means the load failed or was superseded and never retried.
+      // Returning here would let a query answer empty off a layer that holds
+      // no data at all, which is exactly the silent wrong answer the
+      // readiness contract exists to prevent.
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'no resolution level could be loaded'
+      )
+    }
+    return regionRenderer
   }
 
   /**

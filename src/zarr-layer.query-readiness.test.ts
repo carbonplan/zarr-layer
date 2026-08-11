@@ -476,3 +476,119 @@ describe('queryData level option', () => {
     )
   })
 })
+
+/**
+ * Failures on the readiness path must surface as rejections. Reporting them as
+ * an empty result would recreate the exact bug this work exists to fix: a
+ * layer that holds no usable data answering identically to a point that
+ * genuinely has none.
+ */
+describe('queryData failure reporting', () => {
+  /** Backing store with every key under `prefix` missing, so opening that
+   *  level fails while the rest of the store stays intact. */
+  const withMissingLevel = (prefix: string) => {
+    const backing = samefieldPyramid({ declareShapes: true })
+    return {
+      get: async (key: string) =>
+        key.startsWith(prefix) ? undefined : backing.get(key),
+    }
+  }
+
+  const point = { type: 'Point' as const, coordinates: pixelCenter(0, 0) }
+
+  it('rejects rather than answering empty when no level can be loaded', async () => {
+    // Zoom 0 targets the fine level here, so making it unreadable leaves the
+    // renderer with nothing committed.
+    const layer = makeLayer({ store: withMissingLevel('/1/') })
+    layer.onAdd(staticMap(), createRecordingGl())
+
+    await expect(layer.queryData(point)).rejects.toBeInstanceOf(
+      ZarrLayerNotReadyError
+    )
+    await expect(layer.ready).rejects.toThrow(/no resolution level/)
+  })
+
+  it('rejects when the layer is removed while it is becoming ready', async () => {
+    let releaseLevel = () => {}
+    const levelGate = new Promise<void>((resolve) => {
+      releaseLevel = resolve
+    })
+    const backing = samefieldPyramid({ declareShapes: true })
+    const layer = makeLayer({
+      store: {
+        get: async (key: string) => {
+          if (key === '/1/temperature/zarr.json') await levelGate
+          return backing.get(key)
+        },
+      },
+    })
+    const map = staticMap()
+    const gl = createRecordingGl()
+    layer.onAdd(map, gl)
+
+    const pending = layer.queryData(point)
+    await new Promise((r) => setTimeout(r, 0))
+    layer.onRemove(map, gl)
+    releaseLevel()
+
+    // Reported as a removal, not as "no level could be loaded" — disposal
+    // clears the committed level too, so both branches would fire and only
+    // the earlier one names the actual cause.
+    await expect(pending).rejects.toThrow(/removed while it was becoming ready/)
+  })
+
+  it('rejects when the finest level cannot be opened', async () => {
+    // Levels wide enough that zoom 0 draws the coarse one, so the render
+    // level commits normally and only the finest read fails. Shapes are
+    // declared so the finest level is identifiable without opening it.
+    const backing = buildMemoryZarrStore({
+      attributes: {
+        multiscales: {
+          layout: [
+            { asset: '0', 'spatial:shape': [128, 256] },
+            { asset: '1', 'spatial:shape': [256, 512] },
+          ],
+          crs: 'EPSG:4326',
+        },
+      },
+      arrays: [
+        {
+          name: '0/temperature',
+          shape: [128, 256],
+          chunkShape: [128, 256],
+          dimensionNames: ['lat', 'lon'],
+          chunks: { '0/0': new Float32Array(128 * 256).fill(1) },
+        },
+      ],
+    })
+    const layer = makeLayer({
+      store: {
+        get: async (key: string) =>
+          key.startsWith('/1/') ? undefined : backing.get(key),
+      },
+    })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    // The default query still works — only the finest read is broken.
+    expect((await layer.queryData(point)).temperature).toEqual([1])
+    await expect(
+      layer.queryData(point, undefined, { level: 'finest' })
+    ).rejects.toThrow(/failed to open level 1 for query/)
+  })
+
+  it('wraps an initialization that rejected before its own error handling', async () => {
+    // resolveGl throws on a context that isn't WebGL2, before _onAddAsync
+    // reaches the try block that would have recorded the failure.
+    const layer = makeLayer({ store: samefieldPyramid() })
+    layer.onAdd(staticMap(), {} as WebGL2RenderingContext)
+
+    const error = await layer.queryData(point).then(
+      () => null,
+      (e) => e
+    )
+
+    expect(error).toBeInstanceOf(ZarrLayerNotReadyError)
+    expect((error as ZarrLayerNotReadyError).cause).toBeInstanceOf(Error)
+    expect((error as ZarrLayerNotReadyError).message).toMatch(/WebGL2/)
+  })
+})

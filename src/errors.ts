@@ -6,6 +6,16 @@
  * distinct from an empty result — an empty result means the geometry found no
  * data, never that the layer wasn't ready.
  */
+/** Re-throw with context attached. `cause` is assigned rather than passed to
+ *  `super`, which needs a newer lib target than this package builds against. */
+export function wrapError(message: string, cause: unknown): Error {
+  const error = new Error(
+    `${message}: ${cause instanceof Error ? cause.message : String(cause)}`
+  )
+  ;(error as Error & { cause?: unknown }).cause = cause
+  return error
+}
+
 export class ZarrLayerNotReadyError extends Error {
   readonly name = 'ZarrLayerNotReadyError'
   /** The error that caused initialization to fail, when there was one. */
