@@ -115,6 +115,17 @@ function samefieldPyramid({ declareShapes = false } = {}) {
   })
 }
 
+/** A static map whose zoom can be moved between frames. */
+function zoomableMap(initialZoom: number) {
+  const map = staticMap(initialZoom) as MapLike & { getZoom: () => number }
+  let zoom = initialZoom
+  map.getZoom = () => zoom
+  return { map, setZoom: (next: number) => (zoom = next) }
+}
+
+/** Let pending load chains advance one macrotask. */
+const tick = () => new Promise((r) => setTimeout(r, 0))
+
 /** Center of coarse-grid pixel (x, y) as [lon, lat] on a global extent. */
 function pixelCenter(x: number, y: number): [number, number] {
   return [
@@ -657,15 +668,6 @@ describe('queryData readiness under a level change mid-load', () => {
     }
   }
 
-  function zoomableMap(initialZoom: number) {
-    const map = staticMap(initialZoom) as MapLike & { getZoom: () => number }
-    let zoom = initialZoom
-    map.getZoom = () => zoom
-    return { map, setZoom: (next: number) => (zoom = next) }
-  }
-
-  const tick = () => new Promise((r) => setTimeout(r, 0))
-
   it('follows the level change instead of reporting no level', async () => {
     const { store, release } = gatedPyramid()
     const layer = makeLayer({ store })
@@ -736,12 +738,107 @@ describe('queryData readiness under a level change mid-load', () => {
 
     const first = failing.ready
     await expect(first).rejects.toBeInstanceOf(ZarrLayerNotReadyError)
-    expect(failing.ready).not.toBe(first)
+    // Held and awaited, not just compared: reading `ready` again mints a fresh
+    // attempt, and leaving that one unconsumed is an unhandled rejection.
+    const second = failing.ready
+    expect(second).not.toBe(first)
+    await expect(second).rejects.toBeInstanceOf(ZarrLayerNotReadyError)
 
     const working = makeLayer({ store: samefieldPyramid() })
     working.onAdd(staticMap(), createRecordingGl())
     const settled = working.ready
     await settled
     expect(working.ready).toBe(settled)
+  })
+})
+
+/**
+ * Supersession has no retry budget. A burst of camera movement during a slow
+ * first load must not exhaust some allowance and leave a waiting query
+ * reporting "no resolution level" while a load is still in flight.
+ *
+ * Driving many *distinct* level selections needs many distinguishable
+ * resolutions, which a narrow extent provides without large arrays: level
+ * selection compares `width / worldFraction` against `256 * 2^zoom`, and a
+ * 0.36-degree span makes worldFraction 0.001, so an 8px level already reads as
+ * 8000 effective pixels. Level 0 is never selected — `ZarrStore` opens it
+ * during init for the variable's dimensions, so it must not be gated.
+ */
+describe('queryData readiness under repeated level changes', () => {
+  const EXTENT: [number, number, number, number] = [0, 0, 0.36, 0.36]
+  const WIDTHS = [4, 8, 16, 32, 64, 128, 256, 512]
+  const LAST = WIDTHS.length - 1
+  /** Level i is selected at this zoom; see the effective-pixel math above. */
+  const zoomFor = (level: number) => level + 3
+
+  function narrowPyramid() {
+    const shapeOf = (level: number): [number, number] => [2, WIDTHS[level]]
+    const backing = buildMemoryZarrStore({
+      attributes: {
+        multiscales: {
+          layout: WIDTHS.map((_, level) => ({
+            asset: String(level),
+            'spatial:shape': shapeOf(level),
+          })),
+          crs: 'EPSG:4326',
+        },
+      },
+      arrays: WIDTHS.map((width, level) => ({
+        name: `${level}/temperature`,
+        shape: shapeOf(level),
+        chunkShape: shapeOf(level),
+        dimensionNames: ['lat', 'lon'],
+        chunks: { '0/0': new Float32Array(2 * width).fill(level) },
+      })),
+    })
+    const release: Record<number, () => void> = {}
+    const gates = new Map<number, Promise<void>>()
+    for (let level = 1; level <= LAST; level++) {
+      gates.set(
+        level,
+        new Promise<void>((resolve) => {
+          release[level] = resolve
+        })
+      )
+    }
+    return {
+      release,
+      store: {
+        get: async (key: string) => {
+          const match = key.match(/^\/(\d+)\/temperature\/zarr\.json$/)
+          const gate = match && gates.get(Number(match[1]))
+          if (gate) await gate
+          return backing.get(key)
+        },
+      },
+    }
+  }
+
+  it('keeps following the level target however many times it moves', async () => {
+    const { store, release } = narrowPyramid()
+    const layer = makeLayer({ store, bounds: EXTENT, clim: [0, LAST] })
+    const { map, setZoom } = zoomableMap(zoomFor(1))
+    const gl = createRecordingGl()
+    layer.onAdd(map, gl)
+    await tick()
+
+    const pending = layer.queryData({
+      type: 'Point',
+      coordinates: [0.18, 0.18],
+    })
+    await tick()
+
+    // Each pass moves the target, then lets the load the query was waiting on
+    // finish as superseded — one retry per pass, more than any fixed budget.
+    for (let level = 1; level < LAST; level++) {
+      setZoom(zoomFor(level + 1))
+      layer.prerender(gl, {})
+      await tick()
+      release[level]()
+      await tick()
+    }
+
+    release[LAST]()
+    expect((await pending).temperature).toEqual([LAST])
   })
 })

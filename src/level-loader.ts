@@ -22,11 +22,6 @@ export type LevelLoadOutcome =
   /** Index out of range, or non-zero on a single-level store. */
   | 'ignored'
 
-/** How many times `ensureActive` will follow a supersession before giving up.
- *  Each retry waits on the load that displaced the last one, so this only
- *  bites if the level target keeps moving faster than loads complete. */
-const MAX_SUPERSEDED_RETRIES = 5
-
 export type LevelLoaderContext = {
   isMultiscale: () => boolean
   getLevelCount: () => number
@@ -124,15 +119,21 @@ export class LevelLoader {
    * finishes without committing. Retrying picks up whichever load replaced
    * it, so a camera move during startup doesn't read as "this store has no
    * levels".
+   *
+   * The retry is deliberately uncapped. A cap would turn a burst of camera
+   * movement into a spurious "no level" for whoever is waiting, which is the
+   * failure this exists to prevent. It cannot spin: every pass awaits a real
+   * load, so it advances only as fast as loads settle, and it ends as soon as
+   * one commits, one genuinely fails, or the renderer is disposed. Callers
+   * that need to stop waiting sooner pass an AbortSignal.
    */
   async ensureActive(): Promise<LevelRuntime | null> {
-    for (let attempt = 0; attempt <= MAX_SUPERSEDED_RETRIES; attempt++) {
+    for (;;) {
       if (this.activeLevel) return this.activeLevel
       if (this.context.isRemoved()) return null
       const outcome = await this.loadLevel(this.desiredLevelIndex)
-      if (outcome !== 'superseded') break
+      if (outcome !== 'superseded') return this.activeLevel
     }
-    return this.activeLevel
   }
 
   private async runLoad(
