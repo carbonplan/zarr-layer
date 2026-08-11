@@ -312,10 +312,17 @@ You can pass a third `options` argument to control query behavior:
 const result = await layer.queryData(geometry, selector, {
   signal: abortController.signal, // cancel in-flight query
   includeSpatialCoordinates: false, // omit per-pixel coordinates for slimmer results
+  level: 'finest', // read the highest-resolution level instead of the drawn one
 })
 ```
 
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
+
+### query resolution
+
+By default a query reads the level the map is currently drawing, so results agree with what the user sees and zooming out coarsens them. Pass `level: 'finest'` to always read the highest-resolution level in the store, which is what you want when the answer shouldn't depend on the camera — sampling point features, for instance.
+
+`'finest'` reads a level the renderer may not hold, so it can cost an extra fetch, and on a deep pyramid at low zoom that fetch is much larger than the default's. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
 
 ### query readiness
 

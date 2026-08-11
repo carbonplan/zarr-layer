@@ -17,6 +17,7 @@ export type {
   QueryResult,
   QueryDataValues,
   QueryGeometry,
+  QueryLevel,
   QueryOptions,
 } from './query/types'
 

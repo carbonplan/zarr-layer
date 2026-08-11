@@ -373,3 +373,106 @@ describe('queryData on a layer that cannot become ready', () => {
     releaseMetadata()
   })
 })
+
+/**
+ * `options.level` decides which resolution a query reads. The default follows
+ * the map so results agree with what is drawn; `'finest'` pins the answer to
+ * the highest-resolution level regardless of zoom.
+ *
+ * Fixture: levels wide enough that zoom picks between them (selection compares
+ * a level's pixel width against 256 * 2^zoom), each filled with a constant
+ * naming the level.
+ */
+describe('queryData level option', () => {
+  const MARKER = { coarse: 1, fine: 2 }
+
+  function markedPyramid({ reversed = false } = {}) {
+    const levels = [
+      {
+        asset: '0',
+        shape: [128, 256] as [number, number],
+        fill: MARKER.coarse,
+      },
+      { asset: '1', shape: [256, 512] as [number, number], fill: MARKER.fine },
+    ]
+    const layout = reversed
+      ? [{ asset: '1' }, { asset: '0' }]
+      : [{ asset: '0' }, { asset: '1' }]
+    return buildMemoryZarrStore({
+      attributes: { multiscales: { layout, crs: 'EPSG:4326' } },
+      arrays: levels.map((l) => ({
+        name: `${l.asset}/temperature`,
+        shape: l.shape,
+        chunkShape: l.shape,
+        dimensionNames: ['lat', 'lon'],
+        chunks: {
+          '0/0': new Float32Array(l.shape[0] * l.shape[1]).fill(l.fill),
+        },
+      })),
+    })
+  }
+
+  const queryOrigin = (layer: ZarrLayer, level?: 'current' | 'finest') =>
+    layer.queryData({ type: 'Point', coordinates: [0, 0] }, undefined, {
+      level,
+    })
+
+  it('defaults to the level the map is drawing', async () => {
+    const layer = makeLayer({ store: markedPyramid() })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    expect((await queryOrigin(layer)).temperature).toEqual([MARKER.coarse])
+  })
+
+  it('reads the finest level at a zoom that would draw the coarse one', async () => {
+    const layer = makeLayer({ store: markedPyramid() })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    expect((await queryOrigin(layer, 'finest')).temperature).toEqual([
+      MARKER.fine,
+    ])
+  })
+
+  it('leaves the rendered level alone when a finest query reads past it', async () => {
+    const layer = makeLayer({ store: markedPyramid() })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    expect((await queryOrigin(layer, 'finest')).temperature).toEqual([
+      MARKER.fine,
+    ])
+    // The finest read is query-local: a default query still answers from the
+    // level the renderer committed, so it never dragged the render loop along.
+    expect((await queryOrigin(layer)).temperature).toEqual([MARKER.coarse])
+  })
+
+  it('finds the finest level by resolution, not by position in the pyramid', async () => {
+    const layer = makeLayer({ store: markedPyramid({ reversed: true }) })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    expect((await queryOrigin(layer, 'finest')).temperature).toEqual([
+      MARKER.fine,
+    ])
+  })
+
+  it('is a no-op on a single-level store', async () => {
+    const layer = makeLayer({
+      clim: [0, 4],
+      store: buildMemoryZarrStore({
+        arrays: [
+          {
+            name: 'temperature',
+            shape: [2, 2],
+            chunkShape: [2, 2],
+            dimensionNames: ['lat', 'lon'],
+            chunks: { '0/0': [1, 2, 3, 4] },
+          },
+        ],
+      }),
+    })
+    layer.onAdd(staticMap(0), createRecordingGl())
+
+    expect((await queryOrigin(layer, 'finest')).temperature).toEqual(
+      (await queryOrigin(layer)).temperature
+    )
+  })
+})
