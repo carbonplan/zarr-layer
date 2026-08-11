@@ -317,6 +317,19 @@ const result = await layer.queryData(geometry, selector, {
 
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
 
+### query readiness
+
+`queryData` waits for the layer to become queryable, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. An empty result therefore always means the geometry found no data. If the layer can never answer — init failed, removed from the map, never added to one — it rejects with a `ZarrLayerNotReadyError` (with the underlying error on `.cause`) instead of returning empty.
+
+`layer.ready` exposes the same wait as a promise, for uses other than queries:
+
+```ts
+map.addLayer(layer)
+await layer.ready // metadata loaded and a resolution level committed
+```
+
+Not the same signal as `onLoadingStateChange`, which is a spinner: it flips as chunks load and reports nothing about the level commit, so `loading: false` can be emitted while the layer still has no level.
+
 ## authentication
 
 Use `transformRequest` to add headers or credentials to requests. The function receives the fully resolved URL for each request, enabling per-path authentication like presigned S3 URLs. Supports any [fetch options](https://developer.mozilla.org/en-US/docs/Web/API/fetch#options).

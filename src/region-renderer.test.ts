@@ -510,3 +510,66 @@ describe('RegionRenderer', () => {
     expect(seam(renderer).getRegionStates(gl)).toEqual([])
   })
 })
+
+/**
+ * A multiscale renderer commits no level during `initialize()` — the level
+ * comes from map zoom, which only `update()` knows. `queryData` therefore has
+ * to commit one itself, or a query on a map that never painted indexes into
+ * nothing and comes back empty.
+ */
+describe('RegionRenderer queries before the render loop runs', () => {
+  async function makeMultiscaleRenderer() {
+    const store = new ZarrStore({
+      customStore: buildMemoryZarrStore({
+        attributes: {
+          multiscales: {
+            layout: [{ asset: '0' }],
+            crs: 'EPSG:4326',
+          },
+        },
+        arrays: [
+          {
+            name: '0/temperature',
+            shape: [HEIGHT, WIDTH],
+            chunkShape: [HEIGHT, WIDTH],
+            dimensionNames: ['lat', 'lon'],
+            chunks: {
+              '0/0': Array.from({ length: HEIGHT * WIDTH }, (_, i) => i),
+            },
+          },
+        ],
+      }),
+      variable: 'temperature',
+      version: 3,
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+    })
+    await store.initialized
+    const renderer = new RegionRenderer(store, 'temperature', {}, vi.fn())
+    await renderer.initialize()
+    return renderer
+  }
+
+  it('commits a level for a query when update() never ran', async () => {
+    const renderer = await makeMultiscaleRenderer()
+
+    // Pixel (0, 0) of the 8x4 grid: lon -157.5, lat 67.5.
+    const result = await renderer.queryData({
+      type: 'Point',
+      coordinates: [-157.5, 67.5],
+    })
+
+    expect(result.temperature).toEqual([0])
+  })
+
+  it('commits the level once for concurrent queries', async () => {
+    const renderer = await makeMultiscaleRenderer()
+
+    const results = await Promise.all([
+      renderer.queryData({ type: 'Point', coordinates: [-157.5, 67.5] }),
+      renderer.queryData({ type: 'Point', coordinates: [-112.5, 22.5] }),
+    ])
+
+    expect(results.map((r) => r.temperature)).toEqual([[0], [9]])
+  })
+})

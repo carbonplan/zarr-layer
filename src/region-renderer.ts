@@ -1200,13 +1200,22 @@ export class RegionRenderer {
     emitLoadingStateUtil(this.loadingManager)
   }
 
+  /**
+   * Await a committed level. Multiscale init deliberately leaves the level
+   * to `update()`, which only runs from the render path, so a query issued
+   * against a map that hasn't painted has to commit one itself.
+   */
+  ensureQueryableLevel(): Promise<LevelRuntime | null> {
+    return this.levelLoader.ensureActive()
+  }
+
   /** Query data for point or region geometries. */
   async queryData(
     geometry: QueryGeometry,
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const activeLevel = this.activeLevel
+    const activeLevel = await this.ensureQueryableLevel()
     return queryDataWithContext(
       {
         zarrStore: this.zarrStore,

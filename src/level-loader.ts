@@ -29,6 +29,7 @@ export class LevelLoader {
   private desiredLevelIndex = 0
   private loadingLevelIndex: number | null = null
   private activeLevel: LevelRuntime | null = null
+  private inflight: Promise<void> | null = null
 
   constructor(private context: LevelLoaderContext) {}
 
@@ -55,21 +56,61 @@ export class LevelLoader {
    * `setSelector` to rebuild slice args without refetching. `loadToken`
    * acts as a cancellation token: any load whose token is stale at
    * commit time drops its result.
+   *
+   * The returned promise settles when the load does, so callers outside the
+   * render loop (`ensureActive`) can await a commit. The synchronous guards
+   * live here rather than in `runLoad` so a deduped call hands back the
+   * in-flight promise instead of an already-resolved one.
    */
-  async loadLevel(
+  loadLevel(
     levelIndex: number,
     { reuseArray = false }: { reuseArray?: boolean } = {}
   ): Promise<void> {
     if (this.context.isMultiscale() && this.context.getLevelCount() > 0) {
-      if (levelIndex < 0 || levelIndex >= this.context.getLevelCount()) return
+      if (levelIndex < 0 || levelIndex >= this.context.getLevelCount()) {
+        return Promise.resolve()
+      }
     } else if (levelIndex !== 0) {
-      return
+      return Promise.resolve()
     }
 
     // Dedupe: an in-flight load for the same target is already on it.
     // A selector rebuild (`reuseArray`) intentionally supersedes.
-    if (this.loadingLevelIndex === levelIndex && !reuseArray) return
+    if (this.loadingLevelIndex === levelIndex && !reuseArray) {
+      return this.inflight ?? Promise.resolve()
+    }
 
+    const pending = this.runLoad(levelIndex, reuseArray)
+    this.inflight = pending
+    const clear = () => {
+      if (this.inflight === pending) this.inflight = null
+    }
+    // Settled both ways, and handled here so the bookkeeping chain can't
+    // surface as an unhandled rejection alongside the caller's own.
+    pending.then(clear, clear)
+    return pending
+  }
+
+  /**
+   * Await a committed level, loading the desired one if the render loop
+   * hasn't. Returns null when the load fails or was superseded by a newer
+   * one — callers treat that the same as "no level".
+   *
+   * Targets the render loop's own desired index so this can't fight it: the
+   * level `update()` wants is the level `update()` would load, and the dedupe
+   * in `loadLevel` folds the two onto one request.
+   */
+  async ensureActive(): Promise<LevelRuntime | null> {
+    if (this.activeLevel) return this.activeLevel
+    if (this.context.isRemoved()) return null
+    await this.loadLevel(this.desiredLevelIndex)
+    return this.activeLevel
+  }
+
+  private async runLoad(
+    levelIndex: number,
+    reuseArray: boolean
+  ): Promise<void> {
     const token = ++this.loadToken
     // Snapshot the selector so we can detect a concurrent `setSelector`
     // that arrived after `buildSliceArgsForSelector` resolved; committing
@@ -147,5 +188,6 @@ export class LevelLoader {
     this.loadToken++
     this.loadingLevelIndex = null
     this.activeLevel = null
+    this.inflight = null
   }
 }
