@@ -326,7 +326,7 @@ By default a query reads the level the map is currently drawing, so results agre
 
 ### query readiness
 
-`queryData` waits for the layer to become queryable, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. An empty result therefore always means the geometry found no data. If the layer can never answer — init failed, no level could be loaded, removed from the map, never added to one — it rejects with a `ZarrLayerNotReadyError` (with the underlying error on `.cause`) instead of returning empty. A level that can't be opened rejects too, so an unreachable asset never passes for absent data.
+`queryData` waits for the layer to become queryable, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. An empty result therefore always means the geometry found no data. If the layer can never answer — init failed, no level could be loaded, removed from the map, never added to one — it rejects with a `ZarrLayerNotReadyError` (with the underlying error on `.cause`) instead of returning empty.
 
 `layer.ready` exposes the same wait as a promise, for uses other than queries:
 
