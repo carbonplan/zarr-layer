@@ -69,7 +69,7 @@ import {
   makeRegionKey,
 } from './region-cache'
 import { RegionFetcher } from './region-fetcher'
-import { LevelLoader } from './level-loader'
+import { LevelLoader, type LevelLoadOutcome } from './level-loader'
 import { wrapError } from './errors'
 import { createHybridMesh } from './mesh-reprojector'
 import {
@@ -897,7 +897,7 @@ export class RegionRenderer {
   private loadLevel(
     levelIndex: number,
     options: { reuseArray?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<LevelLoadOutcome> {
     return this.levelLoader.loadLevel(levelIndex, options)
   }
 

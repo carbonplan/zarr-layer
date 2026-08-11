@@ -973,7 +973,17 @@ export class ZarrLayer {
    * Awaiting it is optional for queries; `queryData` waits on its own.
    */
   get ready(): Promise<void> {
-    this.readyPromise ??= this.resolveReadiness().then(() => {})
+    this.readyPromise ??= this.resolveReadiness().then(
+      () => {},
+      (err) => {
+        // Only success is cached. Caching the rejection would freeze a
+        // transient failure — a level load that lost a race, a store blip —
+        // into a layer that reports itself permanently unready even after
+        // the render loop has gone on to commit a level.
+        this.readyPromise = null
+        throw err
+      }
+    )
     return this.readyPromise
   }
 

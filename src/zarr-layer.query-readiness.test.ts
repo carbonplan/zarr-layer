@@ -592,3 +592,156 @@ describe('queryData failure reporting', () => {
     expect((error as ZarrLayerNotReadyError).message).toMatch(/WebGL2/)
   })
 })
+
+/**
+ * A load that a newer one displaces is not a failure. Zooming while the first
+ * level is still loading is ordinary map behavior, and the displaced load must
+ * not be reported as "this store has no levels" — least of all through `ready`,
+ * whose result callers hold onto.
+ */
+describe('queryData readiness under a level change mid-load', () => {
+  /**
+   * Three levels, each filled with a constant naming it. Level 0 is too small
+   * for any zoom under test to select, which matters because `ZarrStore` opens
+   * it during init to learn the variable's dimensions — gating it would gate
+   * initialization rather than the level load. Only the two contested levels
+   * are gated: zoom 0 selects level 1, zoom 1 selects level 2.
+   */
+  const GATED_LEVELS = ['1', '2']
+
+  function gatedPyramid() {
+    const sizes: Record<string, [number, number]> = {
+      '0': [32, 64],
+      '1': [128, 256],
+      '2': [256, 512],
+    }
+    const backing = buildMemoryZarrStore({
+      attributes: {
+        multiscales: {
+          layout: Object.entries(sizes).map(([asset, shape]) => ({
+            asset,
+            'spatial:shape': shape,
+          })),
+          crs: 'EPSG:4326',
+        },
+      },
+      arrays: Object.entries(sizes).map(([asset, shape]) => ({
+        name: `${asset}/temperature`,
+        shape,
+        chunkShape: shape,
+        dimensionNames: ['lat', 'lon'],
+        chunks: {
+          '0/0': new Float32Array(shape[0] * shape[1]).fill(Number(asset)),
+        },
+      })),
+    })
+    const release: Record<string, () => void> = {}
+    const gates = Object.fromEntries(
+      GATED_LEVELS.map((level) => [
+        level,
+        new Promise<void>((resolve) => {
+          release[level] = resolve
+        }),
+      ])
+    )
+    return {
+      release,
+      store: {
+        get: async (key: string) => {
+          for (const level of GATED_LEVELS) {
+            if (key === `/${level}/temperature/zarr.json`) await gates[level]
+          }
+          return backing.get(key)
+        },
+      },
+    }
+  }
+
+  function zoomableMap(initialZoom: number) {
+    const map = staticMap(initialZoom) as MapLike & { getZoom: () => number }
+    let zoom = initialZoom
+    map.getZoom = () => zoom
+    return { map, setZoom: (next: number) => (zoom = next) }
+  }
+
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+
+  it('follows the level change instead of reporting no level', async () => {
+    const { store, release } = gatedPyramid()
+    const layer = makeLayer({ store })
+    const { map, setZoom } = zoomableMap(0)
+    const gl = createRecordingGl()
+    layer.onAdd(map, gl)
+    await tick()
+
+    // Query waits on the load the initial zoom asked for.
+    const pending = layer.queryData({ type: 'Point', coordinates: [0, 0] })
+    await tick()
+
+    // The camera moves to a zoom wanting the next level down, so the render
+    // loop starts a load that displaces the one the query is waiting on.
+    setZoom(1)
+    layer.prerender(gl, {})
+    await tick()
+
+    // The displaced load finishes first, committing nothing.
+    release['1']()
+    await tick()
+
+    release['2']()
+    expect((await pending).temperature).toEqual([2])
+  })
+
+  it('follows the level change when the displaced load errors on the way out', async () => {
+    // Cancelling a level load can make its in-flight reads throw. That error
+    // belongs to an attempt nobody is waiting on any more, so it must read as
+    // supersession rather than as a failure that ends the retry.
+    const { store, release } = gatedPyramid()
+    const layer = makeLayer({
+      store: {
+        get: async (key: string) => {
+          const value = await store.get(key)
+          if (key === '/1/temperature/zarr.json') {
+            throw new Error('read cancelled')
+          }
+          return value
+        },
+      },
+    })
+    const { map, setZoom } = zoomableMap(0)
+    const gl = createRecordingGl()
+    layer.onAdd(map, gl)
+    await tick()
+
+    const pending = layer.queryData({ type: 'Point', coordinates: [0, 0] })
+    await tick()
+
+    setZoom(1)
+    layer.prerender(gl, {})
+    await tick()
+
+    release['1']()
+    await tick()
+
+    release['2']()
+    expect((await pending).temperature).toEqual([2])
+  })
+
+  it('caches `ready` only on success, so a failure is not permanent', async () => {
+    const failing = makeLayer({
+      store: { get: async () => undefined },
+      bounds: undefined,
+    })
+    failing.onAdd(staticMap(), createRecordingGl())
+
+    const first = failing.ready
+    await expect(first).rejects.toBeInstanceOf(ZarrLayerNotReadyError)
+    expect(failing.ready).not.toBe(first)
+
+    const working = makeLayer({ store: samefieldPyramid() })
+    working.onAdd(staticMap(), createRecordingGl())
+    const settled = working.ready
+    await settled
+    expect(working.ready).toBe(settled)
+  })
+})
