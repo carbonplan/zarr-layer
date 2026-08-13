@@ -312,10 +312,32 @@ You can pass a third `options` argument to control query behavior:
 const result = await layer.queryData(geometry, selector, {
   signal: abortController.signal, // cancel in-flight query
   includeSpatialCoordinates: false, // omit per-pixel coordinates for slimmer results
+  level: 'finest', // read the highest-resolution level instead of the drawn one
 })
 ```
 
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
+
+### query resolution
+
+By default a query reads the level the map is currently drawing, so results agree with what the user sees and zooming out coarsens them. Pass `level: 'finest'` to always read the highest-resolution level in the store, which is what you want when the answer shouldn't depend on the camera — sampling point features, for instance.
+
+`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
+
+### query readiness
+
+`queryData` waits for metadata and a committed resolution level, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. Readiness failures — initialization failure, failure to load a level, removal from the map, or querying before the layer was added — reject with a `ZarrLayerNotReadyError` rather than returning empty. Initialization failures carry the underlying error on `.cause`.
+
+Failed reads reject as well, so an empty result means the geometry found no data.
+
+`layer.ready` exposes the same wait as a promise, for uses other than queries:
+
+```ts
+map.addLayer(layer)
+await layer.ready // metadata loaded and a resolution level committed
+```
+
+Not the same signal as `onLoadingStateChange`, which is a spinner: it flips as chunks load and reports nothing about the level commit, so `loading: false` can be emitted while the layer still has no level.
 
 ## authentication
 

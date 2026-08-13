@@ -41,6 +41,7 @@ import {
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
+import { ZarrLayerNotReadyError } from './errors'
 
 type MapboxInternals = {
   transform?: {
@@ -87,6 +88,20 @@ function scaleMercatorMatrix(
   for (let i = 4; i < 8; i++) out[i] *= scale
   for (let i = 8; i < 12; i++) out[i] *= scale
   return out
+}
+
+/** Settle as soon as `signal` aborts, so a caller tearing the layer down isn't
+ *  held by a wait it can no longer cancel from the inside. */
+function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort)
+    })
+  })
 }
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
@@ -172,6 +187,10 @@ export class ZarrLayer {
   } = {}
   private normalizedSelector: NormalizedSelector = {}
   private isRemoved: boolean = false
+  /** Settles when the current dataset's metadata init finishes; never rejects
+   *  (failures land in `initError`). Null until the layer is added to a map. */
+  private initPromise: Promise<void> | null = null
+  private readyPromise: Promise<void> | null = null
   private fragmentShaderSource: string = maplibreFragmentShaderSource
   private customFrag: string | undefined
   private customUniforms: Record<string, number> = {}
@@ -452,7 +471,14 @@ export class ZarrLayer {
 
   async setVariable(variable: string) {
     if (variable === this.variable) return
+    // Queries and `ready` track the new dataset from here on, so a call that
+    // lands mid-swap waits for the new store rather than reading the old one.
+    this.readyPromise = null
+    this.initPromise = this.trackInit(this._setVariableAsync(variable))
+    await this.initPromise
+  }
 
+  private async _setVariableAsync(variable: string) {
     this.metadataLoading = true
     this.emitLoadingState()
 
@@ -514,7 +540,25 @@ export class ZarrLayer {
     map: MapLike,
     gl: WebGL2RenderingContext | WebGLRenderingContext
   ): void {
-    this._onAddAsync(map, gl)
+    this.initPromise = this.trackInit(this._onAddAsync(map, gl))
+  }
+
+  /**
+   * Funnel an initialization run into `initError` so `initPromise` always
+   * fulfills. `_onAddAsync` does its own error handling once running, but it
+   * can reject before reaching that — `resolveGl` throws on a context that
+   * isn't WebGL2 — and a rejection here would otherwise escape `ready` and
+   * `queryData` raw, and go unhandled when nobody awaits either.
+   */
+  private trackInit(run: Promise<void>): Promise<void> {
+    return run.catch((err) => {
+      this.initError = err instanceof Error ? err : new Error(String(err))
+      console.error(
+        `[zarr-layer] Failed to initialize: ${this.initError.message}`
+      )
+      this.metadataLoading = false
+      this.emitLoadingState()
+    })
   }
 
   private async _onAddAsync(
@@ -917,9 +961,90 @@ export class ZarrLayer {
   // ========== Query Interface ==========
 
   /**
+   * Resolves once the layer can serve queries and draw: metadata loaded and a
+   * level committed. Rejects with `ZarrLayerNotReadyError` if initialization
+   * failed or the layer was removed.
+   *
+   * This is not the same signal as `onLoadingStateChange`. That one is a
+   * spinner — it flaps as chunks come and go, and it reports nothing about the
+   * level commit, so `loading: false` can be emitted while the layer still has
+   * no level. `ready` settles once, after both stages.
+   *
+   * Awaiting it is optional for queries; `queryData` waits on its own.
+   */
+  get ready(): Promise<void> {
+    this.readyPromise ??= this.resolveReadiness().then(
+      () => {},
+      (err) => {
+        // Only success is cached. Caching the rejection would freeze a
+        // transient failure — a level load that lost a race, a store blip —
+        // into a layer that reports itself permanently unready even after
+        // the render loop has gone on to commit a level.
+        this.readyPromise = null
+        throw err
+      }
+    )
+    return this.readyPromise
+  }
+
+  /** Wait out initialization and commit a level, or explain why neither can
+   *  happen. Shared by `ready` and `queryData`. */
+  private async resolveReadiness(): Promise<RegionRenderer> {
+    if (!this.initPromise) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer has not been added to a map — call map.addLayer() first'
+      )
+    }
+    await this.initPromise
+    if (this.initError) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        `layer failed to initialize: ${this.initError.message}`,
+        { cause: this.initError }
+      )
+    }
+    const regionRenderer = this.regionRenderer
+    if (this.isRemoved || !regionRenderer) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer has been removed from the map'
+      )
+    }
+    // Held in a local because a removal landing during the await nulls the
+    // field out from under us.
+    const level = await regionRenderer.ensureQueryableLevel()
+    if (this.isRemoved || this.regionRenderer !== regionRenderer) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer was removed while it was becoming ready'
+      )
+    }
+    if (!level) {
+      // No level means the load failed or was superseded and never retried.
+      // Returning here would let a query answer empty off a layer that holds
+      // no data at all, which is exactly the silent wrong answer the
+      // readiness contract exists to prevent.
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'no resolution level could be loaded'
+      )
+    }
+    return regionRenderer
+  }
+
+  /**
    * Query all data values within a geographic region.
+   *
+   * Waits for metadata and a committed resolution level, so it can be called
+   * straight after `map.addLayer()` with no render pass in between. Neither an
+   * unready layer nor a failed read answers with an empty result, so an empty
+   * result means the geometry found no data.
+   *
    * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
    * @param selector - Optional selector to override the layer's selector.
+   * @throws {ZarrLayerNotReadyError} if the layer failed to initialize, could
+   *   not load a level, was removed, or was never added to a map.
    * @returns Promise resolving to the query result matching carbonplan/maps structure.
    */
   async queryData(
@@ -927,13 +1052,21 @@ export class ZarrLayer {
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
-    if (!this.regionRenderer) {
-      return {
-        [this.variable]: [],
-        dimensions: [],
-        coordinates: {},
-      }
+    const regionRenderer = await abortable(
+      this.resolveReadiness(),
+      options?.signal
+    )
+    const result = await regionRenderer.queryData(geometry, selector, options)
+    // Readiness held when the query started, but a removal landing while it ran
+    // disposes the renderer and clears its level, and the inner path answers
+    // empty once there is no level to index. Checked here so a layer that went
+    // away can never come back as "no data here".
+    if (this.isRemoved || this.regionRenderer !== regionRenderer) {
+      throw new ZarrLayerNotReadyError(
+        this.id,
+        'layer was removed while the query was in flight'
+      )
     }
-    return this.regionRenderer.queryData(geometry, selector, options)
+    return result
   }
 }

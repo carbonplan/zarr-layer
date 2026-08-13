@@ -91,9 +91,26 @@ export interface QueryTransformOptions {
 /**
  * Options for queryData calls.
  */
+/**
+ * Which resolution level a query reads from.
+ *
+ * `'current'` (the default) uses the level the map is drawing, so a query
+ * agrees with what the user sees. `'finest'` uses the highest-resolution
+ * level in the store regardless of zoom — what you want when the answer
+ * should not depend on the camera, such as sampling point features.
+ *
+ * `'finest'` reads a level the renderer may not hold, so it fetches cold
+ * rather than reusing chunks the render path already cached. A point costs
+ * about one chunk either way — it selects a single pixel at any resolution —
+ * while a polygon covers quadratically more pixels the finer the level.
+ */
+export type QueryLevel = 'current' | 'finest'
+
 export interface QueryOptions {
   /** AbortSignal to cancel the query. */
   signal?: AbortSignal
   /** Include per-pixel coordinates in the result. Defaults to true. */
   includeSpatialCoordinates?: boolean
+  /** Resolution level to read from. Defaults to `'current'`. */
+  level?: QueryLevel
 }

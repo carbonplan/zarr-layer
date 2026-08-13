@@ -1,4 +1,5 @@
 export { ZarrLayer } from './zarr-layer'
+export { ZarrLayerNotReadyError } from './errors'
 export type {
   ZarrLayerOptions,
   ColormapArray,
@@ -16,6 +17,7 @@ export type {
   QueryResult,
   QueryDataValues,
   QueryGeometry,
+  QueryLevel,
   QueryOptions,
 } from './query/types'
 

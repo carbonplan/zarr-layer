@@ -23,7 +23,9 @@ import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
 
 const WORLD = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
 
-async function makeQueryHarness(opts: { gateReads?: boolean } = {}) {
+async function makeQueryHarness(
+  opts: { gateReads?: boolean; failReads?: boolean } = {}
+) {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -47,10 +49,18 @@ async function makeQueryHarness(opts: { gateReads?: boolean } = {}) {
   const readsReleased = new Promise<void>((res) => {
     releaseReads = res
   })
+  const chunkKey = (key: string) => key.includes('/temp/c/')
   const customStore = opts.gateReads
     ? {
         get: async (key: string) => {
-          if (key.includes('/temp/c/')) await readsReleased
+          if (chunkKey(key)) await readsReleased
+          return memory.get(key)
+        },
+      }
+    : opts.failReads
+    ? {
+        get: async (key: string) => {
+          if (chunkKey(key)) throw new Error('network down')
           return memory.get(key)
         },
       }
@@ -209,6 +219,17 @@ describe('queryData', () => {
     controller.abort()
     releaseReads()
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('propagates a failed chunk read instead of answering empty', async () => {
+    const { context } = await makeQueryHarness({ failReads: true })
+
+    // A read that failed is not a region that holds no data; reporting it as
+    // an empty result is the silent wrong answer this contract exists to
+    // avoid.
+    await expect(queryData(context, point(-157.5, 67.5))).rejects.toThrow(
+      /failed to read query data/
+    )
   })
 })
 

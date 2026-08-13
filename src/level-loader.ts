@@ -7,6 +7,21 @@ type ResolvedLevel = Pick<
   'zarrArray' | 'width' | 'height' | 'regionSize' | 'xyLimits'
 > & { reusedArray: boolean }
 
+/**
+ * Why a load stopped.
+ *
+ * `superseded` is not a failure: a newer load (a zoom change, a selector
+ * rebuild) took over, and its result is the one that counts. Callers waiting
+ * on a level must retry rather than conclude there is none — which is the
+ * whole reason this is reported instead of inferred from `activeLevel`.
+ */
+export type LevelLoadOutcome =
+  | 'committed'
+  | 'superseded'
+  | 'failed'
+  /** Index out of range, or non-zero on a single-level store. */
+  | 'ignored'
+
 export type LevelLoaderContext = {
   isMultiscale: () => boolean
   getLevelCount: () => number
@@ -29,6 +44,7 @@ export class LevelLoader {
   private desiredLevelIndex = 0
   private loadingLevelIndex: number | null = null
   private activeLevel: LevelRuntime | null = null
+  private inflight: Promise<LevelLoadOutcome> | null = null
 
   constructor(private context: LevelLoaderContext) {}
 
@@ -55,21 +71,75 @@ export class LevelLoader {
    * `setSelector` to rebuild slice args without refetching. `loadToken`
    * acts as a cancellation token: any load whose token is stale at
    * commit time drops its result.
+   *
+   * The returned promise settles when the load does, so callers outside the
+   * render loop (`ensureActive`) can await a commit. The synchronous guards
+   * live here rather than in `runLoad` so a deduped call hands back the
+   * in-flight promise instead of an already-resolved one.
    */
-  async loadLevel(
+  loadLevel(
     levelIndex: number,
     { reuseArray = false }: { reuseArray?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<LevelLoadOutcome> {
     if (this.context.isMultiscale() && this.context.getLevelCount() > 0) {
-      if (levelIndex < 0 || levelIndex >= this.context.getLevelCount()) return
+      if (levelIndex < 0 || levelIndex >= this.context.getLevelCount()) {
+        return Promise.resolve('ignored')
+      }
     } else if (levelIndex !== 0) {
-      return
+      return Promise.resolve('ignored')
     }
 
     // Dedupe: an in-flight load for the same target is already on it.
     // A selector rebuild (`reuseArray`) intentionally supersedes.
-    if (this.loadingLevelIndex === levelIndex && !reuseArray) return
+    if (this.loadingLevelIndex === levelIndex && !reuseArray) {
+      return this.inflight ?? Promise.resolve('ignored')
+    }
 
+    const pending = this.runLoad(levelIndex, reuseArray)
+    this.inflight = pending
+    const clear = () => {
+      if (this.inflight === pending) this.inflight = null
+    }
+    // Settled both ways, and handled here so the bookkeeping chain can't
+    // surface as an unhandled rejection alongside the caller's own.
+    pending.then(clear, clear)
+    return pending
+  }
+
+  /**
+   * Await a committed level, loading the desired one if the render loop
+   * hasn't. Returns null only when no level can be had: the load failed, or
+   * the loader was disposed.
+   *
+   * Targets the render loop's own desired index so this can't fight it: the
+   * level `update()` wants is the level `update()` would load, and the dedupe
+   * in `loadLevel` folds the two onto one request.
+   *
+   * A zoom change mid-load displaces the load we are waiting on, which
+   * finishes without committing. Retrying picks up whichever load replaced
+   * it, so a camera move during startup doesn't read as "this store has no
+   * levels".
+   *
+   * The retry is deliberately uncapped. A cap would turn a burst of camera
+   * movement into a spurious "no level" for whoever is waiting, which is the
+   * failure this exists to prevent. It cannot spin: every pass awaits a real
+   * load, so it advances only as fast as loads settle, and it ends as soon as
+   * one commits, one genuinely fails, or the renderer is disposed. Callers
+   * that need to stop waiting sooner pass an AbortSignal.
+   */
+  async ensureActive(): Promise<LevelRuntime | null> {
+    for (;;) {
+      if (this.activeLevel) return this.activeLevel
+      if (this.context.isRemoved()) return null
+      const outcome = await this.loadLevel(this.desiredLevelIndex)
+      if (outcome !== 'superseded') return this.activeLevel
+    }
+  }
+
+  private async runLoad(
+    levelIndex: number,
+    reuseArray: boolean
+  ): Promise<LevelLoadOutcome> {
     const token = ++this.loadToken
     // Snapshot the selector so we can detect a concurrent `setSelector`
     // that arrived after `buildSliceArgsForSelector` resolved; committing
@@ -109,7 +179,7 @@ export class LevelLoader {
         !targetStillDesired
       ) {
         this.context.invalidate()
-        return
+        return 'superseded'
       }
 
       // Atomic commit — one reference swap replaces all per-level state.
@@ -130,13 +200,17 @@ export class LevelLoader {
       // longer protected. Bare `.clear()` here would leak WebGL resources.
       if (!resolved.reusedArray) this.context.onNewArrayCommitted()
       this.context.invalidate()
+      return 'committed'
     } catch (err) {
-      if (token === this.loadToken) {
-        console.error(
-          `Failed to load level ${this.context.getAssetLabel(levelIndex)}:`,
-          err
-        )
-      }
+      // A load that a newer one raced past is reported as superseded, not as
+      // a failure: its error is about an attempt nobody is waiting on, and
+      // calling it a failure would stop `ensureActive` retrying.
+      if (token !== this.loadToken) return 'superseded'
+      console.error(
+        `Failed to load level ${this.context.getAssetLabel(levelIndex)}:`,
+        err
+      )
+      return 'failed'
     } finally {
       if (token === this.loadToken) this.loadingLevelIndex = null
     }
@@ -147,5 +221,6 @@ export class LevelLoader {
     this.loadToken++
     this.loadingLevelIndex = null
     this.activeLevel = null
+    this.inflight = null
   }
 }

@@ -18,7 +18,12 @@ import type {
   RegionRenderState,
   CustomShaderConfig,
 } from './renderer-types'
-import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
+import type {
+  QueryGeometry,
+  QueryLevel,
+  QueryOptions,
+  QueryResult,
+} from './query/types'
 import type {
   LoadingStateCallback,
   MapLike,
@@ -37,7 +42,12 @@ import {
   createProjectionContext,
   type ProjectionContext,
 } from './projection-utils'
-import type { LevelMeta, LevelRuntime, RegionState } from './region-state'
+import type {
+  LevelMeta,
+  LevelRuntime,
+  QueryLevelSnapshot,
+  RegionState,
+} from './region-state'
 import {
   buildSliceArgsForSelector,
   type DimensionValuesCache,
@@ -59,7 +69,8 @@ import {
   makeRegionKey,
 } from './region-cache'
 import { RegionFetcher } from './region-fetcher'
-import { LevelLoader } from './level-loader'
+import { LevelLoader, type LevelLoadOutcome } from './level-loader'
+import { wrapError } from './errors'
 import { createHybridMesh } from './mesh-reprojector'
 import {
   type RequestCanceller,
@@ -180,24 +191,7 @@ export class RegionRenderer {
             reusedArray: true,
           }
         }
-        const zarrArray = this.isMultiscale
-          ? await (async () => {
-              await this.ensureLevelMetadata(levelIndex)
-              return this.zarrStore.getLevelArray(this.levels[levelIndex].asset)
-            })()
-          : await this.zarrStore.getArray()
-        const width = zarrArray.shape[this.dimIndices.lon.index]
-        const height = zarrArray.shape[this.dimIndices.lat.index]
-        return {
-          zarrArray,
-          width,
-          height,
-          regionSize: this.getRegionSize(zarrArray) ?? [height, width],
-          xyLimits: this.isMultiscale
-            ? this.levels[levelIndex]?.xyLimits
-            : undefined,
-          reusedArray: false,
-        }
+        return { ...(await this.openLevel(levelIndex)), reusedArray: false }
       },
       buildSliceArgs: async (selectorSnapshot, array, coordLevelIndex) => {
         const { sliceArgs, multiValueDims } =
@@ -275,6 +269,31 @@ export class RegionRenderer {
     } finally {
       this.loadingManager.metadataLoading = false
       this.emitLoadingState()
+    }
+  }
+
+  /**
+   * Open a level's array and derive its pixel dimensions. Shared by the
+   * render loop's level commit and by query-local level reads; the store
+   * caches array handles, so opening the same level twice is cheap.
+   */
+  private async openLevel(levelIndex: number) {
+    const zarrArray = this.isMultiscale
+      ? await (async () => {
+          await this.ensureLevelMetadata(levelIndex)
+          return this.zarrStore.getLevelArray(this.levels[levelIndex].asset)
+        })()
+      : await this.zarrStore.getArray()
+    const width = zarrArray.shape[this.dimIndices.lon.index]
+    const height = zarrArray.shape[this.dimIndices.lat.index]
+    return {
+      zarrArray,
+      width,
+      height,
+      regionSize: this.getRegionSize(zarrArray) ?? [height, width],
+      xyLimits: this.isMultiscale
+        ? this.levels[levelIndex]?.xyLimits
+        : undefined,
     }
   }
 
@@ -878,7 +897,7 @@ export class RegionRenderer {
   private loadLevel(
     levelIndex: number,
     options: { reuseArray?: boolean } = {}
-  ): Promise<void> {
+  ): Promise<LevelLoadOutcome> {
     return this.levelLoader.loadLevel(levelIndex, options)
   }
 
@@ -1200,13 +1219,90 @@ export class RegionRenderer {
     emitLoadingStateUtil(this.loadingManager)
   }
 
+  /**
+   * Await a committed level. Multiscale init deliberately leaves the level
+   * to `update()`, which only runs from the render path, so a query issued
+   * against a map that hasn't painted has to commit one itself.
+   */
+  ensureQueryableLevel(): Promise<LevelRuntime | null> {
+    return this.levelLoader.ensureActive()
+  }
+
+  /**
+   * The highest-resolution level, by pixel width rather than by position:
+   * level order follows whatever the store declared, which is conventionally
+   * coarsest-first but is not guaranteed to be.
+   */
+  private finestLevelIndex(): number {
+    if (!this.isMultiscale || this.levels.length === 0) return 0
+    let finest = 0
+    let widest = -1
+    for (let i = 0; i < this.levels.length; i++) {
+      const shape = this.levels[i].shape
+      if (!shape) continue
+      const width = shape[this.dimIndices.lon?.index ?? shape.length - 1]
+      if (width > widest) {
+        widest = width
+        finest = i
+      }
+    }
+    return finest
+  }
+
+  /**
+   * Resolve the level a query reads from.
+   *
+   * `'finest'` deliberately bypasses `LevelLoader` when the renderer is on a
+   * different level: committing the finest level would drag the render loop
+   * onto it and fight the zoom-driven target over `loadToken`. A query-local
+   * snapshot leaves render state untouched.
+   */
+  private async resolveQueryLevel(
+    requested: QueryLevel = 'current'
+  ): Promise<QueryLevelSnapshot | null> {
+    const snapshot = (level: LevelRuntime): QueryLevelSnapshot => ({
+      index: level.index,
+      zarrArray: level.zarrArray,
+      width: level.width,
+      height: level.height,
+      xyLimits: level.xyLimits,
+    })
+
+    if (requested !== 'finest') {
+      const active = await this.ensureQueryableLevel()
+      return active && snapshot(active)
+    }
+
+    const finest = this.finestLevelIndex()
+    if (this.activeLevel?.index === finest) return snapshot(this.activeLevel)
+    try {
+      const opened = await this.openLevel(finest)
+      return {
+        index: finest,
+        zarrArray: opened.zarrArray,
+        width: opened.width,
+        height: opened.height,
+        xyLimits: opened.xyLimits,
+      }
+    } catch (err) {
+      // Propagated, not swallowed: an unreachable or malformed finest asset
+      // must not come back looking like a geometry that found no data.
+      throw wrapError(
+        `[ZarrLayer] failed to open level ${
+          this.levels[finest]?.asset ?? finest
+        } for query`,
+        err
+      )
+    }
+  }
+
   /** Query data for point or region geometries. */
   async queryData(
     geometry: QueryGeometry,
     selector?: Selector,
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const activeLevel = this.activeLevel
+    const level = await this.resolveQueryLevel(options?.level)
     return queryDataWithContext(
       {
         zarrStore: this.zarrStore,
@@ -1216,20 +1312,12 @@ export class RegionRenderer {
         mercatorBounds: this.mercatorBounds,
         latIsAscending: this.latIsAscending,
         levels: this.levels,
-        level: activeLevel
-          ? {
-              index: activeLevel.index,
-              zarrArray: activeLevel.zarrArray,
-              width: activeLevel.width,
-              height: activeLevel.height,
-              xyLimits: activeLevel.xyLimits,
-            }
-          : null,
+        level,
         projection: this.projection,
         antimeridianWarnings: this._antimeridianWarnings,
         dimensionValues: this.dimensionValues,
         isMultiscale: this.isMultiscale,
-        coordLevelIndex: activeLevel?.index ?? 0,
+        coordLevelIndex: level?.index ?? 0,
       },
       geometry,
       selector,
