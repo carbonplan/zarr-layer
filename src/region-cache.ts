@@ -38,8 +38,7 @@ export function createRegionState(
     vertexArr: null,
     pixCoordArr: null,
     indexArr: null,
-    vertexCount: 0,
-    useIndexedMesh: false,
+    indexCount: 0,
     mercatorBounds: null,
     wgs84Bounds: null,
     latIsAscending,
@@ -71,6 +70,7 @@ export function isRegionCpuReady(region: RegionState): boolean {
     hasRegionData(region) &&
     region.vertexArr &&
     region.pixCoordArr &&
+    region.indexArr &&
     region.mercatorBounds &&
     region.levelMeta
   )

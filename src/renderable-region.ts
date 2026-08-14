@@ -22,11 +22,8 @@ export interface RenderableRegion {
   // Geometry
   vertexBuffer: WebGLBuffer
   pixCoordBuffer: WebGLBuffer
-  vertexCount: number
-
-  // Indexed mesh support (for adaptive source-projected meshes)
-  indexBuffer?: WebGLBuffer | null
-  useIndexedMesh?: boolean
+  indexBuffer: WebGLBuffer
+  indexCount: number
 
   // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
   wgs84Bounds?: Wgs84Bounds | null
@@ -167,10 +164,8 @@ export function renderRegion(
     region.pixCoordBuffer
   )
 
-  // Bind index buffer for indexed mesh
-  if (region.useIndexedMesh && region.indexBuffer) {
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-  }
+  if (!region.indexBuffer) return false
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
 
   // Bind textures. The main texture must already be uploaded; bindBandTextures
   // uploads any band whose contents are not resident yet.
@@ -214,11 +209,7 @@ export function renderRegion(
         eyeM[3] * ax + eyeM[7] * shiftY + eyeM[15]
       )
     }
-    if (region.useIndexedMesh && region.indexBuffer) {
-      gl.drawElements(gl.TRIANGLES, region.vertexCount, gl.UNSIGNED_INT, 0)
-    } else {
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, region.vertexCount)
-    }
+    gl.drawElements(gl.TRIANGLES, region.indexCount, gl.UNSIGNED_INT, 0)
   }
 
   return true

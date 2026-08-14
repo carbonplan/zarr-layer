@@ -50,8 +50,7 @@ function fetchedRegion(): RegionState {
   region.vertexArr = new Float32Array(8)
   region.pixCoordArr = new Float32Array(8)
   region.indexArr = new Uint32Array([0, 1, 2])
-  region.useIndexedMesh = true
-  region.vertexCount = 3
+  region.indexCount = 3
   return region
 }
 
@@ -153,30 +152,25 @@ describe('ensureRegionGpuResources', () => {
     expect(gl.bufferData).toHaveBeenCalledTimes(3)
   })
 
-  it('skips the index buffer for non-indexed meshes', () => {
+  // Every region draws with gl.drawElements, so an index buffer is as
+  // load-bearing as the vertex buffer: without one there is nothing to draw.
+  it('holds a region undrawable until it has indices', () => {
     const gl = fakeGl()
     const region = fetchedRegion()
-    region.useIndexedMesh = false
     region.indexArr = null
 
-    expect(ensureRegionGpuResources(gl, region)).toBe(true)
+    expect(ensureRegionGpuResources(gl, region)).toBe(false)
     expect(region.indexBuffer).toBeNull()
-    expect(gl.createBuffer).toHaveBeenCalledTimes(2)
+    expect(region.geometryUploaded).toBe(false)
   })
 
-  it('keeps the index buffer for an indexed mesh whose flag is set', () => {
+  it('uploads an index buffer alongside the vertex buffers', () => {
     const gl = fakeGl()
     const region = fetchedRegion()
 
     expect(ensureRegionGpuResources(gl, region)).toBe(true)
     expect(region.indexBuffer).not.toBeNull()
-    // A stale indexArr on a non-indexed region must not produce a buffer.
-    const flat = fetchedRegion()
-    flat.useIndexedMesh = false
-    const flatGl = fakeGl()
-    expect(ensureRegionGpuResources(flatGl, flat)).toBe(true)
-    expect(flat.indexBuffer).toBeNull()
-    expect(flatGl.createBuffer).toHaveBeenCalledTimes(2)
+    expect(gl.createBuffer).toHaveBeenCalledTimes(3)
   })
 })
 

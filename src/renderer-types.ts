@@ -72,7 +72,6 @@ export interface RegionRenderState {
   vertexBuffer: WebGLBuffer
   /** Texture coordinate buffer for sampling resampled data */
   pixCoordBuffer: WebGLBuffer
-  vertexArr: Float32Array
   mercatorBounds: MercatorBounds
   width: number
   height: number
@@ -83,12 +82,10 @@ export interface RegionRenderState {
   bandTextures?: Map<string, WebGLTexture>
   bandTexturesUploaded?: Set<string>
   bandTexturesConfigured?: Set<string>
-  /** Index buffer for adaptive source-projected meshes */
-  indexBuffer?: WebGLBuffer
-  /** Number of vertices/indices to draw */
-  vertexCount?: number
-  /** Whether to use indexed mesh rendering (gl.drawElements) */
-  useIndexedMesh?: boolean
+  /** Index buffer for the adaptive mesh */
+  indexBuffer: WebGLBuffer
+  /** Number of indices to draw */
+  indexCount: number
   /** WGS84 bounds for two-stage reprojection */
   wgs84Bounds?: Wgs84Bounds
 }

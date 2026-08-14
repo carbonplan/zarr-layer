@@ -84,8 +84,7 @@ function seedRegion(renderer: RegionRenderer): RegionState {
   region.vertexArr = new Float32Array(8)
   region.pixCoordArr = new Float32Array(8)
   region.indexArr = new Uint32Array([0, 1, 2])
-  region.useIndexedMesh = true
-  region.vertexCount = 3
+  region.indexCount = 3
   region.mercatorBounds = {
     x0: 0,
     y0: 0,

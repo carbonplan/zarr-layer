@@ -97,16 +97,11 @@ export function renderMapboxTile({
     // per-region extent. wgs84Bounds carries the source-projected mesh anchor.
     if (!boundsIntersect(region.mercatorBounds, tileBounds)) continue
 
-    // Source-projected regions may use an indexed adaptive mesh.
-    const useIndexedMesh = !!region.useIndexedMesh && !!region.indexBuffer
-
     const renderable: RenderableRegion = {
       mercatorBounds: region.mercatorBounds,
       vertexBuffer: region.vertexBuffer,
       pixCoordBuffer: region.pixCoordBuffer,
-      vertexCount: useIndexedMesh
-        ? region.vertexCount ?? region.vertexArr.length / 2
-        : region.vertexArr.length / 2,
+      indexCount: region.indexCount,
       texture: region.texture,
       bandData: region.bandData ?? new Map(),
       bandTextures: region.bandTextures ?? new Map(),
@@ -114,9 +109,7 @@ export function renderMapboxTile({
       bandTexturesConfigured: region.bandTexturesConfigured ?? new Set(),
       width: region.width,
       height: region.height,
-      // Include indexed mesh fields for adaptive source-projected meshes.
-      indexBuffer: useIndexedMesh ? region.indexBuffer : undefined,
-      useIndexedMesh: useIndexedMesh,
+      indexBuffer: region.indexBuffer,
       // Include wgs84Bounds for source-projected mesh scale/anchor uniforms.
       wgs84Bounds: region.wgs84Bounds,
       latIsAscending: region.latIsAscending,
@@ -131,7 +124,8 @@ export function renderMapboxTile({
       useWgs84 ? tileMatrix : null
     )
     if (!rendered) {
-      // renderRegion returns false when band data is missing
+      // A drawable region can still become incomplete at this boundary if a
+      // texture or another required render resource is missing.
       needsMoreData = true
     }
   }

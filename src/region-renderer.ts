@@ -555,7 +555,6 @@ export class RegionRenderer {
     // Ensures it's not stale if geometry is recreated.
     region.wgs84Bounds = null
     region.indexArr = null
-    region.useIndexedMesh = false
     // Whatever this produces is newer than the buffers already on the GPU.
     region.geometryUploaded = false
 
@@ -641,8 +640,7 @@ export class RegionRenderer {
     region.pixCoordArr = meshResult.texCoords
     region.indexArr = meshResult.indices
     region.wgs84Bounds = meshResult.wgs84Bounds
-    region.useIndexedMesh = true
-    region.vertexCount = region.indexArr.length
+    region.indexCount = region.indexArr.length
   }
 
   private async buildSliceArgsForSelector(
@@ -1008,11 +1006,8 @@ export class RegionRenderer {
       mercatorBounds: region.mercatorBounds!,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
-      vertexCount: region.useIndexedMesh
-        ? region.vertexCount
-        : region.vertexArr!.length / 2,
-      indexBuffer: region.indexBuffer,
-      useIndexedMesh: region.useIndexedMesh,
+      indexCount: region.indexCount,
+      indexBuffer: region.indexBuffer!,
       wgs84Bounds: region.wgs84Bounds ?? undefined,
       latIsAscending: region.latIsAscending,
       texture: region.texture,
@@ -1100,7 +1095,6 @@ export class RegionRenderer {
       texture: region.texture,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
-      vertexArr: region.vertexArr!,
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
@@ -1108,10 +1102,8 @@ export class RegionRenderer {
       bandTextures: region.bandTextures,
       bandTexturesUploaded: region.bandTexturesUploaded,
       bandTexturesConfigured: region.bandTexturesConfigured,
-      // Indexed mesh fields for proj4 adaptive mesh
-      indexBuffer: region.indexBuffer ?? undefined,
-      vertexCount: region.vertexCount,
-      useIndexedMesh: region.useIndexedMesh,
+      indexBuffer: region.indexBuffer!,
+      indexCount: region.indexCount,
       wgs84Bounds: region.wgs84Bounds ?? undefined,
       latIsAscending: region.latIsAscending,
     }))

@@ -63,6 +63,8 @@ function cpuReadyRegion() {
   r.data = new Float32Array(4)
   r.vertexArr = new Float32Array(8)
   r.pixCoordArr = new Float32Array(8)
+  r.indexArr = new Uint32Array([0, 1, 2])
+  r.indexCount = 3
   r.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   r.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
   return r
@@ -72,6 +74,12 @@ describe('isRegionCpuReady', () => {
   it('requires CPU-side data, geometry arrays, bounds, and level meta', () => {
     expect(isRegionCpuReady(region(0, 0, 0))).toBe(false)
     expect(isRegionCpuReady(cpuReadyRegion())).toBe(true)
+  })
+
+  it('requires triangle indices', () => {
+    const r = cpuReadyRegion()
+    r.indexArr = null
+    expect(isRegionCpuReady(r)).toBe(false)
   })
 
   it('does not require GPU resources (uploads happen lazily at render)', () => {
