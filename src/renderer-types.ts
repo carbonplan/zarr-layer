@@ -1,4 +1,4 @@
-import type { MercatorBounds, Wgs84Bounds } from './map-utils'
+import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 
 export interface RendererUniforms {
@@ -86,6 +86,6 @@ export interface RegionRenderState {
   indexBuffer: WebGLBuffer
   /** Number of indices to draw */
   indexCount: number
-  /** WGS84 bounds for two-stage reprojection */
-  wgs84Bounds?: Wgs84Bounds
+  /** Normalized-Mercator bounds for reconstructing region-local mesh positions */
+  meshBounds: MeshMercatorBounds
 }

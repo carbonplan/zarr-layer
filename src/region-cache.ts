@@ -40,7 +40,7 @@ export function createRegionState(
     indexArr: null,
     indexCount: 0,
     mercatorBounds: null,
-    wgs84Bounds: null,
+    meshBounds: null,
     latIsAscending,
     selectorVersion,
     bandData: new Map(),
@@ -61,9 +61,9 @@ export function hasRegionData(region: RegionState): boolean {
 }
 
 /**
- * The region has everything an upload needs. Gates whether
- * `ensureRegionGpuResources` is worth attempting — not whether the region can
- * be drawn, which also requires that upload to have succeeded.
+ * The region has all CPU-side data required to upload and later draw its mesh.
+ * Gates whether `ensureRegionGpuResources` is worth attempting — not whether
+ * the region can be drawn, which also requires that upload to have succeeded.
  */
 export function isRegionCpuReady(region: RegionState): boolean {
   return !!(
@@ -72,6 +72,7 @@ export function isRegionCpuReady(region: RegionState): boolean {
     region.pixCoordArr &&
     region.indexArr &&
     region.mercatorBounds &&
+    region.meshBounds &&
     region.levelMeta
   )
 }

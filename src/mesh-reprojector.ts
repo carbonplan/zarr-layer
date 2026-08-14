@@ -8,7 +8,7 @@
 
 import Delaunator from 'delaunator'
 import { RasterReprojector } from '@developmentseed/raster-reproject'
-import { type Wgs84Bounds } from './map-utils'
+import { type MeshMercatorBounds } from './map-utils'
 import {
   pixelToSourceCRS,
   sourceCRSToPixel,
@@ -60,7 +60,7 @@ interface AdaptiveMeshResult {
   positions: Float32Array // Region-local Mercator deltas for shader
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
-  wgs84Bounds: Wgs84Bounds
+  meshBounds: MeshMercatorBounds
 }
 
 interface HybridMeshOptions {
@@ -783,8 +783,8 @@ export function createHybridMesh(
   )
 
   // Mercator anchor +/- half-extent (normalized mercator world coords); the
-  // renderer derives scale/shift from these. See the Wgs84Bounds doc in map-utils.
-  const wgs84Bounds: Wgs84Bounds = {
+  // renderer derives scale/shift from these. See MeshMercatorBounds in map-utils.
+  const meshBounds: MeshMercatorBounds = {
     x0: anchor.x - anchor.halfX,
     y0: anchor.y - anchor.halfY,
     x1: anchor.x + anchor.halfX,
@@ -795,6 +795,6 @@ export function createHybridMesh(
     positions,
     texCoords: new Float32Array(splitResult.texCoords),
     indices: splitResult.indices,
-    wgs84Bounds,
+    meshBounds,
   }
 }

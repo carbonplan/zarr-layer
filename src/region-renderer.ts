@@ -551,9 +551,9 @@ export class RegionRenderer {
     // Guard: can't create geometry without dimension info
     if (!region.levelMeta) return
 
-    // Defensive reset: wgs84Bounds is only set by the source-projected branch.
+    // Defensive reset: meshBounds is only set by the geometry producer below.
     // Ensures it's not stale if geometry is recreated.
-    region.wgs84Bounds = null
+    region.meshBounds = null
     region.indexArr = null
     // Whatever this produces is newer than the buffers already on the GPU.
     region.geometryUploaded = false
@@ -639,7 +639,7 @@ export class RegionRenderer {
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
     region.indexArr = meshResult.indices
-    region.wgs84Bounds = meshResult.wgs84Bounds
+    region.meshBounds = meshResult.meshBounds
     region.indexCount = region.indexArr.length
   }
 
@@ -987,28 +987,23 @@ export class RegionRenderer {
       shaderProgram,
       worldOffsets,
       context.customShaderConfig,
-      useDirectEcef,
       eyeMatrix
     )
   }
 
   /**
    * Convert a RegionState to a RenderableRegion for unified rendering.
-   * When useDirectEcef is true, uses the region's precomputed WGS84 mesh bounds
-   * for the ECEF vertex shader path. Render-only fields are set here instead of
-   * cached on RegionState, so projection toggles have no stale state.
+   * The shader program determines whether the mesh is projected flat or to
+   * ECEF; both variants consume the same region-local Mercator encoding.
    */
-  private regionToRenderable(
-    region: RegionState,
-    useDirectEcef: boolean = false
-  ): RenderableRegion {
-    const base: RenderableRegion = {
+  private regionToRenderable(region: RegionState): RenderableRegion {
+    return {
       mercatorBounds: region.mercatorBounds!,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
       indexCount: region.indexCount,
       indexBuffer: region.indexBuffer!,
-      wgs84Bounds: region.wgs84Bounds ?? undefined,
+      meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
       texture: region.texture,
       bandData: region.bandData,
@@ -1018,14 +1013,6 @@ export class RegionRenderer {
       width: region.width,
       height: region.height,
     }
-
-    if (useDirectEcef && region.wgs84Bounds) {
-      base.positionSpace = 'wgs84-ecef'
-      base.sampleMode = 'linear'
-      return base
-    }
-
-    return base // defaults handle all other cases
   }
 
   /**
@@ -1038,7 +1025,6 @@ export class RegionRenderer {
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
     customShaderConfig?: CustomShaderConfig,
-    useDirectEcef: boolean = false,
     eyeMatrix: number[] | Float32Array | Float64Array | null = null
   ): void {
     const gl = renderer.gl
@@ -1051,7 +1037,7 @@ export class RegionRenderer {
       renderRegion(
         gl,
         shaderProgram,
-        this.regionToRenderable(region, useDirectEcef),
+        this.regionToRenderable(region),
         worldOffsets,
         customShaderConfig,
         eyeMatrix
@@ -1104,7 +1090,7 @@ export class RegionRenderer {
       bandTexturesConfigured: region.bandTexturesConfigured,
       indexBuffer: region.indexBuffer!,
       indexCount: region.indexCount,
-      wgs84Bounds: region.wgs84Bounds ?? undefined,
+      meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
     }))
   }

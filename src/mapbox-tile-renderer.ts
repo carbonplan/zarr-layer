@@ -61,12 +61,13 @@ export function renderMapboxTile({
   // Determine if we're in globe mode (default true for backwards compatibility)
   const isGlobe = context.isGlobe ?? true
 
-  // Check if any region uses source-projected mesh positions.
-  const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
+  // Check if any region uses source-projected mesh positions. This becomes
+  // unconditional when the projection-mode cleanup removes the old variant.
+  const useWgs84 = regions.some((r) => !!r.meshBounds)
 
-  // Always use Mapbox globe shader for tile rendering - it handles both globe and mercator
-  // via the transition uniform. The shader converts WGS84 → Mercator, then optionally
-  // applies globe projection based on transition value.
+  // Always use the Mapbox globe-capable shader for tile rendering. It restores
+  // absolute Mercator positions from the region-local mesh, then optionally
+  // applies globe projection based on the transition value.
   const shaderProgram = renderer.getProgram(
     context.shaderData,
     customShaderConfig,
@@ -94,7 +95,7 @@ export function renderMapboxTile({
   let needsMoreData = false
   for (const region of regions) {
     // Use mercatorBounds for tile intersection — always set and has the actual
-    // per-region extent. wgs84Bounds carries the source-projected mesh anchor.
+    // per-region extent. meshBounds carries the source-projected mesh anchor.
     if (!boundsIntersect(region.mercatorBounds, tileBounds)) continue
 
     const renderable: RenderableRegion = {
@@ -110,8 +111,7 @@ export function renderMapboxTile({
       width: region.width,
       height: region.height,
       indexBuffer: region.indexBuffer,
-      // Include wgs84Bounds for source-projected mesh scale/anchor uniforms.
-      wgs84Bounds: region.wgs84Bounds,
+      meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,
     }
 

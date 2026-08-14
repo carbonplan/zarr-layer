@@ -93,7 +93,7 @@ function seedRegion(renderer: RegionRenderer): RegionState {
     latMin: -85,
     latMax: 85,
   }
-  region.wgs84Bounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  region.meshBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   region.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
 
   const cache = (renderer as unknown as Seam).regionCache

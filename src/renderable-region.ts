@@ -6,7 +6,7 @@
  * convert their regions to this interface for a single render path.
  */
 
-import type { MercatorBounds, Wgs84Bounds } from './map-utils'
+import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
 import { bindBandTextures, bindGeometryBuffers } from './render-helpers'
@@ -25,17 +25,14 @@ export interface RenderableRegion {
   indexBuffer: WebGLBuffer
   indexCount: number
 
-  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
-  wgs84Bounds?: Wgs84Bounds | null
+  // Normalized-Mercator bounds used to reconstruct region-local mesh positions
+  meshBounds: MeshMercatorBounds
 
   // Data orientation: true = row 0 is south (latitude ascending)
   // Resolved by ZarrStore during init
   latIsAscending: boolean
 
-  // Render-time fields (computed in regionToRenderable, not cached on RegionState)
-  // Defaults when unset: positionSpace = wgs84Bounds ? 'wgs84' : 'mercator'
-  //                      sampleMode = 'linear'
-  positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
+  // Render-time sampling mode. Defaults to linear.
   sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
 
   // Main texture (pre-uploaded). Null when band textures are sampled instead.
@@ -78,30 +75,18 @@ export function renderRegion(
   // not the off-screen layer center: small clip magnitudes, no pan/zoom jitter.
   eyeMatrix?: number[] | Float32Array | Float64Array | null
 ): boolean {
-  // Resolve position space and sample mode from explicit fields or defaults
-  const wgs84Bounds = region.wgs84Bounds ?? null
-  const posSpace = region.positionSpace ?? (wgs84Bounds ? 'wgs84' : 'mercator')
+  const meshBounds = region.meshBounds
+  if (!meshBounds) return false
 
   const hasLatBounds =
     region.mercatorBounds.latMin !== undefined &&
     region.mercatorBounds.latMax !== undefined
   const sampMode = region.sampleMode ?? 'linear'
 
-  // Set position uniforms based on position space
-  let scaleX: number, scaleY: number, shiftX: number, shiftY: number
-  if (posSpace === 'mercator') {
-    scaleX = (region.mercatorBounds.x1 - region.mercatorBounds.x0) / 2
-    scaleY = (region.mercatorBounds.y1 - region.mercatorBounds.y0) / 2
-    shiftX = (region.mercatorBounds.x0 + region.mercatorBounds.x1) / 2
-    shiftY = (region.mercatorBounds.y0 + region.mercatorBounds.y1) / 2
-  } else {
-    // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift
-    if (!wgs84Bounds) return false
-    scaleX = (wgs84Bounds.x1 - wgs84Bounds.x0) / 2
-    scaleY = (wgs84Bounds.y1 - wgs84Bounds.y0) / 2
-    shiftX = (wgs84Bounds.x0 + wgs84Bounds.x1) / 2
-    shiftY = (wgs84Bounds.y0 + wgs84Bounds.y1) / 2
-  }
+  const scaleX = (meshBounds.x1 - meshBounds.x0) / 2
+  const scaleY = (meshBounds.y1 - meshBounds.y0) / 2
+  const shiftX = (meshBounds.x0 + meshBounds.x1) / 2
+  const shiftY = (meshBounds.y0 + meshBounds.y1) / 2
 
   gl.uniform1f(shaderProgram.scaleLoc, 0)
   gl.uniform1f(shaderProgram.scaleXLoc, scaleX)

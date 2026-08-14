@@ -66,6 +66,7 @@ function cpuReadyRegion() {
   r.indexArr = new Uint32Array([0, 1, 2])
   r.indexCount = 3
   r.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  r.meshBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   r.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
   return r
 }
@@ -79,6 +80,12 @@ describe('isRegionCpuReady', () => {
   it('requires triangle indices', () => {
     const r = cpuReadyRegion()
     r.indexArr = null
+    expect(isRegionCpuReady(r)).toBe(false)
+  })
+
+  it('requires the local mesh bounds', () => {
+    const r = cpuReadyRegion()
+    r.meshBounds = null
     expect(isRegionCpuReady(r)).toBe(false)
   })
 
