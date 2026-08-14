@@ -13,7 +13,7 @@ import { bindBandTextures, bindGeometryBuffers } from './render-helpers'
 
 /**
  * A region ready for rendering.
- * This is the common interface for both tiles and untiled regions.
+ * This is the common interface for direct and tile-target rendering.
  * Textures are expected to be uploaded before rendering.
  */
 export interface RenderableRegion {

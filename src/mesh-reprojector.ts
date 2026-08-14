@@ -254,7 +254,7 @@ function lonLatToMerc(lon: number, lat: number): [number, number] {
  * sub-pixel on any real dataset (512px / sub-meter chunks measure ~0.0002px)
  * and only becomes visible under pathological over-zoom — e.g. a 2000 km/pixel
  * custom-CRS (LCC) store at z24 yields ~1px. If a visible seam is ever reported
- * on real data, the proportionate fix is to subdivide the untiled mesh by
+ * on real data, the proportionate fix is to subdivide the adaptive mesh by
  * on-screen extent (extend subdivisionsForSpan in region-renderer.ts) so each
  * region's rendered size — and thus the gap — stays bounded.
  *

@@ -180,7 +180,7 @@ export class ZarrLayer {
   }
 
   private zarrStore: ZarrStore | null = null
-  private levelInfos: string[] = []
+  private levelAssets: string[] = []
   private dimIndices: DimIndicesProps = {}
   private dimensionValues: {
     [key: string]: Float64Array | number[] | string[]
@@ -640,9 +640,8 @@ export class ZarrLayer {
       this.regionRenderer.dispose(this.gl)
     }
 
-    // One renderer for every dataset — no per-type branching. A tiled pyramid
-    // reaches it as a multiscale whose levels are arrays chunked at the tile
-    // size, surfaced as `untiledLevels` by ZarrStore.
+    // One renderer for every dataset — no per-layout branching. A legacy
+    // slippy-map pyramid reaches it as resolution arrays chunked at tile size.
     this.regionRenderer = new RegionRenderer(
       this.zarrStore,
       this.variable,
@@ -686,7 +685,7 @@ export class ZarrLayer {
 
       const desc = this.zarrStore.describe()
 
-      this.levelInfos = desc.levels
+      this.levelAssets = desc.levelAssets
       this.dimIndices = desc.dimIndices
       this.scaleFactor = desc.scaleFactor
       this.offset = desc.addOffset
@@ -717,7 +716,7 @@ export class ZarrLayer {
     if (!this.zarrStore?.root) return
 
     const multiscaleLevel =
-      this.levelInfos.length > 0 ? this.levelInfos[0] : null
+      this.levelAssets.length > 0 ? this.levelAssets[0] : null
 
     for (const [dimName, value] of Object.entries(this.selector)) {
       this.normalizedSelector[dimName] = toSelectorProps(value)

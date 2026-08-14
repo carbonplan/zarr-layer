@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { queryRegionUntiled, findSpatialDimNames } from './region-query'
+import { queryRegion, findSpatialDimNames } from './region-query'
 import type { QueryGeometry } from './types'
 import type { Bounds, DimIndicesProps } from '../types'
 import { indexRamp, indexToXY } from '../__fixtures__/grids'
@@ -18,7 +18,7 @@ function selectedPixels(
   height: number
 ): Array<[number, number]> {
   const { data } = indexRamp(width, height)
-  const result = queryRegionUntiled(
+  const result = queryRegion(
     'v',
     geometry,
     {},
@@ -39,7 +39,7 @@ function selectedPixels(
   )
 }
 
-describe('queryRegionUntiled — coverage', () => {
+describe('queryRegion — coverage', () => {
   it('selects every pixel for a whole-world polygon', () => {
     const pixels = selectedPixels(rect(-180, -90, 180, 90), 10, 10)
     expect(pixels).toHaveLength(100)
@@ -63,7 +63,7 @@ describe('queryRegionUntiled — coverage', () => {
   it('reads the single pixel under a point', () => {
     const { data } = indexRamp(10, 10)
     const point: QueryGeometry = { type: 'Point', coordinates: [0, 0] }
-    const result = queryRegionUntiled(
+    const result = queryRegion(
       'v',
       point,
       {},
@@ -84,10 +84,10 @@ describe('queryRegionUntiled — coverage', () => {
   })
 })
 
-describe('queryRegionUntiled — value handling', () => {
+describe('queryRegion — value handling', () => {
   it('filters fill values / NaN and applies scale + offset', () => {
     const data = new Float32Array([10, -9999, 20, NaN]) // 2x2, row-major
-    const result = queryRegionUntiled(
+    const result = queryRegion(
       'v',
       rect(-180, -90, 180, 90),
       {},
@@ -110,7 +110,7 @@ describe('queryRegionUntiled — value handling', () => {
 
   it('reports spatial dimension names and coordinate arrays', () => {
     const { data } = indexRamp(4, 4)
-    const result = queryRegionUntiled(
+    const result = queryRegion(
       'v',
       rect(-180, -90, 180, 90),
       {},
@@ -135,7 +135,7 @@ describe('queryRegionUntiled — value handling', () => {
   })
 
   it('returns an empty result for null data', () => {
-    const result = queryRegionUntiled(
+    const result = queryRegion(
       'v',
       rect(-10, -10, 10, 10),
       {},

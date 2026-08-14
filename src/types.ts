@@ -140,8 +140,8 @@ export interface ZarrLayerOptions {
   /** Credential-expiry hook for `transformRequest`. See {@link OnAuthError}. */
   onAuthError?: OnAuthError
   /**
-   * Enable full polar coverage in Mapbox globe view for untiled EPSG:4326 or
-   * proj4 datasets. Has no effect on tiled or EPSG:3857 data.
+   * Enable full polar coverage in Mapbox globe view for EPSG:4326 or proj4
+   * datasets. Has no effect on EPSG:3857 data.
    *
    * MapLibre globe always renders to the poles automatically.
    *
@@ -159,8 +159,8 @@ export interface ZarrLayerOptions {
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'
 
-// Untiled multiscale types (zarr-conventions/multiscales format)
-export interface UntiledLevel {
+/** Metadata for one array in a raster resolution pyramid. */
+export interface ResolutionLevel {
   asset: string
   /**
    * Extent of this level alone, from its own `spatial:transform`. Levels of a

@@ -84,10 +84,10 @@ function transformValue(
 }
 
 /**
- * Query a region in single-image mode.
+ * Query a raster region.
  * Returns structure matching carbonplan/maps: { [variable]: values, dimensions, coordinates }
  */
-export function queryRegionUntiled(
+export function queryRegion(
   variable: string,
   geometry: QueryGeometry,
   selector: Selector,

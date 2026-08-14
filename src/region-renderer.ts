@@ -4,10 +4,9 @@
  * The unified renderer for every Zarr dataset. Reads the visible region of a
  * resolution level as chunk-sized sub-rectangles, reprojects each onto an
  * adaptive source→WGS84 mesh, and lets the GPU project to Mercator or ECEF.
- * Handles single-level datasets, untiled multiscale pyramids, and tiled
- * (slippy-map) pyramids alike — a tiled pyramid is just a multiscale whose
- * levels are arrays chunked at the tile size (see ZarrStore). Automatic level
- * selection is driven by map zoom.
+ * Handles single arrays and resolution pyramids alike. Legacy slippy-map
+ * pyramids reach this same path as arrays chunked at the tile size (see
+ * ZarrStore). Automatic level selection is driven by map zoom.
  */
 
 import * as zarr from 'zarrita'
@@ -31,7 +30,7 @@ import type {
   Selector,
   Bounds,
   DimIndicesProps,
-  UntiledLevel,
+  ResolutionLevel,
 } from './types'
 import { ZarrStore } from './zarr-store'
 import { type MercatorBounds, type XYLimits } from './map-utils'
@@ -121,7 +120,7 @@ export class RegionRenderer {
   private latIsAscending: boolean = true
 
   // Multi-level support
-  private levels: UntiledLevel[] = []
+  private levels: ResolutionLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
   private projection: ProjectionContext = createProjectionContext({
     crs: 'EPSG:4326',
@@ -243,8 +242,8 @@ export class RegionRenderer {
       })
 
       // Check if this is a multi-level dataset
-      if (desc.untiledLevels && desc.untiledLevels.length > 0) {
-        this.levels = desc.untiledLevels
+      if (desc.resolutionLevels && desc.resolutionLevels.length > 0) {
+        this.levels = desc.resolutionLevels
         this.isMultiscale = true
         // Ensure all levels have shape (required for level selection)
         // This only fetches levels where consolidated metadata was incomplete
@@ -328,7 +327,7 @@ export class RegionRenderer {
     this.levelMetadataFetched.add(levelIndex)
 
     try {
-      const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+      const meta = await this.zarrStore.getResolutionLevelMetadata(level.asset)
       level.shape = meta.shape
       level.chunks = meta.chunks
       // Only set scaleFactor/addOffset if defined - leave undefined for dataset-level fallback
@@ -370,7 +369,9 @@ export class RegionRenderer {
         this.levelMetadataFetched.add(index)
 
         try {
-          const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+          const meta = await this.zarrStore.getResolutionLevelMetadata(
+            level.asset
+          )
           level.shape = meta.shape
           level.chunks = meta.chunks
           if (meta.scaleFactor !== undefined) {
@@ -541,7 +542,7 @@ export class RegionRenderer {
 
   /**
    * Create geometry (vertex positions and tex coords) for a region.
-   * Uses the source-projected adaptive mesh path for all supported untiled CRSes.
+   * Uses the source-projected adaptive mesh path for every supported CRS.
    */
   private createRegionGeometry(
     regionX: number,

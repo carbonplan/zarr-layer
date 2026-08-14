@@ -721,7 +721,7 @@ describe('level shapes from spatial:shape', () => {
     ])
 
     // The time dimension is carried over from the base shape.
-    expect(d.untiledLevels).toEqual([
+    expect(d.resolutionLevels).toEqual([
       { asset: '0', shape: [2, 512, 1024] },
       { asset: '1', shape: [2, 256, 512] },
     ])
@@ -732,7 +732,7 @@ describe('level shapes from spatial:shape', () => {
       { asset: '0', 'spatial:shape': [512, 1024] },
       { asset: '1', 'spatial:shape': [256, 512] },
     ])
-    const declared = d.untiledLevels[1].shape
+    const declared = d.resolutionLevels[1].shape
 
     const opened = await new ZarrStore({
       customStore: levelShapeStore([{ asset: '0' }, { asset: '1' }]),
@@ -740,7 +740,7 @@ describe('level shapes from spatial:shape', () => {
       version: 3,
       bounds: [-180, -90, 180, 90],
       latIsAscending: false,
-    }).initialized.then((s) => s.getUntiledLevelMetadata('1'))
+    }).initialized.then((s) => s.getResolutionLevelMetadata('1'))
 
     expect(declared).toEqual(opened.shape)
   })
@@ -760,8 +760,8 @@ describe('level shapes from spatial:shape', () => {
       { asset: '1' },
     ])
 
-    expect(d.untiledLevels[0].shape).toEqual([2, 512, 1024])
-    expect(d.untiledLevels[1].shape).toBeUndefined()
+    expect(d.resolutionLevels[0].shape).toEqual([2, 512, 1024])
+    expect(d.resolutionLevels[1].shape).toBeUndefined()
   })
 })
 
@@ -995,9 +995,9 @@ describe('per-level extents from the layout entries', () => {
       { bounds: null }
     )
 
-    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.resolutionLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
     // 3 columns x 90 = 270 wide, not the dataset's 360.
-    expect(d.untiledLevels[1].xyLimits).toEqual({
+    expect(d.resolutionLevels[1].xyLimits).toEqual({
       xMin: -180,
       xMax: 90,
       yMin: -90,
@@ -1026,8 +1026,8 @@ describe('per-level extents from the layout entries', () => {
       { bounds: null }
     )
 
-    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
-    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+    expect(d.resolutionLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.resolutionLevels[1].xyLimits).toBeUndefined()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('row direction'))
   })
 
@@ -1053,8 +1053,8 @@ describe('per-level extents from the layout entries', () => {
     )
 
     expect(d.latIsAscending).toBe(false)
-    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
-    expect(d.untiledLevels[1].xyLimits).toEqual({
+    expect(d.resolutionLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.resolutionLevels[1].xyLimits).toEqual({
       xMin: -180,
       xMax: 90,
       yMin: -90,
@@ -1078,8 +1078,8 @@ describe('per-level extents from the layout entries', () => {
       { bounds: null }
     )
 
-    expect(d.untiledLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
-    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+    expect(d.resolutionLevels[0].xyLimits).toEqual(GLOBAL_LIMITS)
+    expect(d.resolutionLevels[1].xyLimits).toBeUndefined()
   })
 })
 
@@ -1103,7 +1103,7 @@ describe('a level extent competing with a dataset bbox', () => {
       { rootAttrs: { 'spatial:bbox': [-180, -90, 180, 90] }, bounds: null }
     )
 
-    expect(d.untiledLevels[1].xyLimits).toEqual({
+    expect(d.resolutionLevels[1].xyLimits).toEqual({
       xMin: -180,
       xMax: 90,
       yMin: -90,
@@ -1141,7 +1141,7 @@ describe('explicit bounds against per-level extents', () => {
     const d = store.describe()
 
     expect(d.xyLimits).toEqual({ xMin: -10, xMax: 10, yMin: -10, yMax: 10 })
-    expect(d.untiledLevels.every((l) => l.xyLimits === undefined)).toBe(true)
+    expect(d.resolutionLevels.every((l) => l.xyLimits === undefined)).toBe(true)
     expect(keys.length).toBeGreaterThan(0)
   })
 })
@@ -1167,11 +1167,11 @@ describe('a level transform without a declared shape', () => {
       { bounds: null }
     )
 
-    expect(d.untiledLevels[1].xyLimits).toBeUndefined()
+    expect(d.resolutionLevels[1].xyLimits).toBeUndefined()
 
-    await store.getUntiledLevelMetadata('1')
+    await store.getResolutionLevelMetadata('1')
 
-    expect(d.untiledLevels[1].xyLimits).toEqual({
+    expect(d.resolutionLevels[1].xyLimits).toEqual({
       xMin: -180,
       xMax: 180,
       yMin: -90,

@@ -1,5 +1,9 @@
 import * as zarr from 'zarrita'
-import type { DimIndicesProps, NormalizedSelector, UntiledLevel } from './types'
+import type {
+  DimIndicesProps,
+  NormalizedSelector,
+  ResolutionLevel,
+} from './types'
 import { loadDimensionValues } from './zarr-utils'
 import type { ZarrStore } from './zarr-store'
 
@@ -10,7 +14,7 @@ export type DimensionValuesCache = {
 export type SelectorResolutionContext = {
   zarrStore: ZarrStore
   dimIndices: DimIndicesProps
-  levels: UntiledLevel[]
+  levels: ResolutionLevel[]
   isMultiscale: boolean
   dimensionValues: DimensionValuesCache
   coordLevelIndex: number
@@ -181,7 +185,7 @@ export async function resolveSelectionIndex(
     return 0
   }
 
-  // Multiscale pyramids (tiled and untiled alike) keep their non-spatial
+  // Resolution pyramids keep their non-spatial
   // coordinate arrays inside each level directory (e.g. "0/month"), not at
   // the store root. ZarrStore preloads those from the level-0 directory into
   // `coordinates`, so prefer them — opening the same arrays at the root (as

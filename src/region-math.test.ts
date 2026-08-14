@@ -12,7 +12,7 @@ import {
 } from './region-math'
 import { createProjectionContext } from './projection-utils'
 import { boundsToMercatorNorm } from './map-utils'
-import type { UntiledLevel } from './types'
+import type { ResolutionLevel } from './types'
 
 /**
  * Pure viewport/level math: region grid enumeration, pixel↔geo bounds,
@@ -357,7 +357,7 @@ describe('getVisibleRegions', () => {
 })
 
 describe('selectLevelForZoom', () => {
-  const level = (asset: string, lonSize: number): UntiledLevel => ({
+  const level = (asset: string, lonSize: number): ResolutionLevel => ({
     asset,
     shape: [lonSize / 2, lonSize],
   })
