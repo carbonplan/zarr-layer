@@ -1,5 +1,5 @@
 import type * as zarr from 'zarrita'
-import type { MercatorBounds, Wgs84Bounds, XYLimits } from './map-utils'
+import type { MercatorBounds, MeshMercatorBounds, XYLimits } from './map-utils'
 
 /** State for a single region (chunk/shard) in region-based loading */
 export interface RegionState {
@@ -22,16 +22,15 @@ export interface RegionState {
   indexBuffer: WebGLBuffer | null // For adaptive mesh indexed triangles
   // False whenever the geometry arrays below are newer than the buffers above
   geometryUploaded: boolean
-  // Geometry arrays for this region's quad
+  // Geometry arrays for this region's mesh
   vertexArr: Float32Array | null
   pixCoordArr: Float32Array | null // Texture coordinates for sampling resampled data
   indexArr: Uint32Array | null // Triangle indices for adaptive mesh
-  vertexCount: number // Number of vertices (for triangle strip) or indices (for indexed)
-  useIndexedMesh: boolean // Whether to use indexed triangles (adaptive mesh)
+  indexCount: number // Number of indices to draw
   // Mercator bounds for this region (for shader uniforms)
   mercatorBounds: MercatorBounds | null
-  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
-  wgs84Bounds: Wgs84Bounds | null
+  // Normalized-Mercator bounds used to reconstruct region-local mesh positions
+  meshBounds: MeshMercatorBounds | null
   // Data orientation: true = row 0 is south
   latIsAscending: boolean
   // Version tracking for selector changes

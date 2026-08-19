@@ -96,13 +96,13 @@ describe('createHybridMesh — identity (EPSG:4326 passthrough)', () => {
     expect(max).toBeCloseTo(1, 5)
   })
 
-  it('wgs84Bounds carries the region extent in normalized mercator', () => {
+  it('meshBounds carries the region extent in normalized mercator', () => {
     // lon ±90 -> mercator X 0.25..0.75; lat ±45 -> mercator Y via the
     // gudermannian forward (smaller Y = north).
-    expect(mesh.wgs84Bounds.x0).toBeCloseTo(0.25, 9)
-    expect(mesh.wgs84Bounds.x1).toBeCloseTo(0.75, 9)
-    expect(mesh.wgs84Bounds.y0).toBeCloseTo(latToMercatorNorm(45), 9)
-    expect(mesh.wgs84Bounds.y1).toBeCloseTo(latToMercatorNorm(-45), 9)
+    expect(mesh.meshBounds.x0).toBeCloseTo(0.25, 9)
+    expect(mesh.meshBounds.x1).toBeCloseTo(0.75, 9)
+    expect(mesh.meshBounds.y0).toBeCloseTo(latToMercatorNorm(45), 9)
+    expect(mesh.meshBounds.y1).toBeCloseTo(latToMercatorNorm(-45), 9)
   })
 
   it('is deterministic for identical input', () => {

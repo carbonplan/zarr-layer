@@ -204,7 +204,7 @@ const VERTEX_WGS84_TO_ECEF_MAPBOX = `
   float normLon = mercX;
   float normLat = latRad / PI + 0.5;`
 
-/** Mapbox ECEF projection output for the direct untiled globe path. */
+/** Mapbox ECEF projection output for the direct globe path. */
 const PROJECT_MAPBOX_ECEF = `
   // This path is only used at the fully-globe endpoint. During Mapbox's
   // globe->mercator zoom morph, the layer switches back to the draped path so
@@ -214,7 +214,7 @@ const PROJECT_MAPBOX_ECEF = `
 
 /** MapLibre ECEF projection output with globe/flat transition blend.
  * Unlike projectTile(merc), this path starts from WGS84-derived sphere coords,
- * which preserves polar coverage for untiled EPSG:4326/proj4 data.
+ * which preserves polar coverage for EPSG:4326/proj4 data.
  */
 const PROJECT_MAPLIBRE_ECEF = `
   vec4 globePos = u_projection_matrix * vec4(ecef, 1.0);

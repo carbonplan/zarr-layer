@@ -4,10 +4,9 @@
  * The unified renderer for every Zarr dataset. Reads the visible region of a
  * resolution level as chunk-sized sub-rectangles, reprojects each onto an
  * adaptive source→WGS84 mesh, and lets the GPU project to Mercator or ECEF.
- * Handles single-level datasets, untiled multiscale pyramids, and tiled
- * (slippy-map) pyramids alike — a tiled pyramid is just a multiscale whose
- * levels are arrays chunked at the tile size (see ZarrStore). Automatic level
- * selection is driven by map zoom.
+ * Handles single arrays and resolution pyramids alike. Legacy slippy-map
+ * pyramids reach this same path as arrays chunked at the tile size (see
+ * ZarrStore). Automatic level selection is driven by map zoom.
  */
 
 import * as zarr from 'zarrita'
@@ -31,7 +30,7 @@ import type {
   Selector,
   Bounds,
   DimIndicesProps,
-  UntiledLevel,
+  ResolutionLevel,
 } from './types'
 import { ZarrStore } from './zarr-store'
 import { type MercatorBounds, type XYLimits } from './map-utils'
@@ -121,7 +120,7 @@ export class RegionRenderer {
   private latIsAscending: boolean = true
 
   // Multi-level support
-  private levels: UntiledLevel[] = []
+  private levels: ResolutionLevel[] = []
   private levelMetadataFetched: Set<number> = new Set() // Tracks which levels have had metadata fetched
   private projection: ProjectionContext = createProjectionContext({
     crs: 'EPSG:4326',
@@ -243,8 +242,8 @@ export class RegionRenderer {
       })
 
       // Check if this is a multi-level dataset
-      if (desc.untiledLevels && desc.untiledLevels.length > 0) {
-        this.levels = desc.untiledLevels
+      if (desc.resolutionLevels && desc.resolutionLevels.length > 0) {
+        this.levels = desc.resolutionLevels
         this.isMultiscale = true
         // Ensure all levels have shape (required for level selection)
         // This only fetches levels where consolidated metadata was incomplete
@@ -328,7 +327,7 @@ export class RegionRenderer {
     this.levelMetadataFetched.add(levelIndex)
 
     try {
-      const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+      const meta = await this.zarrStore.getResolutionLevelMetadata(level.asset)
       level.shape = meta.shape
       level.chunks = meta.chunks
       // Only set scaleFactor/addOffset if defined - leave undefined for dataset-level fallback
@@ -370,7 +369,9 @@ export class RegionRenderer {
         this.levelMetadataFetched.add(index)
 
         try {
-          const meta = await this.zarrStore.getUntiledLevelMetadata(level.asset)
+          const meta = await this.zarrStore.getResolutionLevelMetadata(
+            level.asset
+          )
           level.shape = meta.shape
           level.chunks = meta.chunks
           if (meta.scaleFactor !== undefined) {
@@ -541,7 +542,7 @@ export class RegionRenderer {
 
   /**
    * Create geometry (vertex positions and tex coords) for a region.
-   * Uses the source-projected adaptive mesh path for all supported untiled CRSes.
+   * Uses the source-projected adaptive mesh path for every supported CRS.
    */
   private createRegionGeometry(
     regionX: number,
@@ -551,11 +552,10 @@ export class RegionRenderer {
     // Guard: can't create geometry without dimension info
     if (!region.levelMeta) return
 
-    // Defensive reset: wgs84Bounds is only set by the source-projected branch.
+    // Defensive reset: meshBounds is only set by the geometry producer below.
     // Ensures it's not stale if geometry is recreated.
-    region.wgs84Bounds = null
+    region.meshBounds = null
     region.indexArr = null
-    region.useIndexedMesh = false
     // Whatever this produces is newer than the buffers already on the GPU.
     region.geometryUploaded = false
 
@@ -640,9 +640,8 @@ export class RegionRenderer {
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
     region.indexArr = meshResult.indices
-    region.wgs84Bounds = meshResult.wgs84Bounds
-    region.useIndexedMesh = true
-    region.vertexCount = region.indexArr.length
+    region.meshBounds = meshResult.meshBounds
+    region.indexCount = region.indexArr.length
   }
 
   private async buildSliceArgsForSelector(
@@ -989,31 +988,23 @@ export class RegionRenderer {
       shaderProgram,
       worldOffsets,
       context.customShaderConfig,
-      useDirectEcef,
       eyeMatrix
     )
   }
 
   /**
    * Convert a RegionState to a RenderableRegion for unified rendering.
-   * When useDirectEcef is true, uses the region's precomputed WGS84 mesh bounds
-   * for the ECEF vertex shader path. Render-only fields are set here instead of
-   * cached on RegionState, so projection toggles have no stale state.
+   * The shader program determines whether the mesh is projected flat or to
+   * ECEF; both variants consume the same region-local Mercator encoding.
    */
-  private regionToRenderable(
-    region: RegionState,
-    useDirectEcef: boolean = false
-  ): RenderableRegion {
-    const base: RenderableRegion = {
+  private regionToRenderable(region: RegionState): RenderableRegion {
+    return {
       mercatorBounds: region.mercatorBounds!,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
-      vertexCount: region.useIndexedMesh
-        ? region.vertexCount
-        : region.vertexArr!.length / 2,
-      indexBuffer: region.indexBuffer,
-      useIndexedMesh: region.useIndexedMesh,
-      wgs84Bounds: region.wgs84Bounds ?? undefined,
+      indexCount: region.indexCount,
+      indexBuffer: region.indexBuffer!,
+      meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
       texture: region.texture,
       bandData: region.bandData,
@@ -1023,14 +1014,6 @@ export class RegionRenderer {
       width: region.width,
       height: region.height,
     }
-
-    if (useDirectEcef && region.wgs84Bounds) {
-      base.positionSpace = 'wgs84-ecef'
-      base.sampleMode = 'linear'
-      return base
-    }
-
-    return base // defaults handle all other cases
   }
 
   /**
@@ -1043,7 +1026,6 @@ export class RegionRenderer {
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
     customShaderConfig?: CustomShaderConfig,
-    useDirectEcef: boolean = false,
     eyeMatrix: number[] | Float32Array | Float64Array | null = null
   ): void {
     const gl = renderer.gl
@@ -1056,7 +1038,7 @@ export class RegionRenderer {
       renderRegion(
         gl,
         shaderProgram,
-        this.regionToRenderable(region, useDirectEcef),
+        this.regionToRenderable(region),
         worldOffsets,
         customShaderConfig,
         eyeMatrix
@@ -1100,7 +1082,6 @@ export class RegionRenderer {
       texture: region.texture,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
-      vertexArr: region.vertexArr!,
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
@@ -1108,11 +1089,9 @@ export class RegionRenderer {
       bandTextures: region.bandTextures,
       bandTexturesUploaded: region.bandTexturesUploaded,
       bandTexturesConfigured: region.bandTexturesConfigured,
-      // Indexed mesh fields for proj4 adaptive mesh
-      indexBuffer: region.indexBuffer ?? undefined,
-      vertexCount: region.vertexCount,
-      useIndexedMesh: region.useIndexedMesh,
-      wgs84Bounds: region.wgs84Bounds ?? undefined,
+      indexBuffer: region.indexBuffer!,
+      indexCount: region.indexCount,
+      meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
     }))
   }

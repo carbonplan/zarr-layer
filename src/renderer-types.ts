@@ -1,4 +1,4 @@
-import type { MercatorBounds, Wgs84Bounds } from './map-utils'
+import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 
 export interface RendererUniforms {
@@ -20,7 +20,7 @@ export interface MapboxParams {
   projection: { name: string }
   globeToMercatorMatrix: number[] | Float32Array | Float64Array
   transition: number
-  /** True when this frame is using the direct untiled globe path, not draped tiles. */
+  /** True when this frame uses the direct globe path instead of draped tiles. */
   directGlobePathActive?: boolean
   /** Internal Mapbox globe matrix needed for direct custom-layer ECEF depth parity. */
   expandedFarZMercatorMatrix?: number[] | Float32Array | Float64Array
@@ -32,7 +32,7 @@ export interface MapboxParams {
  * 'maplibre'       — Mercator-input path for MapLibre (EPSG:3857, EPSG:4326 via projectTile)
  * 'maplibre-proj4' — WGS84-input path for MapLibre (proj4 vertices → Mercator via projectTile)
  * 'maplibre-ecef'  — ECEF path for MapLibre globe (proj4 or EPSG:4326 vertices → sphere).
- *                    Needed for untiled globe rendering that must reach the poles,
+ *                    Needed for globe rendering that must reach the poles,
  *                    since the regular MapLibre paths still start from Mercator-style geometry.
  * 'mapbox'         — Mercator-input path for Mapbox
  * 'mapbox-proj4'   — WGS84-input path for Mapbox (proj4 vertices → Mercator in shader)
@@ -72,7 +72,6 @@ export interface RegionRenderState {
   vertexBuffer: WebGLBuffer
   /** Texture coordinate buffer for sampling resampled data */
   pixCoordBuffer: WebGLBuffer
-  vertexArr: Float32Array
   mercatorBounds: MercatorBounds
   width: number
   height: number
@@ -83,12 +82,10 @@ export interface RegionRenderState {
   bandTextures?: Map<string, WebGLTexture>
   bandTexturesUploaded?: Set<string>
   bandTexturesConfigured?: Set<string>
-  /** Index buffer for adaptive source-projected meshes */
-  indexBuffer?: WebGLBuffer
-  /** Number of vertices/indices to draw */
-  vertexCount?: number
-  /** Whether to use indexed mesh rendering (gl.drawElements) */
-  useIndexedMesh?: boolean
-  /** WGS84 bounds for two-stage reprojection */
-  wgs84Bounds?: Wgs84Bounds
+  /** Index buffer for the adaptive mesh */
+  indexBuffer: WebGLBuffer
+  /** Number of indices to draw */
+  indexCount: number
+  /** Normalized-Mercator bounds for reconstructing region-local mesh positions */
+  meshBounds: MeshMercatorBounds
 }

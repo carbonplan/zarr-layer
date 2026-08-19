@@ -3,7 +3,7 @@ import type {
   Bounds,
   NormalizedSelector,
   Selector,
-  UntiledLevel,
+  ResolutionLevel,
 } from '../types'
 import type { MercatorBounds, XYLimits } from '../map-utils'
 import type { ProjectionContext } from '../projection-utils'
@@ -17,7 +17,7 @@ import {
 } from '../selector-resolution'
 import { normalizeSelector } from '../zarr-utils'
 import { wrapError } from '../errors'
-import { queryRegionUntiled, findSpatialDimNames } from './region-query'
+import { queryRegion, findSpatialDimNames } from './region-query'
 import {
   computePixelBoundsFromGeometry,
   preprocessQueryGeometry,
@@ -40,7 +40,7 @@ export type QueryContext = {
   xyLimits: XYLimits | null
   mercatorBounds: MercatorBounds | null
   latIsAscending: boolean
-  levels: UntiledLevel[]
+  levels: ResolutionLevel[]
   level: QueryLevelSnapshot | null
   projection: ProjectionContext
   antimeridianWarnings: Set<string>
@@ -233,7 +233,7 @@ export async function queryData(
       Math.max(yMin0, yMax0),
     ]
 
-    return queryRegionUntiled(
+    return queryRegion(
       context.variable,
       geom,
       normalizedSelector,

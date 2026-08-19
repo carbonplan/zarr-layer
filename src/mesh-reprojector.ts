@@ -8,7 +8,7 @@
 
 import Delaunator from 'delaunator'
 import { RasterReprojector } from '@developmentseed/raster-reproject'
-import { type Wgs84Bounds } from './map-utils'
+import { type MeshMercatorBounds } from './map-utils'
 import {
   pixelToSourceCRS,
   sourceCRSToPixel,
@@ -60,7 +60,7 @@ interface AdaptiveMeshResult {
   positions: Float32Array // Region-local Mercator deltas for shader
   texCoords: Float32Array // UVs for texture sampling
   indices: Uint32Array // Triangle indices
-  wgs84Bounds: Wgs84Bounds
+  meshBounds: MeshMercatorBounds
 }
 
 interface HybridMeshOptions {
@@ -254,7 +254,7 @@ function lonLatToMerc(lon: number, lat: number): [number, number] {
  * sub-pixel on any real dataset (512px / sub-meter chunks measure ~0.0002px)
  * and only becomes visible under pathological over-zoom — e.g. a 2000 km/pixel
  * custom-CRS (LCC) store at z24 yields ~1px. If a visible seam is ever reported
- * on real data, the proportionate fix is to subdivide the untiled mesh by
+ * on real data, the proportionate fix is to subdivide the adaptive mesh by
  * on-screen extent (extend subdivisionsForSpan in region-renderer.ts) so each
  * region's rendered size — and thus the gap — stays bounded.
  *
@@ -783,8 +783,8 @@ export function createHybridMesh(
   )
 
   // Mercator anchor +/- half-extent (normalized mercator world coords); the
-  // renderer derives scale/shift from these. See the Wgs84Bounds doc in map-utils.
-  const wgs84Bounds: Wgs84Bounds = {
+  // renderer derives scale/shift from these. See MeshMercatorBounds in map-utils.
+  const meshBounds: MeshMercatorBounds = {
     x0: anchor.x - anchor.halfX,
     y0: anchor.y - anchor.halfY,
     x1: anchor.x + anchor.halfX,
@@ -795,6 +795,6 @@ export function createHybridMesh(
     positions,
     texCoords: new Float32Array(splitResult.texCoords),
     indices: splitResult.indices,
-    wgs84Bounds,
+    meshBounds,
   }
 }

@@ -7,7 +7,7 @@ import type {
   SpatialDimensions,
   DimIndicesProps,
   CRS,
-  UntiledLevel,
+  ResolutionLevel,
   TransformRequest,
   OnAuthError,
 } from './types'
@@ -25,8 +25,7 @@ import {
 import { normalizeBuiltinProjectionDef } from './projection-utils'
 
 interface PyramidMetadata {
-  levels: string[]
-  maxLevelIndex: number
+  levelAssets: string[]
   crs: CRS
 }
 
@@ -40,14 +39,14 @@ interface Multiscale {
   datasets: MultiscaleDataset[]
 }
 
-// zarr-conventions/multiscales format (untiled multiscales)
-interface UntiledMultiscaleLayoutEntry {
+// zarr-conventions/multiscales layout format
+interface LayoutMultiscaleEntry {
   asset: string
   derived_from?: string
 }
 
-interface UntiledMultiscaleMetadata {
-  layout: UntiledMultiscaleLayoutEntry[]
+interface LayoutMultiscaleMetadata {
+  layout: LayoutMultiscaleEntry[]
   resampling_method?: string
   crs?: 'EPSG:4326' | 'EPSG:3857'
 }
@@ -93,11 +92,9 @@ interface StoreDescription {
   chunks: number[]
   fill_value: number | null
   dtype: string | null
-  levels: string[]
-  maxLevelIndex: number
+  levelAssets: string[]
   crs: CRS
-  multiscaleType: 'tiled' | 'untiled' | 'none'
-  untiledLevels: UntiledLevel[]
+  resolutionLevels: ResolutionLevel[]
   dimIndices: DimIndicesProps
   xyLimits: XYLimits | null
   scaleFactor: number
@@ -182,11 +179,9 @@ export class ZarrStore {
   chunks: number[] = []
   fill_value: number | null = null
   dtype: string | null = null
-  levels: string[] = []
-  maxLevelIndex: number = 0
+  levelAssets: string[] = []
   crs: CRS = 'EPSG:4326'
-  multiscaleType: 'tiled' | 'untiled' | 'none' = 'none'
-  untiledLevels: UntiledLevel[] = []
+  resolutionLevels: ResolutionLevel[] = []
   dimIndices: DimIndicesProps = {}
   xyLimits: XYLimits | null = null
   scaleFactor: number = 1
@@ -198,6 +193,8 @@ export class ZarrStore {
   private _crsFromMetadata: boolean = false // Track if CRS was explicitly set from metadata
   private _crsOverride: boolean = false // Track if CRS was explicitly set by user
   private _proj4Override: boolean = false // Track if proj4 was explicitly set by user
+  /** Whether legacy `pixels_per_tile` metadata supplies global slippy-map defaults. */
+  private _usesSlippyMapDefaults: boolean = false
   private geoZarr: GeoZarrAttrs | null = null
   /** Per-level `spatial:shape` as declared, [height, width], before axis mapping. */
   private _declaredLevelShapes: ([number, number] | undefined)[] = []
@@ -339,12 +336,12 @@ export class ZarrStore {
   }
 
   private async _loadCoordinates(): Promise<void> {
-    if (!this.coordinateKeys.length || !this.levels.length) return
+    if (!this.coordinateKeys.length || !this.levelAssets.length) return
 
     await Promise.all(
       this.coordinateKeys.map(async (key) => {
         try {
-          const coordPath = `${this.levels[0]}/${key}`
+          const coordPath = `${this.levelAssets[0]}/${key}`
           const coordArray = await this._getArray(coordPath)
           const chunk = await coordArray.getChunk([0])
           this.coordinates[key] = Array.from(
@@ -370,11 +367,9 @@ export class ZarrStore {
       chunks: this.chunks,
       fill_value: this.fill_value,
       dtype: this.dtype,
-      levels: this.levels,
-      maxLevelIndex: this.maxLevelIndex,
+      levelAssets: this.levelAssets,
       crs: this.crs,
-      multiscaleType: this.multiscaleType,
-      untiledLevels: this.untiledLevels,
+      resolutionLevels: this.resolutionLevels,
       dimIndices: this.dimIndices,
       xyLimits: this.xyLimits,
       scaleFactor: this.scaleFactor,
@@ -407,11 +402,11 @@ export class ZarrStore {
   }
 
   /**
-   * Get metadata (shape, chunks, scale/offset/fill) for a specific untiled level.
+   * Get metadata (shape, chunks, scale/offset/fill) for a resolution level.
    * Uses zarrita's array properties — no manual JSON fetching needed.
    * On consolidated stores, metadata is served from cache (no network).
    */
-  async getUntiledLevelMetadata(levelAsset: string): Promise<{
+  async getResolutionLevelMetadata(levelAsset: string): Promise<{
     shape: number[]
     chunks: number[]
     scaleFactor: number | undefined
@@ -445,8 +440,8 @@ export class ZarrStore {
 
     // A level may declare its transform without a `spatial:shape`, in which
     // case its extent can only be worked out once the real shape is known.
-    const index = this.untiledLevels.findIndex((l) => l.asset === levelAsset)
-    const level = this.untiledLevels[index]
+    const index = this.resolutionLevels.findIndex((l) => l.asset === levelAsset)
+    const level = this.resolutionLevels[index]
     const { lat, lon } = this.dimIndices
     if (level && !level.xyLimits && lat && lon) {
       level.xyLimits = this._deriveLevelExtent(index, [
@@ -511,10 +506,9 @@ export class ZarrStore {
 
     if (rootAttrs?.multiscales) {
       const pyramid = this._getPyramidMetadata(
-        rootAttrs.multiscales as Multiscale[] | UntiledMultiscaleMetadata
+        rootAttrs.multiscales as Multiscale[] | LayoutMultiscaleMetadata
       )
-      this.levels = pyramid.levels
-      this.maxLevelIndex = pyramid.maxLevelIndex
+      this.levelAssets = pyramid.levelAssets
       if (!this._crsOverride) {
         this.crs = pyramid.crs
       }
@@ -522,8 +516,8 @@ export class ZarrStore {
 
     // Open target array to get shape, chunks, dtype, fill_value, dimensions
     const basePath =
-      this.levels.length > 0
-        ? `${this.levels[0]}/${this.variable}`
+      this.levelAssets.length > 0
+        ? `${this.levelAssets[0]}/${this.variable}`
         : this.variable
     const array = await this._getArray(basePath)
     const arrayAttrs = array.attrs as Record<string, unknown>
@@ -569,7 +563,7 @@ export class ZarrStore {
     if (!lat || !lon) return
 
     this._declaredLevelShapes.forEach((declared, i) => {
-      const level = this.untiledLevels[i]
+      const level = this.resolutionLevels[i]
       if (!declared || !level) return
       const shape = [...this.shape]
       shape[lat.index] = declared[0]
@@ -591,7 +585,7 @@ export class ZarrStore {
       const shape = this._declaredLevelShapes[i]
       if (!shape) return
       const extent = this._deriveLevelExtent(i, shape)
-      if (extent) this.untiledLevels[i].xyLimits = extent
+      if (extent) this.resolutionLevels[i].xyLimits = extent
     })
   }
 
@@ -634,7 +628,7 @@ export class ZarrStore {
     ) {
       console.warn(
         `[zarr-layer] Level '${
-          this.untiledLevels[index]?.asset ?? index
+          this.resolutionLevels[index]?.asset ?? index
         }' declares a spatial:transform whose row direction contradicts the ` +
           `rest of the store's. Every level renders in one row direction, so ` +
           `this one may appear flipped; its declared extent is ignored.`
@@ -663,10 +657,10 @@ export class ZarrStore {
   private async _readBaseLevelGroupAttrs(): Promise<
     Record<string, unknown> | undefined
   > {
-    if (this.levels.length === 0 || !this.root) return undefined
+    if (this.levelAssets.length === 0 || !this.root) return undefined
     try {
       const openFunc = resolveOpenFunc(this.version)
-      const group = await openFunc(this.root.resolve(this.levels[0]), {
+      const group = await openFunc(this.root.resolve(this.levelAssets[0]), {
         kind: 'group',
       })
       return group.attrs as Record<string, unknown>
@@ -765,7 +759,7 @@ export class ZarrStore {
     const gridMapping = arrayAttrs?.grid_mapping
     if (typeof gridMapping !== 'string' || !gridMapping.trim()) return
 
-    const prefix = this.levels.length > 0 ? `${this.levels[0]}/` : ''
+    const prefix = this.levelAssets.length > 0 ? `${this.levelAssets[0]}/` : ''
     try {
       const mapping = await this._getArray(`${prefix}${gridMapping.trim()}`)
       const attrs = mapping.attrs as Record<string, unknown>
@@ -907,11 +901,11 @@ export class ZarrStore {
    * Users can provide explicit `bounds` to skip this detection entirely.
    */
   private async _findBoundsLevel(): Promise<string | undefined> {
-    if (this.levels.length === 0 || !this.root) return undefined
-    if (this.levels.length === 1) return this.levels[0]
+    if (this.levelAssets.length === 0 || !this.root) return undefined
+    if (this.levelAssets.length === 1) return this.levelAssets[0]
 
-    const firstLevel = this.levels[0]
-    const lastLevel = this.levels[this.levels.length - 1]
+    const firstLevel = this.levelAssets[0]
+    const lastLevel = this.levelAssets[this.levelAssets.length - 1]
 
     try {
       const [firstArray, lastArray] = await Promise.all([
@@ -995,17 +989,16 @@ export class ZarrStore {
   }
 
   private async _loadSpatialMetadata() {
-    // Apply explicit bounds first (takes precedence for all multiscale types)
+    // Apply explicit bounds first (takes precedence for every metadata layout).
     // Bounds are in source CRS units (degrees for EPSG:4326, meters for EPSG:3857/proj4)
     if (this.explicitBounds) {
       const [west, south, east, north] = this.explicitBounds
       this.xyLimits = { xMin: west, xMax: east, yMin: south, yMax: north }
     }
 
-    // Tiled pyramids: use the standard global slippy-map extent if no explicit
-    // bounds. The extent units depend on CRS — EPSG:3857 covers the full square
-    // Web Mercator world in meters, EPSG:4326 the full lon/lat range in degrees.
-    if (this.multiscaleType === 'tiled') {
+    // Legacy `pixels_per_tile` metadata describes a global slippy-map pyramid,
+    // so it supplies the standard extent and north-first row order.
+    if (this._usesSlippyMapDefaults) {
       if (!this.xyLimits) {
         this.xyLimits =
           this.crs === 'EPSG:3857'
@@ -1018,12 +1011,12 @@ export class ZarrStore {
             : { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
       }
       if (!this._latIsAscendingUserSet) {
-        this.latIsAscending = false // Tiled pyramids: row 0 = north
+        this.latIsAscending = false
       }
       return
     }
 
-    // For untiled: determine what we still need to detect
+    // Determine which spatial properties still need to be detected.
     let needsBounds = !this.xyLimits
     let needsLatAscending = !this._latIsAscendingUserSet
 
@@ -1184,7 +1177,7 @@ export class ZarrStore {
       }
 
       // Warn users to set explicit values to skip future coordinate fetches
-      if (this.multiscaleType === 'untiled') {
+      if (this.resolutionLevels.length > 0) {
         const hints: string[] = []
         if (needsBounds)
           hints.push(`bounds: [${xMin}, ${yMin}, ${xMax}, ${yMax}]`)
@@ -1217,9 +1210,8 @@ export class ZarrStore {
     // Infer CRS from bounds if not explicitly set
     // Only classify as meters if clearly outside degree range (> 360)
     // This handles both [-180, 180] and [0, 360] degree conventions
-    // Applies to untiled multiscales and single-level datasets (multiscaleType === 'none')
     if (
-      (this.multiscaleType === 'untiled' || this.multiscaleType === 'none') &&
+      !this._usesSlippyMapDefaults &&
       !this._crsFromMetadata &&
       !this._crsOverride &&
       this.xyLimits
@@ -1240,38 +1232,36 @@ export class ZarrStore {
    * Supports three multiscale formats:
    *
    * 1. **zarr-conventions/multiscales** (layout format):
-   *    Uses `layout` array with transform info. Parsed by `_parseUntiledMultiscale()`.
+   *    Uses `layout` array with transform info. Parsed by `_parseLayoutMultiscale()`.
    *    Example: `{ layout: [{ asset: "0", transform: { scale: [...] } }, ...] }`
    *
    * 2. **OME-NGFF style** (datasets format):
-   *    Uses `datasets` array. If `pixels_per_tile` is present, treated as tiled pyramid.
-   *    Otherwise treated as untiled multi-level.
+   *    Uses a `datasets` array. `pixels_per_tile` additionally supplies legacy
+   *    global slippy-map defaults.
    *    Example: `[{ datasets: [{ path: "0", crs: "EPSG:4326" }, ...] }]`
    *
-   * 3. **Single level**: No multiscale metadata, treated as single untiled image.
+   * 3. **Single level**: No recognized multiscale metadata.
    *
-   * For untiled formats, shapes are extracted from consolidated metadata when available
-   * to avoid per-level network requests.
+   * Level shapes are extracted from consolidated metadata when available to
+   * avoid per-level network requests.
    */
   private _getPyramidMetadata(
-    multiscales: Multiscale[] | UntiledMultiscaleMetadata | undefined
+    multiscales: Multiscale[] | LayoutMultiscaleMetadata | undefined
   ): PyramidMetadata {
-    // Default for missing or unrecognized multiscale metadata: single-level untiled
-    const singleLevelUntiled = (): PyramidMetadata => {
-      this.multiscaleType = 'untiled'
+    // Missing or unrecognized multiscale metadata describes one array.
+    const singleLevel = (): PyramidMetadata => {
       return {
-        levels: [],
-        maxLevelIndex: 0,
+        levelAssets: [],
         crs: this.crs,
       }
     }
 
-    if (!multiscales) return singleLevelUntiled()
+    if (!multiscales) return singleLevel()
 
     // Format 1: zarr-conventions/multiscales (has 'layout' key)
     // See: https://github.com/zarr-conventions/multiscales
     if ('layout' in multiscales && Array.isArray(multiscales.layout)) {
-      return this._parseUntiledMultiscale(multiscales, singleLevelUntiled)
+      return this._parseLayoutMultiscale(multiscales, singleLevel)
     }
 
     // Format 2: OME-NGFF style (array with 'datasets' key)
@@ -1279,23 +1269,19 @@ export class ZarrStore {
     if (Array.isArray(multiscales) && multiscales[0]?.datasets?.length) {
       const datasets = multiscales[0].datasets
       const levels = datasets.map((dataset) => String(dataset.path))
-      const maxLevelIndex = levels.length - 1
       const pixelsPerTile = datasets[0].pixels_per_tile
       // If CRS is absent, default to EPSG:3857 to match pyramid (mercator) tiling.
       const crs: CRS =
         (datasets[0].crs as CRS) === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857'
 
-      // Both shapes expose their levels as untiledLevels; only the
-      // classification differs. `pixels_per_tile` marks a slippy-map pyramid,
-      // kept as 'tiled' purely to drive its metadata defaults in
-      // `_loadSpatialMetadata` (global extent, latIsAscending=false, no
-      // coordinate-array reads).
-      this.multiscaleType = pixelsPerTile ? 'tiled' : 'untiled'
-      this.untiledLevels = levels.map((level) => ({ asset: level }))
-      return { levels, maxLevelIndex, crs }
+      // Every metadata shape produces the same resolution-level model.
+      // `pixels_per_tile` only supplies slippy-map spatial defaults.
+      this._usesSlippyMapDefaults = Boolean(pixelsPerTile)
+      this.resolutionLevels = levels.map((level) => ({ asset: level }))
+      return { levelAssets: levels, crs }
     }
 
-    return singleLevelUntiled()
+    return singleLevel()
   }
 
   /**
@@ -1318,24 +1304,20 @@ export class ZarrStore {
    *
    * @see https://github.com/zarr-conventions/multiscales
    */
-  private _parseUntiledMultiscale(
-    metadata: UntiledMultiscaleMetadata,
-    singleLevelUntiled: () => PyramidMetadata
+  private _parseLayoutMultiscale(
+    metadata: LayoutMultiscaleMetadata,
+    singleLevel: () => PyramidMetadata
   ): PyramidMetadata {
     const layout = metadata.layout
-    if (!layout || layout.length === 0) return singleLevelUntiled()
+    if (!layout || layout.length === 0) return singleLevel()
 
     // Extract levels from layout
     const levels = layout.map((entry) => entry.asset)
-    const maxLevelIndex = levels.length - 1
-
-    this.untiledLevels = layout.map((entry) => ({ asset: entry.asset }))
+    this.resolutionLevels = layout.map((entry) => ({ asset: entry.asset }))
     const perLevel = layout.map((entry) => parseLayoutItemSpatial(entry))
     // Applied once the dimension order is known; see `_applyDeclaredLevelShapes`.
     this._declaredLevelShapes = perLevel.map((s) => s.shape)
     this._declaredLevelTransforms = perLevel.map((s) => s.transform)
-
-    this.multiscaleType = 'untiled'
 
     // Check for explicit CRS in metadata, otherwise use configured CRS
     // (bounds-based inference will happen after coordinate arrays are loaded)
@@ -1345,8 +1327,7 @@ export class ZarrStore {
     }
 
     return {
-      levels,
-      maxLevelIndex,
+      levelAssets: levels,
       crs,
     }
   }

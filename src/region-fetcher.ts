@@ -1,5 +1,5 @@
 import * as zarr from 'zarrita'
-import type { DimIndicesProps, UntiledLevel } from './types'
+import type { DimIndicesProps, ResolutionLevel } from './types'
 import type { XYLimits } from './map-utils'
 import type { ProjectionContext } from './projection-utils'
 import type {
@@ -22,7 +22,7 @@ import { RegionCache, createRegionState, makeRegionKey } from './region-cache'
 export type RegionFetcherContext = {
   zarrStore: ZarrStore
   dimIndices: DimIndicesProps
-  levels: UntiledLevel[]
+  levels: ResolutionLevel[]
   projection: ProjectionContext
   xyLimits: XYLimits | null
   latIsAscending: boolean

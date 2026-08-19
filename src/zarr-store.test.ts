@@ -68,7 +68,7 @@ describe('ZarrStore (in-memory v3 fixture)', () => {
     expect(d.fill_value).toBe(-9999)
     expect(d.scaleFactor).toBe(0.1)
     expect(d.addOffset).toBe(5)
-    expect(d.multiscaleType).toBe('none')
+    expect(d.resolutionLevels).toEqual([])
   })
 
   it('identifies spatial dimension indices', async () => {
@@ -151,11 +151,10 @@ describe('ZarrStore (in-memory v3 fixture)', () => {
 })
 
 /**
- * The multiscale classifier (`_getPyramidMetadata`/`_parseUntiledMultiscale`)
- * sniffs three metadata layouts and picks the render mode + CRS. A wrong guess
- * fails silently (wrong mode/CRS, never throws), so these pin each layout's
- * classification. Untiled cases pass explicit bounds + orientation so the path
- * skips coordinate-array reads and isolates the classification logic.
+ * The multiscale parser (`_getPyramidMetadata`/`_parseLayoutMultiscale`)
+ * recognizes the supported metadata layouts and resolves their levels, CRS,
+ * and spatial defaults. Explicit bounds and orientation keep the tests without
+ * slippy-map defaults focused on metadata parsing.
  */
 
 /** Build a pyramid store: root `multiscales` attr + one variable array per level. */
@@ -171,8 +170,8 @@ function pyramidStore(multiscales: unknown, levels: string[]): MemoryStore {
   })
 }
 
-describe('ZarrStore multiscale classification', () => {
-  it('classifies an OME-NGFF pyramid with pixels_per_tile as tiled', async () => {
+describe('ZarrStore multiscale metadata', () => {
+  it('uses pixels_per_tile metadata for slippy-map spatial defaults', async () => {
     const store = new ZarrStore({
       customStore: pyramidStore(
         [
@@ -191,15 +190,15 @@ describe('ZarrStore multiscale classification', () => {
     await store.initialized
     const d = store.describe()
 
-    expect(d.multiscaleType).toBe('tiled')
-    expect(d.levels).toEqual(['0', '1'])
+    expect(d.levelAssets).toEqual(['0', '1'])
+    expect(d.resolutionLevels.map((l) => l.asset)).toEqual(['0', '1'])
     expect(d.crs).toBe('EPSG:4326')
-    // Tiled pyramids default to a global extent, north-first.
+    // Slippy-map pyramids default to a global extent, north-first.
     expect(d.xyLimits).toEqual({ xMin: -180, xMax: 180, yMin: -90, yMax: 90 })
     expect(d.latIsAscending).toBe(false)
   })
 
-  it('classifies an OME-NGFF pyramid without pixels_per_tile as untiled', async () => {
+  it('parses OME-NGFF resolution levels without pixels_per_tile', async () => {
     const store = new ZarrStore({
       customStore: pyramidStore(
         [{ datasets: [{ path: '0' }, { path: '1' }] }],
@@ -213,17 +212,16 @@ describe('ZarrStore multiscale classification', () => {
     await store.initialized
     const d = store.describe()
 
-    expect(d.multiscaleType).toBe('untiled')
-    expect(d.levels).toEqual(['0', '1'])
-    expect(d.untiledLevels.map((l) => l.asset)).toEqual(['0', '1'])
+    expect(d.levelAssets).toEqual(['0', '1'])
+    expect(d.resolutionLevels.map((l) => l.asset)).toEqual(['0', '1'])
     // Intentionally NOT pinned here:
-    //  - crs: an untiled pyramid with absent CRS currently resolves to EPSG:3857
+    //  - crs: OME-NGFF metadata with absent CRS currently resolves to EPSG:3857
     //    (the classifier defaults there and bounds inference never demotes to
     //    EPSG:4326). That looks incidental rather than intentional, so we don't
     //    cement it — see the CRS-resolution test for the tiled default.
   })
 
-  it('classifies a zarr-conventions layout pyramid as untiled', async () => {
+  it('parses a zarr-conventions layout pyramid', async () => {
     const store = new ZarrStore({
       customStore: pyramidStore(
         {
@@ -240,16 +238,15 @@ describe('ZarrStore multiscale classification', () => {
     await store.initialized
     const d = store.describe()
 
-    expect(d.multiscaleType).toBe('untiled')
-    expect(d.levels).toEqual(['0', '1'])
+    expect(d.levelAssets).toEqual(['0', '1'])
     expect(d.crs).toBe('EPSG:4326')
-    expect(d.untiledLevels).toEqual([{ asset: '0' }, { asset: '1' }])
+    expect(d.resolutionLevels).toEqual([{ asset: '0' }, { asset: '1' }])
   })
 
   it('resolves the CRS of a tiled OME-NGFF pyramid from the dataset crs field', async () => {
-    // All datasets here are tiled (pixels_per_tile present). A tiled (slippy-map)
-    // pyramid with absent CRS conventionally defaults to Web Mercator, so pinning
-    // the tiled default is intentional — unlike the untiled-absent case above.
+    // `pixels_per_tile` marks these as slippy-map pyramids. One with absent CRS
+    // conventionally defaults to Web Mercator, so pinning that default is
+    // intentional; the no-`pixels_per_tile` case above leaves it unspecified.
     const crsFor = async (crs?: string) => {
       const dataset = {
         path: '0',

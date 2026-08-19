@@ -84,8 +84,7 @@ function seedRegion(renderer: RegionRenderer): RegionState {
   region.vertexArr = new Float32Array(8)
   region.pixCoordArr = new Float32Array(8)
   region.indexArr = new Uint32Array([0, 1, 2])
-  region.useIndexedMesh = true
-  region.vertexCount = 3
+  region.indexCount = 3
   region.mercatorBounds = {
     x0: 0,
     y0: 0,
@@ -94,7 +93,7 @@ function seedRegion(renderer: RegionRenderer): RegionState {
     latMin: -85,
     latMax: 85,
   }
-  region.wgs84Bounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  region.meshBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   region.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
 
   const cache = (renderer as unknown as Seam).regionCache

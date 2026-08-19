@@ -61,12 +61,13 @@ export function renderMapboxTile({
   // Determine if we're in globe mode (default true for backwards compatibility)
   const isGlobe = context.isGlobe ?? true
 
-  // Check if any region uses source-projected mesh positions.
-  const useWgs84 = regions.some((r) => !!r.wgs84Bounds)
+  // Check if any region uses source-projected mesh positions. This becomes
+  // unconditional when the projection-mode cleanup removes the old variant.
+  const useWgs84 = regions.some((r) => !!r.meshBounds)
 
-  // Always use Mapbox globe shader for tile rendering - it handles both globe and mercator
-  // via the transition uniform. The shader converts WGS84 → Mercator, then optionally
-  // applies globe projection based on transition value.
+  // Always use the Mapbox globe-capable shader for tile rendering. It restores
+  // absolute Mercator positions from the region-local mesh, then optionally
+  // applies globe projection based on the transition value.
   const shaderProgram = renderer.getProgram(
     context.shaderData,
     customShaderConfig,
@@ -94,19 +95,14 @@ export function renderMapboxTile({
   let needsMoreData = false
   for (const region of regions) {
     // Use mercatorBounds for tile intersection — always set and has the actual
-    // per-region extent. wgs84Bounds carries the source-projected mesh anchor.
+    // per-region extent. meshBounds carries the source-projected mesh anchor.
     if (!boundsIntersect(region.mercatorBounds, tileBounds)) continue
-
-    // Source-projected regions may use an indexed adaptive mesh.
-    const useIndexedMesh = !!region.useIndexedMesh && !!region.indexBuffer
 
     const renderable: RenderableRegion = {
       mercatorBounds: region.mercatorBounds,
       vertexBuffer: region.vertexBuffer,
       pixCoordBuffer: region.pixCoordBuffer,
-      vertexCount: useIndexedMesh
-        ? region.vertexCount ?? region.vertexArr.length / 2
-        : region.vertexArr.length / 2,
+      indexCount: region.indexCount,
       texture: region.texture,
       bandData: region.bandData ?? new Map(),
       bandTextures: region.bandTextures ?? new Map(),
@@ -114,11 +110,8 @@ export function renderMapboxTile({
       bandTexturesConfigured: region.bandTexturesConfigured ?? new Set(),
       width: region.width,
       height: region.height,
-      // Include indexed mesh fields for adaptive source-projected meshes.
-      indexBuffer: useIndexedMesh ? region.indexBuffer : undefined,
-      useIndexedMesh: useIndexedMesh,
-      // Include wgs84Bounds for source-projected mesh scale/anchor uniforms.
-      wgs84Bounds: region.wgs84Bounds,
+      indexBuffer: region.indexBuffer,
+      meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,
     }
 
@@ -131,7 +124,8 @@ export function renderMapboxTile({
       useWgs84 ? tileMatrix : null
     )
     if (!rendered) {
-      // renderRegion returns false when band data is missing
+      // A drawable region can still become incomplete at this boundary if a
+      // texture or another required render resource is missing.
       needsMoreData = true
     }
   }

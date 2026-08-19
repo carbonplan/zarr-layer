@@ -9,7 +9,7 @@ import {
 import type { ProjectionContext } from './projection-utils'
 import { sampleEdgesToMercatorBounds } from './projection-utils'
 import type { LevelMeta } from './region-state'
-import type { DimIndicesProps, MapLike, UntiledLevel } from './types'
+import type { DimIndicesProps, MapLike, ResolutionLevel } from './types'
 
 export type RegionCoordinate = { regionX: number; regionY: number }
 type SourceBounds = { xMin: number; xMax: number; yMin: number; yMax: number }
@@ -308,7 +308,7 @@ export function selectLevelForZoom({
 }: {
   mapZoom: number
   xyLimits: XYLimits | null
-  levels: UntiledLevel[]
+  levels: ResolutionLevel[]
   projection: ProjectionContext
   lonIndex?: number
 }): number {

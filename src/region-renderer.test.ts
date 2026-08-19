@@ -110,7 +110,10 @@ function seedFallbackRegion(
   region.height = 2
   region.vertexArr = new Float32Array(8)
   region.pixCoordArr = new Float32Array(8)
+  region.indexArr = new Uint32Array([0, 1, 2])
+  region.indexCount = 3
   region.mercatorBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  region.meshBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
   region.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
   // A fallback was fetched under the same selector, so it carries the same
   // bands as the current level.
@@ -121,6 +124,7 @@ function seedFallbackRegion(
     region.texture = {} as WebGLTexture
     region.vertexBuffer = {} as WebGLBuffer
     region.pixCoordBuffer = {} as WebGLBuffer
+    region.indexBuffer = {} as WebGLBuffer
     region.textureUploaded = true
     region.geometryUploaded = true
     for (const band of bands ?? []) {

@@ -6,14 +6,14 @@
  * convert their regions to this interface for a single render path.
  */
 
-import type { MercatorBounds, Wgs84Bounds } from './map-utils'
+import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
 import { bindBandTextures, bindGeometryBuffers } from './render-helpers'
 
 /**
  * A region ready for rendering.
- * This is the common interface for both tiles and untiled regions.
+ * This is the common interface for direct and tile-target rendering.
  * Textures are expected to be uploaded before rendering.
  */
 export interface RenderableRegion {
@@ -22,23 +22,17 @@ export interface RenderableRegion {
   // Geometry
   vertexBuffer: WebGLBuffer
   pixCoordBuffer: WebGLBuffer
-  vertexCount: number
+  indexBuffer: WebGLBuffer
+  indexCount: number
 
-  // Indexed mesh support (for adaptive source-projected meshes)
-  indexBuffer?: WebGLBuffer | null
-  useIndexedMesh?: boolean
-
-  // WGS84 bounds for vertex shader positioning (source-projected path, ECEF globe)
-  wgs84Bounds?: Wgs84Bounds | null
+  // Normalized-Mercator bounds used to reconstruct region-local mesh positions
+  meshBounds: MeshMercatorBounds
 
   // Data orientation: true = row 0 is south (latitude ascending)
   // Resolved by ZarrStore during init
   latIsAscending: boolean
 
-  // Render-time fields (computed in regionToRenderable, not cached on RegionState)
-  // Defaults when unset: positionSpace = wgs84Bounds ? 'wgs84' : 'mercator'
-  //                      sampleMode = 'linear'
-  positionSpace?: 'mercator' | 'wgs84' | 'wgs84-ecef'
+  // Render-time sampling mode. Defaults to linear.
   sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
 
   // Main texture (pre-uploaded). Null when band textures are sampled instead.
@@ -81,30 +75,18 @@ export function renderRegion(
   // not the off-screen layer center: small clip magnitudes, no pan/zoom jitter.
   eyeMatrix?: number[] | Float32Array | Float64Array | null
 ): boolean {
-  // Resolve position space and sample mode from explicit fields or defaults
-  const wgs84Bounds = region.wgs84Bounds ?? null
-  const posSpace = region.positionSpace ?? (wgs84Bounds ? 'wgs84' : 'mercator')
+  const meshBounds = region.meshBounds
+  if (!meshBounds) return false
 
   const hasLatBounds =
     region.mercatorBounds.latMin !== undefined &&
     region.mercatorBounds.latMax !== undefined
   const sampMode = region.sampleMode ?? 'linear'
 
-  // Set position uniforms based on position space
-  let scaleX: number, scaleY: number, shiftX: number, shiftY: number
-  if (posSpace === 'mercator') {
-    scaleX = (region.mercatorBounds.x1 - region.mercatorBounds.x0) / 2
-    scaleY = (region.mercatorBounds.y1 - region.mercatorBounds.y0) / 2
-    shiftX = (region.mercatorBounds.x0 + region.mercatorBounds.x1) / 2
-    shiftY = (region.mercatorBounds.y0 + region.mercatorBounds.y1) / 2
-  } else {
-    // 'wgs84' and 'wgs84-ecef' both use wgs84Bounds for scale/shift
-    if (!wgs84Bounds) return false
-    scaleX = (wgs84Bounds.x1 - wgs84Bounds.x0) / 2
-    scaleY = (wgs84Bounds.y1 - wgs84Bounds.y0) / 2
-    shiftX = (wgs84Bounds.x0 + wgs84Bounds.x1) / 2
-    shiftY = (wgs84Bounds.y0 + wgs84Bounds.y1) / 2
-  }
+  const scaleX = (meshBounds.x1 - meshBounds.x0) / 2
+  const scaleY = (meshBounds.y1 - meshBounds.y0) / 2
+  const shiftX = (meshBounds.x0 + meshBounds.x1) / 2
+  const shiftY = (meshBounds.y0 + meshBounds.y1) / 2
 
   gl.uniform1f(shaderProgram.scaleLoc, 0)
   gl.uniform1f(shaderProgram.scaleXLoc, scaleX)
@@ -167,10 +149,8 @@ export function renderRegion(
     region.pixCoordBuffer
   )
 
-  // Bind index buffer for indexed mesh
-  if (region.useIndexedMesh && region.indexBuffer) {
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-  }
+  if (!region.indexBuffer) return false
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
 
   // Bind textures. The main texture must already be uploaded; bindBandTextures
   // uploads any band whose contents are not resident yet.
@@ -214,11 +194,7 @@ export function renderRegion(
         eyeM[3] * ax + eyeM[7] * shiftY + eyeM[15]
       )
     }
-    if (region.useIndexedMesh && region.indexBuffer) {
-      gl.drawElements(gl.TRIANGLES, region.vertexCount, gl.UNSIGNED_INT, 0)
-    } else {
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, region.vertexCount)
-    }
+    gl.drawElements(gl.TRIANGLES, region.indexCount, gl.UNSIGNED_INT, 0)
   }
 
   return true

@@ -325,7 +325,7 @@ export function ensureRegionGpuResources(
   region: RegionState,
   requiredBands?: readonly string[]
 ): boolean {
-  if (!region.vertexArr || !region.pixCoordArr) return false
+  if (!region.vertexArr || !region.pixCoordArr || !region.indexArr) return false
 
   const bandRendering = !!requiredBands && requiredBands.length > 0
   let texturesReady: boolean
@@ -374,17 +374,15 @@ export function ensureRegionGpuResources(
       gl.bindBuffer(gl.ARRAY_BUFFER, region.pixCoordBuffer)
       gl.bufferData(gl.ARRAY_BUFFER, region.pixCoordArr, gl.STATIC_DRAW)
     }
-    if (region.useIndexedMesh && region.indexArr) {
-      if (!region.indexBuffer) region.indexBuffer = gl.createBuffer()
-      if (region.indexBuffer) {
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
-        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
-      }
+    if (!region.indexBuffer) region.indexBuffer = gl.createBuffer()
+    if (region.indexBuffer) {
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, region.indexArr, gl.STATIC_DRAW)
     }
     region.geometryUploaded = !!(
       region.vertexBuffer &&
       region.pixCoordBuffer &&
-      (!region.useIndexedMesh || region.indexBuffer)
+      region.indexBuffer
     )
   }
   return texturesReady && region.geometryUploaded

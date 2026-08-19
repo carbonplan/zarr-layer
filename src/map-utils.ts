@@ -22,11 +22,11 @@ export interface MercatorBounds {
 }
 
 /**
- * Bounds for the source-projected ("wgs84" inputSpace) mesh path, in normalized
- * Web Mercator [0, 1] world coords. `y` can exceed [0, 1] for near-polar
- * vertices. The renderer derives its scale/shift uniforms from these.
+ * Bounds for a region-local mesh in normalized Web Mercator world coordinates.
+ * `y` can exceed [0, 1] for near-polar vertices. The renderer derives the
+ * mesh's scale/shift uniforms from these bounds.
  */
-export interface Wgs84Bounds {
+export interface MeshMercatorBounds {
   x0: number
   y0: number
   x1: number
