@@ -18,6 +18,8 @@ export type SelectorResolutionContext = {
   isMultiscale: boolean
   dimensionValues: DimensionValuesCache
   coordLevelIndex: number
+  /** Dimensions already warned about after coordinate-read failures. */
+  warnedDimensions: Set<string>
 }
 
 /**
@@ -167,6 +169,47 @@ export async function buildSliceArgsForSelector(
   return { sliceArgs, multiValueDims }
 }
 
+/** A selector value was not found in an available coordinate array. */
+export class SelectorResolutionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SelectorResolutionError'
+  }
+}
+
+function unresolvedSelectionIndex(
+  dimName: string,
+  value: number | string,
+  coords: (number | string)[] | null
+): number {
+  if (typeof value === 'number') return value
+  const detail = coords
+    ? `Available values: [${coords.slice(0, 10).join(', ')}${
+        coords.length > 10 ? ', ...' : ''
+      }]. `
+    : `The store has no root to read the coordinate array from, so string values cannot be matched. `
+  throw new SelectorResolutionError(
+    `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
+      detail +
+      `Use { selected: <index>, type: 'index' } to select by array index instead.`
+  )
+}
+
+/** Coordinate reads may recover, so this deliberately avoids the latching error. */
+function unreadableCoordinateIndex(
+  dimName: string,
+  value: number | string,
+  cause: unknown
+): number {
+  if (typeof value === 'number') return value
+  const reason = cause instanceof Error ? cause.message : String(cause)
+  throw new Error(
+    `[ZarrLayer] Selector value '${value}' for dimension '${dimName}' cannot be matched: ` +
+      `the coordinate array could not be read (${reason}). ` +
+      `Use { selected: <index>, type: 'index' } to select by array index instead.`
+  )
+}
+
 export async function resolveSelectionIndex(
   context: SelectorResolutionContext,
   dimName: string,
@@ -197,26 +240,15 @@ export async function resolveSelectionIndex(
   if (storeCoords && storeCoords.length > 0) {
     const idx = storeCoords.indexOf(value)
     if (idx >= 0) return idx
-    // Value not present in the preloaded coordinate array: treat a numeric
-    // selector as a direct index.
-    return typeof value === 'number' ? value : 0
+    return unresolvedSelectionIndex(dimName, value, storeCoords)
   }
 
   if (!context.zarrStore.root) {
-    return typeof value === 'number' ? value : 0
+    return unresolvedSelectionIndex(dimName, value, null)
   }
 
-  // Multiscale pyramids keep per-dimension coordinate arrays under per-level
-  // paths (e.g. `0/band/c/0`), not at the root. Passing `null` here resolves
-  // the coordinate array from the root, which 404s for those datasets; the
-  // catch below then falls back to index 0 for every selector value. An RGB
-  // selection (red/green/blue by name) therefore collapses all three channels
-  // to band 0 and renders greyscale. Resolve the in-flight level's path
-  // instead, gated on `isMultiscale` so single-level datasets (coordinates at
-  // root) are unaffected. `loadLevel` calls `buildSliceArgsForSelector`
-  // (and so this) before committing `activeLevel`, so fall through
-  // activeLevel.index -> loadingLevelIndex -> desiredLevelIndex -> 0 to use
-  // the level the in-flight load is actually targeting.
+  // Multiscale coordinate arrays live beneath each level; single-level
+  // coordinates remain at the root.
   let levelInfo: string | null = null
   if (context.isMultiscale && context.levels.length > 0) {
     const safeIdx = Math.max(
@@ -226,30 +258,32 @@ export async function resolveSelectionIndex(
     levelInfo = context.levels[safeIdx]?.asset ?? null
   }
 
+  let coords: (number | string)[]
   try {
-    const coords = await loadDimensionValues(
+    const loaded = await loadDimensionValues(
       context.dimensionValues,
       levelInfo,
       dimInfo,
       context.zarrStore.root,
       context.zarrStore.version
     )
-    context.dimensionValues[dimName] = coords
-
-    const coordIdx = (coords as (number | string)[]).indexOf(value)
-    if (coordIdx >= 0) return coordIdx
-    throw new Error(
-      `[ZarrLayer] Selector value '${value}' not found in coordinate array for dimension '${dimName}'. ` +
-        `Available values: [${(coords as (number | string)[])
-          .slice(0, 10)
-          .join(', ')}${coords.length > 10 ? ', ...' : ''}]. ` +
-        `Use { selected: <index>, type: 'index' } to select by array index instead.`
-    )
+    context.dimensionValues[dimName] = loaded
+    coords = loaded as (number | string)[]
   } catch (err) {
-    console.debug(`Could not resolve coordinate for '${dimName}':`, err)
+    // Failed reads are retried, so warn once per dimension.
+    if (!context.warnedDimensions.has(dimName)) {
+      context.warnedDimensions.add(dimName)
+      console.warn(
+        `[zarr-layer] Failed to load coordinate array for dimension '${dimName}':`,
+        err
+      )
+    }
+    return unreadableCoordinateIndex(dimName, value, err)
   }
 
-  return typeof value === 'number' ? value : 0
+  const coordIdx = coords.indexOf(value)
+  if (coordIdx >= 0) return coordIdx
+  return unresolvedSelectionIndex(dimName, value, coords)
 }
 
 /**

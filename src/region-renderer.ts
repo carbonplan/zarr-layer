@@ -141,6 +141,8 @@ export class RegionRenderer {
 
   // Dimension values cache (supports numeric and string coordinate arrays)
   private dimensionValues: DimensionValuesCache = {}
+  // Deduplicate coordinate-read warnings across loads.
+  private warnedCoordDimensions: Set<string> = new Set()
 
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
@@ -690,6 +692,7 @@ export class RegionRenderer {
         isMultiscale: this.isMultiscale,
         dimensionValues: this.dimensionValues,
         coordLevelIndex,
+        warnedDimensions: this.warnedCoordDimensions,
       },
       selector,
       options
@@ -1144,6 +1147,8 @@ export class RegionRenderer {
   async setSelector(selector: NormalizedSelector): Promise<void> {
     this.selector = selector
     this.bandNames = getBands(this.variable, selector)
+    // Retry levels latched by the previous selector.
+    this.levelLoader.clearSelectorFailures()
 
     if (!this.cachedGl) {
       // No gl context yet — selector is stored, update() will handle loading.
@@ -1165,7 +1170,11 @@ export class RegionRenderer {
     // selector. `reuseArray` keeps the array/dims so no refetch is done
     // when the level itself isn't changing.
     if (this.activeLevel) {
-      await this.loadLevel(this.activeLevel.index, { reuseArray: true })
+      const outcome = await this.loadLevel(this.activeLevel.index, {
+        reuseArray: true,
+      })
+      // Cached regions also belong to the previous selector.
+      if (outcome === 'failed') this.clearRegionCache(this.cachedGl)
     } else if (this.loadingLevelIndex !== null) {
       // A level load is already in flight; let it pick up the new
       // selector via its pre-commit `this.selector !== selectorSnapshot`
@@ -1297,6 +1306,7 @@ export class RegionRenderer {
         dimensionValues: this.dimensionValues,
         isMultiscale: this.isMultiscale,
         coordLevelIndex: level?.index ?? 0,
+        warnedDimensions: this.warnedCoordDimensions,
       },
       geometry,
       selector,

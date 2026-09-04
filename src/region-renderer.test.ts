@@ -3,7 +3,7 @@ import { RegionRenderer } from './region-renderer'
 import { createRegionState, type RegionCache } from './region-cache'
 import { ZarrStore } from './zarr-store'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
-import type { MapLike } from './types'
+import type { MapLike, NormalizedSelector } from './types'
 import type { RegionRenderState } from './renderer-types'
 import type { RegionState } from './region-state'
 
@@ -163,7 +163,7 @@ async function settle(renderer: RegionRenderer): Promise<void> {
   } while (fetching())
 }
 
-async function makeRenderer() {
+async function makeRenderer(selector: NormalizedSelector = {}) {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -204,7 +204,12 @@ async function makeRenderer() {
   await store.initialized
 
   const invalidate = vi.fn()
-  const renderer = new RegionRenderer(store, 'temperature', {}, invalidate)
+  const renderer = new RegionRenderer(
+    store,
+    'temperature',
+    selector,
+    invalidate
+  )
   await renderer.initialize()
   return {
     renderer,
@@ -501,6 +506,65 @@ describe('RegionRenderer', () => {
     expect([...refetched.bandTexturesUploaded]).toEqual(['time_10', 'time_20'])
     // Two bands per region across the 2x2 grid, no main textures.
     expect(gl.createTexture).toHaveBeenCalledTimes(8)
+  })
+
+  it('latches an unresolvable selector and recovers on setSelector', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { renderer, gl, map } = await makeRenderer({
+        time: { selected: 'summer', type: 'value' },
+      })
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(String(errorSpy.mock.calls[0][1])).toContain("'summer'")
+
+      renderer.update(map, gl)
+      await settle(renderer)
+      renderer.update(map, gl)
+      await settle(renderer)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(seam(renderer).getRegionStates(gl)).toEqual([])
+
+      await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+      renderer.update(map, gl)
+      await renderer.ensureQueryableLevel()
+      renderer.update(map, gl)
+      await settle(renderer)
+      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('draws nothing after a selector change that cannot resolve', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { renderer, gl, map } = await makeRenderer()
+      renderer.update(map, gl)
+      await settle(renderer)
+      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+
+      await renderer.setSelector({
+        time: { selected: 'summer', type: 'value' },
+      })
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      renderer.update(map, gl)
+      await settle(renderer)
+      renderer.update(map, gl)
+      await settle(renderer)
+      expect(seam(renderer).getRegionStates(gl)).toEqual([])
+      expect(seam(renderer).regionCache.size).toBe(0)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+
+      await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+      renderer.update(map, gl)
+      await renderer.ensureQueryableLevel()
+      renderer.update(map, gl)
+      await settle(renderer)
+      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   it('disposes GPU resources and stops rendering after dispose', async () => {

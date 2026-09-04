@@ -1,5 +1,6 @@
 import type * as zarr from 'zarrita'
 import type { LevelRuntime } from './region-state'
+import { SelectorResolutionError } from './selector-resolution'
 import type { NormalizedSelector } from './types'
 
 type ResolvedLevel = Pick<
@@ -19,7 +20,7 @@ export type LevelLoadOutcome =
   | 'committed'
   | 'superseded'
   | 'failed'
-  /** Index out of range, or non-zero on a single-level store. */
+  /** Invalid level or one latched by a selector-resolution failure. */
   | 'ignored'
 
 export type LevelLoaderContext = {
@@ -45,6 +46,8 @@ export class LevelLoader {
   private loadingLevelIndex: number | null = null
   private activeLevel: LevelRuntime | null = null
   private inflight: Promise<LevelLoadOutcome> | null = null
+  // Coordinate arrays may differ by level, so latch deterministic failures per level.
+  private selectorFailedLevels = new Set<number>()
 
   constructor(private context: LevelLoaderContext) {}
 
@@ -86,6 +89,11 @@ export class LevelLoader {
         return Promise.resolve('ignored')
       }
     } else if (levelIndex !== 0) {
+      return Promise.resolve('ignored')
+    }
+
+    // Avoid retrying deterministic failures on every render.
+    if (this.selectorFailedLevels.has(levelIndex)) {
       return Promise.resolve('ignored')
     }
 
@@ -206,6 +214,17 @@ export class LevelLoader {
       // a failure: its error is about an attempt nobody is waiting on, and
       // calling it a failure would stop `ensureActive` retrying.
       if (token !== this.loadToken) return 'superseded'
+      // Do not latch an error from a selector that has already been replaced.
+      if (this.context.getSelector() !== selectorSnapshot) {
+        this.context.invalidate()
+        return 'superseded'
+      }
+      // Other failures may be transient and remain retryable.
+      if (err instanceof SelectorResolutionError) {
+        this.selectorFailedLevels.add(levelIndex)
+      }
+      // Do not retain slice args built for the previous selector.
+      if (reuseArray) this.activeLevel = null
       console.error(
         `Failed to load level ${this.context.getAssetLabel(levelIndex)}:`,
         err
@@ -214,6 +233,10 @@ export class LevelLoader {
     } finally {
       if (token === this.loadToken) this.loadingLevelIndex = null
     }
+  }
+
+  clearSelectorFailures(): void {
+    this.selectorFailedLevels.clear()
   }
 
   dispose(): void {

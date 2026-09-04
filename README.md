@@ -168,6 +168,10 @@ Selectors specify which slice of your multidimensional data to render. Dimension
 { month: [1, 2, 3] }
 // exposes as: month_1, month_2, month_3
 
+// Index selectors use dimension-prefixed shader variable names
+{ band: { selected: [0, 1, 2], type: 'index' } }
+// exposes as: band_0, band_1, band_2; update shader references accordingly
+
 // Mix with other dimensions
 { band: ['red', 'green', 'blue'], time: 0 }
 ```

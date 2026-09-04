@@ -94,6 +94,7 @@ async function makeQueryHarness(
     dimensionValues: {},
     isMultiscale: false,
     coordLevelIndex: 0,
+    warnedDimensions: new Set(),
   }
 
   return { context, releaseReads }
