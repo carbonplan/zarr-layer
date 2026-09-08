@@ -47,6 +47,8 @@ export type QueryContext = {
   dimensionValues: DimensionValuesCache
   isMultiscale: boolean
   coordLevelIndex: number
+  /** Dimensions already warned about after coordinate-read failures. */
+  warnedDimensions: Set<string>
 }
 
 /**
@@ -82,6 +84,7 @@ export async function fetchQueryData(
           isMultiscale: context.isMultiscale,
           dimensionValues: context.dimensionValues,
           coordLevelIndex: context.coordLevelIndex,
+          warnedDimensions: context.warnedDimensions,
         },
         selector,
         {

@@ -168,6 +168,10 @@ Selectors specify which slice of your multidimensional data to render. Dimension
 { month: [1, 2, 3] }
 // exposes as: month_1, month_2, month_3
 
+// Index selectors use dimension-prefixed shader variable names
+{ band: { selected: [0, 1, 2], type: 'index' } }
+// exposes as: band_0, band_1, band_2; update shader references accordingly
+
 // Mix with other dimensions
 { band: ['red', 'green', 'blue'], time: 0 }
 ```
@@ -326,7 +330,7 @@ By default a query reads the level the map is currently drawing, so results agre
 
 ### query readiness
 
-`queryData` waits for metadata and a committed resolution level, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. Readiness failures — initialization failure, failure to load a level, removal from the map, or querying before the layer was added — reject with a `ZarrLayerNotReadyError` rather than returning empty. Initialization failures carry the underlying error on `.cause`.
+`queryData` waits for metadata and a committed resolution level, so it can be called immediately after `map.addLayer(layer)` with no render pass in between and no polling. Readiness failures — initialization failure, failure to load a level, removal from the map, or querying before the layer was added — reject with a `ZarrLayerNotReadyError` rather than returning empty. Initialization and level-load failures carry the underlying error on `.cause`.
 
 Failed reads reject as well, so an empty result means the geometry found no data.
 
@@ -337,7 +341,7 @@ map.addLayer(layer)
 await layer.ready // metadata loaded and a resolution level committed
 ```
 
-Not the same signal as `onLoadingStateChange`, which is a spinner: it flips as chunks load and reports nothing about the level commit, so `loading: false` can be emitted while the layer still has no level.
+Not the same signal as `onLoadingStateChange`, which is a spinner: it flips as chunks load and reports nothing about the level commit, so `loading: false` can be emitted while the layer still has no level. Its `error` field reports initialization and level-load failures and returns to `null` after the load recovers or the selector changes.
 
 ## authentication
 

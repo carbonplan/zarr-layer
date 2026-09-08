@@ -23,6 +23,7 @@ import type {
   ColormapArray,
   SpatialDimensions,
   DimIndicesProps,
+  LoadingState,
   LoadingStateCallback,
   MapLike,
   Selector,
@@ -200,6 +201,7 @@ export class ZarrLayer {
   private metadataLoading: boolean = false
   private chunksLoading: boolean = false
   private initError: Error | null = null
+  private levelLoadError: Error | null = null
   private proj4: string | undefined
   private transformRequest: TransformRequest | undefined
   private onAuthError: OnAuthError | undefined
@@ -408,15 +410,13 @@ export class ZarrLayer {
       loading: this.metadataLoading || this.chunksLoading,
       metadata: this.metadataLoading,
       chunks: this.chunksLoading,
-      error: this.initError,
+      error: this.initError ?? this.levelLoadError,
     })
   }
 
-  private handleChunkLoadingChange = (state: {
-    loading: boolean
-    chunks: boolean
-  }): void => {
+  private handleChunkLoadingChange = (state: LoadingState): void => {
     this.chunksLoading = state.chunks
+    this.levelLoadError = state.error ?? null
     this.emitLoadingState()
   }
 
@@ -480,6 +480,7 @@ export class ZarrLayer {
 
   private async _setVariableAsync(variable: string) {
     this.metadataLoading = true
+    this.levelLoadError = null
     this.emitLoadingState()
 
     try {
@@ -583,6 +584,7 @@ export class ZarrLayer {
     }
 
     this.initError = null
+    this.levelLoadError = null
     this.metadataLoading = true
     this.emitLoadingState()
 
@@ -962,7 +964,7 @@ export class ZarrLayer {
   /**
    * Resolves once the layer can serve queries and draw: metadata loaded and a
    * level committed. Rejects with `ZarrLayerNotReadyError` if initialization
-   * failed or the layer was removed.
+   * or level loading failed, or if the layer was removed.
    *
    * This is not the same signal as `onLoadingStateChange`. That one is a
    * spinner — it flaps as chunks come and go, and it reports nothing about the
@@ -1020,13 +1022,17 @@ export class ZarrLayer {
       )
     }
     if (!level) {
+      const cause = regionRenderer.levelLoadError
       // No level means the load failed or was superseded and never retried.
       // Returning here would let a query answer empty off a layer that holds
       // no data at all, which is exactly the silent wrong answer the
       // readiness contract exists to prevent.
       throw new ZarrLayerNotReadyError(
         this.id,
-        'no resolution level could be loaded'
+        `no resolution level could be loaded${
+          cause ? `: ${cause.message}` : ''
+        }`,
+        cause ? { cause } : undefined
       )
     }
     return regionRenderer

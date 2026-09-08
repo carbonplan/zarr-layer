@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { LevelLoader, type LevelLoaderContext } from './level-loader'
+import { SelectorResolutionError } from './selector-resolution'
 import type { NormalizedSelector } from './types'
 import type * as zarr from 'zarrita'
 
@@ -29,7 +30,11 @@ type Resolved = {
 }
 
 function makeHarness(
-  opts: { isMultiscale?: boolean; levelCount?: number } = {}
+  opts: {
+    isMultiscale?: boolean
+    levelCount?: number
+    buildSliceArgs?: LevelLoaderContext['buildSliceArgs']
+  } = {}
 ) {
   const { isMultiscale = true, levelCount = 3 } = opts
   const gates: Array<ReturnType<typeof deferred<void>>> = []
@@ -39,6 +44,7 @@ function makeHarness(
     cancels: 0,
     commits: 0,
     invalidates: 0,
+    errors: [] as Array<Error | null>,
   }
 
   const context: LevelLoaderContext = {
@@ -57,10 +63,12 @@ function makeHarness(
         reusedArray: reuse,
       } satisfies Resolved
     },
-    buildSliceArgs: async () => ({
-      baseSliceArgs: [0, 0],
-      baseMultiValueDims: [],
-    }),
+    buildSliceArgs:
+      opts.buildSliceArgs ??
+      (async () => ({
+        baseSliceArgs: [0, 0],
+        baseMultiValueDims: [],
+      })),
     getSelector: () => selector,
     isRemoved: () => false,
     onCancelInflight: () => {
@@ -68,6 +76,9 @@ function makeHarness(
     },
     onNewArrayCommitted: () => {
       calls.commits++
+    },
+    onLoadErrorChange: (error) => {
+      calls.errors.push(error)
     },
     invalidate: () => {
       calls.invalidates++
@@ -240,6 +251,182 @@ describe('LevelLoader.loadLevel', () => {
     await second
     expect(loader.active?.index).toBe(2)
     expect(loader.loadingIndex).toBeNull()
+  })
+
+  it('latches a selector-resolution failure: one attempt, one error log', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { loader, calls, gates } = makeHarness({
+        buildSliceArgs: async () => {
+          throw new SelectorResolutionError('bad band name')
+        },
+      })
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].resolve()
+      expect(await first).toBe('failed')
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors).toHaveLength(1)
+      expect(calls.errors[0]).toBeInstanceOf(SelectorResolutionError)
+
+      expect(await loader.loadLevel(1)).toBe('ignored')
+      expect(await loader.loadLevel(1)).toBe('ignored')
+      expect(calls.resolveArray).toHaveLength(1)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors).toHaveLength(1)
+
+      loader.desiredIndex = 2
+      const other = loader.loadLevel(2)
+      expect(calls.resolveArray).toHaveLength(2)
+      gates[1].resolve()
+      expect(await other).toBe('failed')
+      expect(errorSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('retries a non-selector failure on the next call', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { loader, calls, gates } = makeHarness()
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].reject(new Error('503'))
+      expect(await first).toBe('failed')
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors[0]?.message).toBe('503')
+
+      const second = loader.loadLevel(1)
+      expect(calls.resolveArray).toHaveLength(2)
+      gates[1].reject(new Error('503'))
+      expect(await second).toBe('failed')
+      // The same failure again is neither re-reported nor re-logged.
+      expect(calls.errors).toHaveLength(1)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+
+      const third = loader.loadLevel(1)
+      expect(calls.resolveArray).toHaveLength(3)
+      gates[2].resolve()
+      expect(await third).toBe('committed')
+      expect(loader.active?.index).toBe(1)
+      expect(calls.errors).toEqual([expect.any(Error), null])
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('clearSelectorFailures lifts the latch so a new selector can load', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let resolvable = false
+      const { loader, calls, gates } = makeHarness({
+        buildSliceArgs: async () => {
+          if (!resolvable) throw new SelectorResolutionError('bad band name')
+          return { baseSliceArgs: [0, 0], baseMultiValueDims: [] }
+        },
+      })
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].resolve()
+      expect(await first).toBe('failed')
+      expect(await loader.loadLevel(1)).toBe('ignored')
+
+      resolvable = true
+      loader.clearSelectorFailures()
+      expect(calls.errors[calls.errors.length - 1]).toBeNull()
+      const retry = loader.loadLevel(1)
+      expect(calls.resolveArray).toHaveLength(2)
+      gates[1].resolve()
+      expect(await retry).toBe('committed')
+      expect(loader.active?.index).toBe(1)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('does not latch a selector-resolution failure from a stale selector', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const bad: NormalizedSelector = {
+        band: { selected: 'bleu', type: 'value' },
+      }
+      const { loader, calls, gates, setSelector } = makeHarness({
+        buildSliceArgs: async (selector) => {
+          if (selector === bad) throw new SelectorResolutionError('bad band')
+          return { baseSliceArgs: [0, 0], baseMultiValueDims: [] }
+        },
+      })
+      setSelector(bad)
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+
+      // The replacement deduplicates onto the in-flight load.
+      setSelector({ band: { selected: 'blue', type: 'value' } })
+      loader.clearSelectorFailures()
+      const replacement = loader.loadLevel(1)
+      expect(replacement).toBe(first)
+      gates[0].resolve()
+      expect(await first).toBe('superseded')
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect(calls.errors).toEqual([])
+
+      const retry = loader.loadLevel(1)
+      expect(calls.resolveArray).toHaveLength(2)
+      gates[1].resolve()
+      expect(await retry).toBe('committed')
+      expect(loader.active?.index).toBe(1)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('drops the committed level when a selector rebuild fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let fail = false
+      const { loader, gates } = makeHarness({
+        buildSliceArgs: async () => {
+          if (fail) throw new SelectorResolutionError('bad band')
+          return { baseSliceArgs: [0, 0], baseMultiValueDims: [] }
+        },
+      })
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].resolve()
+      expect(await first).toBe('committed')
+
+      fail = true
+      const rebuild = loader.loadLevel(1, { reuseArray: true })
+      gates[1].resolve()
+      expect(await rebuild).toBe('failed')
+      expect(loader.active).toBeNull()
+      expect(await loader.loadLevel(1)).toBe('ignored')
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('reports the same error instance again when a different level fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const shared = new Error('store offline')
+      const { loader, calls, gates } = makeHarness()
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].reject(shared)
+      expect(await first).toBe('failed')
+
+      loader.desiredIndex = 2
+      const second = loader.loadLevel(2)
+      gates[1].reject(shared)
+      expect(await second).toBe('failed')
+
+      expect(errorSpy).toHaveBeenCalledTimes(2)
+      expect(calls.errors).toEqual([shared, shared])
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   it('logs errors only for the load that still owns the token', async () => {
