@@ -44,6 +44,7 @@ function makeHarness(
     cancels: 0,
     commits: 0,
     invalidates: 0,
+    errors: [] as Array<Error | null>,
   }
 
   const context: LevelLoaderContext = {
@@ -75,6 +76,9 @@ function makeHarness(
     },
     onNewArrayCommitted: () => {
       calls.commits++
+    },
+    onLoadErrorChange: (error) => {
+      calls.errors.push(error)
     },
     invalidate: () => {
       calls.invalidates++
@@ -262,11 +266,14 @@ describe('LevelLoader.loadLevel', () => {
       gates[0].resolve()
       expect(await first).toBe('failed')
       expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors).toHaveLength(1)
+      expect(calls.errors[0]).toBeInstanceOf(SelectorResolutionError)
 
       expect(await loader.loadLevel(1)).toBe('ignored')
       expect(await loader.loadLevel(1)).toBe('ignored')
       expect(calls.resolveArray).toHaveLength(1)
       expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors).toHaveLength(1)
 
       loader.desiredIndex = 2
       const other = loader.loadLevel(2)
@@ -288,12 +295,22 @@ describe('LevelLoader.loadLevel', () => {
       gates[0].reject(new Error('503'))
       expect(await first).toBe('failed')
       expect(errorSpy).toHaveBeenCalledTimes(1)
+      expect(calls.errors[0]?.message).toBe('503')
 
       const second = loader.loadLevel(1)
       expect(calls.resolveArray).toHaveLength(2)
-      gates[1].resolve()
-      expect(await second).toBe('committed')
+      gates[1].reject(new Error('503'))
+      expect(await second).toBe('failed')
+      // The same failure again is neither re-reported nor re-logged.
+      expect(calls.errors).toHaveLength(1)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+
+      const third = loader.loadLevel(1)
+      expect(calls.resolveArray).toHaveLength(3)
+      gates[2].resolve()
+      expect(await third).toBe('committed')
       expect(loader.active?.index).toBe(1)
+      expect(calls.errors).toEqual([expect.any(Error), null])
     } finally {
       errorSpy.mockRestore()
     }
@@ -317,6 +334,7 @@ describe('LevelLoader.loadLevel', () => {
 
       resolvable = true
       loader.clearSelectorFailures()
+      expect(calls.errors[calls.errors.length - 1]).toBeNull()
       const retry = loader.loadLevel(1)
       expect(calls.resolveArray).toHaveLength(2)
       gates[1].resolve()
@@ -351,6 +369,7 @@ describe('LevelLoader.loadLevel', () => {
       gates[0].resolve()
       expect(await first).toBe('superseded')
       expect(errorSpy).not.toHaveBeenCalled()
+      expect(calls.errors).toEqual([])
 
       const retry = loader.loadLevel(1)
       expect(calls.resolveArray).toHaveLength(2)
@@ -383,6 +402,28 @@ describe('LevelLoader.loadLevel', () => {
       expect(await rebuild).toBe('failed')
       expect(loader.active).toBeNull()
       expect(await loader.loadLevel(1)).toBe('ignored')
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('reports the same error instance again when a different level fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const shared = new Error('store offline')
+      const { loader, calls, gates } = makeHarness()
+      loader.desiredIndex = 1
+      const first = loader.loadLevel(1)
+      gates[0].reject(shared)
+      expect(await first).toBe('failed')
+
+      loader.desiredIndex = 2
+      const second = loader.loadLevel(2)
+      gates[1].reject(shared)
+      expect(await second).toBe('failed')
+
+      expect(errorSpy).toHaveBeenCalledTimes(2)
+      expect(calls.errors).toEqual([shared, shared])
     } finally {
       errorSpy.mockRestore()
     }

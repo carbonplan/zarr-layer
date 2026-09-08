@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ZarrLayer } from './zarr-layer'
 import { ZarrLayerNotReadyError } from './errors'
+import { SelectorResolutionError } from './selector-resolution'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
 import { createRecordingGl } from './__fixtures__/fake-gl'
-import type { MapLike, ZarrLayerOptions } from './types'
+import type { LoadingState, MapLike, ZarrLayerOptions } from './types'
 
 /**
  * `queryData` readiness on a map that never renders.
@@ -110,6 +111,29 @@ function samefieldPyramid({ declareShapes = false } = {}) {
         chunkShape: [COARSE.height * 2, COARSE.width * 2],
         dimensionNames: ['lat', 'lon'],
         chunks: { '0/0': fine },
+      },
+    ],
+  })
+}
+
+function selectorStore() {
+  return buildMemoryZarrStore({
+    arrays: [
+      {
+        name: 'temperature',
+        shape: [2, COARSE.height, COARSE.width],
+        chunkShape: [2, COARSE.height, COARSE.width],
+        dimensionNames: ['time', 'lat', 'lon'],
+        chunks: {
+          '0/0/0': new Float32Array(2 * COARSE.height * COARSE.width).fill(1),
+        },
+      },
+      {
+        name: 'time',
+        shape: [2],
+        chunkShape: [2],
+        dimensionNames: ['time'],
+        chunks: { '0': [10, 20] },
       },
     ],
   })
@@ -354,6 +378,103 @@ describe('queryData on a layer that cannot become ready', () => {
 
     expect(error).toBeInstanceOf(ZarrLayerNotReadyError)
     expect((error as ZarrLayerNotReadyError).cause).toBeInstanceOf(Error)
+  })
+
+  it('reports selector failures and clears them after recovery', async () => {
+    const states: LoadingState[] = []
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const layer = makeLayer({
+        store: selectorStore(),
+        selector: { time: 'summer' },
+        onLoadingStateChange: (state) => states.push(state),
+      })
+      layer.onAdd(staticMap(), createRecordingGl())
+
+      const error = await layer.ready.then(
+        () => null,
+        (reason) => reason
+      )
+
+      expect(error).toBeInstanceOf(ZarrLayerNotReadyError)
+      expect((error as ZarrLayerNotReadyError).cause).toBeInstanceOf(
+        SelectorResolutionError
+      )
+      expect((error as Error).message).toMatch(/'summer'.*'time'/)
+      expect(
+        states.some(
+          (state) =>
+            state.error instanceof SelectorResolutionError &&
+            state.error.message.includes("'summer'")
+        )
+      ).toBe(true)
+
+      await layer.setSelector({ time: 20 })
+      await layer.ready
+      expect(states[states.length - 1]?.error).toBeNull()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('reports a coordinate array that cannot be read for a string selector', async () => {
+    // A string coordinate written with a Zarr v3 extension dtype zarrita
+    // rejects, so named selection can never resolve. The load is treated as
+    // retryable, so the host must still get one report and one log.
+    const memory = selectorStore()
+    const enc = new TextEncoder()
+    const dec = new TextDecoder()
+    const store = {
+      get: async (key: string) => {
+        const bytes = await memory.get(key)
+        if (bytes && /\/time\/zarr\.json$/.test(key)) {
+          const meta = JSON.parse(dec.decode(bytes))
+          meta.data_type = {
+            name: 'fixed_length_utf32',
+            configuration: { length_bytes: 20 },
+          }
+          return enc.encode(JSON.stringify(meta))
+        }
+        return bytes
+      },
+    }
+    const states: LoadingState[] = []
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const layer = makeLayer({
+        store,
+        selector: { time: 'summer' },
+        onLoadingStateChange: (state) => states.push(state),
+      })
+      const gl = createRecordingGl()
+      layer.onAdd(staticMap(), gl)
+      for (let frame = 0; frame < 5; frame++) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        layer.prerender(gl, {})
+      }
+
+      const error = await layer.ready.then(
+        () => null,
+        (reason) => reason
+      )
+      expect(error).toBeInstanceOf(ZarrLayerNotReadyError)
+      expect((error as Error).message).toMatch(
+        /'summer'.*'time'.*could not be read/
+      )
+      // Every emission carries the current error; the per-frame retries
+      // must not produce a fresh one each time.
+      const transitions = states.filter(
+        (state, i) => state.error && state.error !== states[i - 1]?.error
+      )
+      expect(transitions).toHaveLength(1)
+      expect(transitions[0].error).not.toBeInstanceOf(SelectorResolutionError)
+      expect(transitions[0].error?.message).toMatch(/'summer'.*'time'/)
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      errorSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
   })
 
   it('rejects with the abort reason when the query signal aborts mid-wait', async () => {

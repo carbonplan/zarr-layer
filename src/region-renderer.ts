@@ -219,6 +219,10 @@ export class RegionRenderer {
         }
       },
       onNewArrayCommitted: () => this.resetVisibleRegions(),
+      onLoadErrorChange: (error) => {
+        this.loadingManager.error = error
+        this.emitLoadingState()
+      },
       invalidate: this.invalidate,
       getAssetLabel: (levelIndex) =>
         this.isMultiscale
@@ -1214,6 +1218,10 @@ export class RegionRenderer {
    */
   ensureQueryableLevel(): Promise<LevelRuntime | null> {
     return this.levelLoader.ensureActive()
+  }
+
+  get levelLoadError(): Error | null {
+    return this.levelLoader.lastError
   }
 
   /**

@@ -66,6 +66,7 @@ export interface LoadingState {
   loading: boolean
   metadata: boolean
   chunks: boolean
+  /** Latest initialization or level-load failure; cleared after recovery. */
   error?: Error | null
 }
 

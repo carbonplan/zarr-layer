@@ -18,8 +18,7 @@ export function wrapError(message: string, cause: unknown): Error {
  */
 export class ZarrLayerNotReadyError extends Error {
   readonly name = 'ZarrLayerNotReadyError'
-  /** The underlying failure, when one was available. Initialization failures
-   *  carry the error they failed with; the other cases have none to attach. */
+  /** The underlying initialization or level-load failure, when available. */
   readonly cause?: unknown
 
   constructor(
