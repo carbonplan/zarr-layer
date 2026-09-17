@@ -24,8 +24,13 @@ import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
 const WORLD = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
 
 async function makeQueryHarness(
-  opts: { gateReads?: boolean; failReads?: boolean } = {}
+  opts: {
+    gateReads?: boolean
+    failReads?: boolean
+    xyLimits?: typeof WORLD
+  } = {}
 ) {
+  const xyLimits = opts.xyLimits ?? WORLD
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -70,7 +75,7 @@ async function makeQueryHarness(
     customStore,
     variable: 'temp',
     version: 3,
-    bounds: [-180, -90, 180, 90],
+    bounds: [xyLimits.xMin, xyLimits.yMin, xyLimits.xMax, xyLimits.yMax],
     latIsAscending: false,
   })
   await store.initialized
@@ -80,7 +85,7 @@ async function makeQueryHarness(
     zarrStore: store,
     variable: 'temp',
     selector: {},
-    xyLimits: WORLD,
+    xyLimits,
     mercatorBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },
     latIsAscending: false,
     levels: [],
@@ -88,7 +93,7 @@ async function makeQueryHarness(
     projection: createProjectionContext({
       crs: 'EPSG:4326',
       proj4def: null,
-      xyLimits: WORLD,
+      xyLimits,
     }),
     antimeridianWarnings: new Set(),
     dimensionValues: {},
@@ -128,6 +133,48 @@ describe('queryData', () => {
       time: 10,
     })
     expect(southEast.temp).toEqual([31])
+  })
+
+  it('reaches the wrapped half cell of a node-registered global extent', async () => {
+    // Cell centers at -180..135 put the edges at -202.5..157.5; the first
+    // column also covers 157.5..180 on the far side of the antimeridian.
+    const { context } = await makeQueryHarness({
+      xyLimits: { ...WORLD, xMin: -202.5, xMax: 157.5 },
+    })
+    const wrapped = await queryData(context, point(170, 67.5), { time: 10 })
+    expect(wrapped.temp).toEqual([0])
+    const inside = await queryData(context, point(-190, 67.5), { time: 10 })
+    expect(inside.temp).toEqual([0])
+    const nextColumn = await queryData(context, point(-150, 67.5), {
+      time: 10,
+    })
+    expect(nextColumn.temp).toEqual([1])
+  })
+
+  it('warns once when a query only partly enters the wrapped part of the extent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { context } = await makeQueryHarness({
+      xyLimits: { ...WORLD, xMin: -202.5, xMax: 157.5 },
+    })
+    const straddling: QueryGeometry = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [150, 60],
+          [170, 60],
+          [170, 70],
+          [150, 70],
+          [150, 60],
+        ],
+      ],
+    }
+    await queryData(context, straddling, { time: 10 })
+    await queryData(context, straddling, { time: 10 })
+    const partial = warn.mock.calls.filter(([msg]) =>
+      String(msg).includes('partly inside')
+    )
+    expect(partial).toHaveLength(1)
+    warn.mockRestore()
   })
 
   it('normalizes a raw selector and resolves it against coordinate arrays', async () => {

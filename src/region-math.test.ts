@@ -265,6 +265,24 @@ describe('getCandidateRegions', () => {
     expect([wrapped.xMin, wrapped.xMax]).toEqual([0, grid.numRegionsX - 1])
   })
 
+  it('widens to every X column when the viewport enters the part of the extent beyond 180', () => {
+    // A node-registered extent reaches to -180.5, so 179.5..180 is its first
+    // half cell; a viewport there samples as longitudes a turn away from it.
+    expect(
+      block(
+        getCandidateRegions({
+          ...grid,
+          xyLimits: { ...WORLD, xMin: -180.5, xMax: 179.5 },
+          wrapLongitude: true,
+          west: 179.6,
+          south: -10,
+          east: 179.9,
+          north: 10,
+        })
+      )
+    ).toEqual({ xMin: 0, xMax: 39, yMin: 6, yMax: 13, count: 40 * 8 })
+  })
+
   it('falls back to every region when no viewport sample projects', () => {
     const candidates = getCandidateRegions({
       ...grid,
@@ -311,6 +329,23 @@ describe('getVisibleRegions', () => {
     // middle columns in both rows.
     const keys = regions.map((r) => `${r.regionX},${r.regionY}`).sort()
     expect(keys).toEqual(['1,0', '1,1', '2,0', '2,1'])
+  })
+
+  it('finds the wrapped half cell of a node-registered global extent', () => {
+    const limits = { ...WORLD, xMin: -180.5, xMax: 179.5 }
+    const regions = getVisibleRegions({
+      map: mapAt(179.6, -10, 179.9, 10),
+      xyLimits: limits,
+      levelMeta,
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: limits,
+      }),
+      latIsAscending: false,
+    })
+    const keys = regions.map((r) => `${r.regionX},${r.regionY}`).sort()
+    expect(keys).toEqual(['0,0', '0,1'])
   })
 
   it('returns empty without bounds, limits, level, or transformer', () => {

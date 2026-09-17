@@ -3,6 +3,7 @@ import {
   latToMercatorNorm,
   boundsToMercatorNorm,
   normalizeLongitudeExtent,
+  wrapLongitudeIntoExtent,
 } from './map-utils'
 import { MERCATOR_LAT_LIMIT } from './constants'
 
@@ -119,5 +120,24 @@ describe('normalizeLongitudeExtent', () => {
       xMin: -179.9999,
       xMax: 180.0001,
     })
+  })
+})
+
+describe('wrapLongitudeIntoExtent', () => {
+  it('leaves a longitude already inside the extent alone', () => {
+    expect(wrapLongitudeIntoExtent(10, -180.5, 179.5)).toBe(10)
+  })
+
+  it('shifts a longitude in the wrapped strip onto the extent', () => {
+    expect(wrapLongitudeIntoExtent(179.75, -180.5, 179.5)).toBeCloseTo(-180.25)
+    expect(wrapLongitudeIntoExtent(-179.75, -170, 190)).toBeCloseTo(180.25)
+  })
+
+  it('shifts by as many turns as it takes', () => {
+    expect(wrapLongitudeIntoExtent(539.75, -180.5, 179.5)).toBeCloseTo(-180.25)
+  })
+
+  it('leaves a longitude alone when no shift fits', () => {
+    expect(wrapLongitudeIntoExtent(200, -100, 100)).toBe(200)
   })
 })

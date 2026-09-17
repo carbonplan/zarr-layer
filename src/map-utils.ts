@@ -148,6 +148,20 @@ export function normalizeLongitudeExtent(
   return { xMin: lo, xMax: hi }
 }
 
+/**
+ * Shift a longitude by whole turns so it lands inside a geographic extent
+ * that reaches past ±180, such as a node-registered global grid spanning
+ * -180.5..179.5. A longitude no shift brings inside comes back unchanged.
+ */
+export function wrapLongitudeIntoExtent(
+  lon: number,
+  xMin: number,
+  xMax: number
+): number {
+  const wrapped = lon - 360 * Math.floor((lon - xMin) / 360)
+  return wrapped <= xMax ? wrapped : lon
+}
+
 export function boundsToMercatorNorm(
   xyLimits: { xMin: number; xMax: number; yMin: number; yMax: number },
   crs: 'EPSG:4326' | 'EPSG:3857' | null
