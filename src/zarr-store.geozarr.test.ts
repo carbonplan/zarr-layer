@@ -497,18 +497,19 @@ describe('bounds from the spatial: convention', () => {
     })
   })
 
-  it('snaps a node-registered global grid onto the antimeridian', async () => {
-    // Node registration puts this grid's edges at -202.5..157.5, a full 360 deg
-    // of coverage offset by half a cell. The global snap pulls it onto +/-180
-    // rather than leaving a seam. Its tolerance is a whole cell, so the half
-    // cell here is well inside it.
+  it('does not snap a node-registered global grid onto the antimeridian', async () => {
+    // Node registration puts this grid's edges at -202.5..157.5, a full
+    // 360 deg of coverage offset by half a cell. Node registration
+    // means the longitudinal values are at the center of the cell, so
+    // the half-cell offset is to be expected. Snapping to -180/180 in
+    // this case would result in a rendering inaccuracy.
     const { d } = await describeSpatialStore({
       'spatial:transform': GLOBAL_TRANSFORM,
       'spatial:registration': 'node',
     })
 
-    expect(d.xyLimits?.xMin).toBe(-180)
-    expect(d.xyLimits?.xMax).toBe(180)
+    expect(d.xyLimits?.xMin).toBe(-202.5)
+    expect(d.xyLimits?.xMax).toBe(157.5)
   })
 
   it('lets the bounds option win over a declared bbox', async () => {

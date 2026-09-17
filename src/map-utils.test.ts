@@ -98,6 +98,15 @@ describe('normalizeLongitudeExtent', () => {
     })
   })
 
+  it('leaves an extent half a cell short of global unsnapped', () => {
+    // This is typical of a global dataset with a node spatial registration, e.g.
+    // ClimateSET's Zarr version of CMIP6.
+    expect(normalizeLongitudeExtent(-180.5, 179.5, 1)).toEqual({
+      xMin: -180.5,
+      xMax: 179.5,
+    })
+  })
+
   it('leaves a regional extent near 180 unsnapped', () => {
     expect(normalizeLongitudeExtent(170, 179.9, 0.25)).toEqual({
       xMin: 170,

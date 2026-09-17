@@ -108,14 +108,14 @@ export interface XYLimits {
 }
 
 /**
- * Put a longitude extent into the -180–180 representation the renderer works
- * in. Only meaningful for a geographic CRS; callers hold that check.
+ * Put a longitude extent into the -180–180 representation the renderer works in.
+ * Only meaningful for a geographic CRS; callers hold that check.
  *
- * Two corrections, neither of them a judgment about the source. A 0–360 extent
- * is folded, since that convention is just as correct and xarray writes it. A
- * global extent landing within a cell of ±180 is snapped onto it, which is what
- * keeps a seam from opening at the antimeridian when the grid doesn't divide
- * evenly.
+ * Two corrections, neither of them a judgment about the source. A 0–360
+ * extent is folded, since that convention is just as correct and xarray
+ * writes it. A global extent landing within `Math.min(1e-3, cellWidth /
+ * 4)` of ±180 is snapped onto it, which is what keeps a seam from
+ * opening at the antimeridian when the grid doesn't divide evenly.
  *
  * @param cellWidth - Longitude span of one cell, the tolerance for both checks.
  */
@@ -124,6 +124,8 @@ export function normalizeLongitudeExtent(
   xMax: number,
   cellWidth: number
 ): { xMin: number; xMax: number } {
+  const tolerance = Math.min(1e-3, cellWidth / 4)
+
   let lo = xMin
   let hi = xMax
 
@@ -134,11 +136,13 @@ export function normalizeLongitudeExtent(
     hi -= 360
   }
 
-  // A truly global grid spans exactly N * cellWidth = 360°; one a cell short
-  // spans 360 - cellWidth and fails the check.
-  if (Number.isFinite(cellWidth) && Math.abs(hi - lo - 360) < cellWidth / 2) {
-    if (Math.abs(lo + 180) < cellWidth) lo = -180
-    if (Math.abs(hi - 180) < cellWidth) hi = 180
+  const differenceFromGlobal = Math.abs(hi - lo - 360)
+
+  // Fix seams at the antimeridian created by floating point errors in ostensibly
+  // global datasets.
+  if (Number.isFinite(cellWidth) && differenceFromGlobal < tolerance) {
+    if (Math.abs(lo + 180) < tolerance) lo = -180
+    if (Math.abs(hi - 180) < tolerance) hi = 180
   }
 
   return { xMin: lo, xMax: hi }
