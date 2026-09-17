@@ -6,7 +6,7 @@ import {
   transformGeometryToPixelSpace,
   computePixelBoundsFromGeometry,
 } from './query-utils'
-import type { QueryGeometry } from './types'
+import type { AreaQueryGeometry as QueryGeometry } from './types'
 import type { Bounds } from '../types'
 import { WEB_MERCATOR_EXTENT } from '../constants'
 import {

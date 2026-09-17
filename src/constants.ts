@@ -7,6 +7,14 @@ export const DEFAULT_MESH_MAX_ERROR = 0.125
 export const DEFAULT_QUERY_DENSIFY_MAX_ERROR = DEFAULT_MESH_MAX_ERROR
 
 /**
+ * Longest pixel span, per axis, read in one request for a LineString query.
+ * A line is traced cell by cell and the cells grouped into runs no wider or
+ * taller than this, so a long diagonal reads a chain of small windows rather
+ * than the whole rectangle it spans.
+ */
+export const QUERY_LINE_RUN_MAX_PX = 256
+
+/**
  * Minimum subdivisions per axis for region geometry tessellation (globe
  * projection). 8 (not 2) so a thin strip chunk — e.g. a single data row
  * spanning many degrees — still gets enough vertices across its short axis to

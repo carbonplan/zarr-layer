@@ -1046,7 +1046,9 @@ export class ZarrLayer {
    * unready layer nor a failed read answers with an empty result, so an empty
    * result means the geometry found no data.
    *
-   * @param geometry - GeoJSON Point, Polygon or MultiPolygon geometry.
+   * @param geometry - GeoJSON Point, LineString, Polygon or MultiPolygon
+   *   geometry. A LineString returns one sample per cell along its path, in
+   *   order, with a `distance` coordinate in meters from the line's start.
    * @param selector - Optional selector to override the layer's selector.
    * @throws {ZarrLayerNotReadyError} if the layer failed to initialize, could
    *   not load a level, was removed, or was never added to a map.

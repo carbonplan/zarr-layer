@@ -22,6 +22,9 @@ export type QueryDataValues = number[] | NestedValues
  * `lat`/`lon`, `latitude`/`longitude`) and the coordinate arrays carry
  * source-CRS values: Web Mercator meters for EPSG:3857, degrees for
  * EPSG:4326, source units for custom-proj4 datasets.
+ *
+ * LineString queries add a `distance` coordinate array, parallel to the
+ * spatial ones, in meters along the line.
  */
 export interface QueryResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */
@@ -72,9 +75,29 @@ export interface GeoJSONMultiPolygon {
 }
 
 /**
- * Supported GeoJSON geometry types for queries.
+ * GeoJSON LineString geometry.
  */
-export type QueryGeometry = GeoJSONPoint | GeoJSONPolygon | GeoJSONMultiPolygon
+export interface GeoJSONLineString {
+  type: 'LineString'
+  coordinates: number[][]
+}
+
+/**
+ * Geometries that select a set of cells with no inherent order.
+ */
+export type AreaQueryGeometry =
+  | GeoJSONPoint
+  | GeoJSONPolygon
+  | GeoJSONMultiPolygon
+
+/**
+ * Supported GeoJSON geometry types for queries.
+ *
+ * A LineString returns one sample per grid cell the line crosses, in path
+ * order, with a `distance` coordinate giving the great-circle distance in
+ * meters from the line's start to where the line enters each cell.
+ */
+export type QueryGeometry = AreaQueryGeometry | GeoJSONLineString
 
 /**
  * Transform options for query results to match rendered values.

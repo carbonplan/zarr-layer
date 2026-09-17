@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { queryRegion, findSpatialDimNames } from './region-query'
-import type { QueryGeometry } from './types'
+import type { AreaQueryGeometry as QueryGeometry } from './types'
 import type { Bounds, DimIndicesProps } from '../types'
 import { indexRamp, indexToXY } from '../__fixtures__/grids'
 import { rect } from '../__fixtures__/geometry'

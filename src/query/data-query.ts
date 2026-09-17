@@ -18,7 +18,11 @@ import {
 } from '../selector-resolution'
 import { normalizeSelector } from '../zarr-utils'
 import { wrapError } from '../errors'
-import { queryRegion, findSpatialDimNames } from './region-query'
+import {
+  queryRegion,
+  findSpatialDimNames,
+  createResultBuilder,
+} from './region-query'
 import {
   computePixelBoundsFromGeometry,
   preprocessQueryGeometry,
@@ -27,12 +31,23 @@ import {
   shiftGeometryIntoExtent,
   type PixelRect,
 } from './query-utils'
+import {
+  groupCellsIntoRuns,
+  lineLengthMeters,
+  lineToPixelPath,
+  splitLineAtAntimeridian,
+  traceLineCells,
+  type TracedCell,
+} from './line-query'
+import { QUERY_LINE_RUN_MAX_PX } from '../constants'
 import type {
+  AreaQueryGeometry,
   NestedValues,
   QueryDataValues,
   QueryGeometry,
   QueryOptions,
   QueryResult,
+  QueryTransformOptions,
 } from './types'
 
 export type QueryContext = {
@@ -200,11 +215,24 @@ export async function queryData(
     fillValue: currentLevel?.fillValue ?? desc.fill_value,
   }
 
+  if (geometry.type === 'LineString') {
+    return queryLineString(
+      context,
+      geometry.coordinates,
+      level,
+      sourceBounds,
+      projectionDef,
+      normalizedSelector,
+      transforms,
+      options
+    )
+  }
+
   // Closure for running a single pixel-bounds strip query.
   // Captures request-scoped locals (not instance state) to avoid races
   // when queryData is called concurrently on the same instance.
   const runStrip = async (
-    geom: QueryGeometry,
+    geom: AreaQueryGeometry,
     pixelBounds: PixelRect,
     opts?: QueryOptions
   ): Promise<QueryResult> => {
@@ -215,30 +243,13 @@ export async function queryData(
       pixelBounds,
       opts?.signal
     )
-
-    const { minX, minY, maxX, maxY } = pixelBounds
-    const [xMin0, yMin0] = pixelToSourceCRS(
-      minX,
-      minY,
+    const subsetSourceBounds = pixelRectToSourceBounds(
+      pixelBounds,
       sourceBounds,
       level.width,
       level.height,
       context.latIsAscending
     )
-    const [xMax0, yMax0] = pixelToSourceCRS(
-      maxX,
-      maxY,
-      sourceBounds,
-      level.width,
-      level.height,
-      context.latIsAscending
-    )
-    const subsetSourceBounds: Bounds = [
-      Math.min(xMin0, xMax0),
-      Math.min(yMin0, yMax0),
-      Math.max(xMin0, xMax0),
-      Math.max(yMin0, yMax0),
-    ]
 
     return queryRegion(
       context.variable,
@@ -262,7 +273,7 @@ export async function queryData(
     )
   }
 
-  const singleFetch = async (geom: QueryGeometry): Promise<QueryResult> => {
+  const singleFetch = async (geom: AreaQueryGeometry): Promise<QueryResult> => {
     const pixelBounds = computePixelBoundsFromGeometry(
       geom,
       sourceBounds,
@@ -359,6 +370,180 @@ export async function queryData(
   return mergeQueryResults(westResult, eastResult, context.variable, yDim, xDim)
 }
 
+/** Source-CRS extent of a pixel rectangle within a level. */
+function pixelRectToSourceBounds(
+  rect: PixelRect,
+  sourceBounds: Bounds,
+  width: number,
+  height: number,
+  latIsAscending: boolean
+): Bounds {
+  const [x0, y0] = pixelToSourceCRS(
+    rect.minX,
+    rect.minY,
+    sourceBounds,
+    width,
+    height,
+    latIsAscending
+  )
+  const [x1, y1] = pixelToSourceCRS(
+    rect.maxX,
+    rect.maxY,
+    sourceBounds,
+    width,
+    height,
+    latIsAscending
+  )
+  return [
+    Math.min(x0, x1),
+    Math.min(y0, y1),
+    Math.max(x0, x1),
+    Math.max(y0, y1),
+  ]
+}
+
+/**
+ * Sample every cell a line passes through, in path order.
+ *
+ * The line is traced once through the level's full pixel grid, and the
+ * traced cells are read in runs of bounded extent so a long line costs a
+ * chain of small windows rather than the rectangle it spans. Each sample
+ * carries the great-circle distance from the line's start in `distance`.
+ */
+async function queryLineString(
+  context: QueryContext,
+  coords: number[][],
+  level: QueryLevelSnapshot,
+  sourceBounds: Bounds,
+  projectionDef: string,
+  selector: NormalizedSelector,
+  transforms: QueryTransformOptions,
+  options?: QueryOptions
+): Promise<QueryResult> {
+  const desc = context.zarrStore.describe()
+  const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
+  const includeSpatialCoordinates = options?.includeSpatialCoordinates ?? true
+  const signal = options?.signal
+
+  const supportsWrappedLongitude =
+    context.projection.kind === 'epsg4326' ||
+    context.projection.kind === 'epsg3857'
+  const queryLimits = level.xyLimits ?? context.xyLimits
+  let pieces = supportsWrappedLongitude
+    ? splitLineAtAntimeridian(coords)
+    : [coords]
+  if (pieces.length > 1) {
+    if (
+      context.projection.kind === 'epsg4326' &&
+      rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
+    ) {
+      if (!context.antimeridianWarnings.has('raster-extent-crossing')) {
+        context.antimeridianWarnings.add('raster-extent-crossing')
+        console.warn(
+          'Antimeridian-crossing queries are not supported for rasters whose own extent crosses the antimeridian; results may be incorrect'
+        )
+      }
+      pieces = [coords]
+    }
+  } else if (
+    !supportsWrappedLongitude &&
+    coords.some(([lon]) => lon > 180 || lon < -180)
+  ) {
+    if (!context.antimeridianWarnings.has('proj4-crossing')) {
+      context.antimeridianWarnings.add('proj4-crossing')
+      console.warn(
+        'Antimeridian-crossing queries are not supported for proj4 projections; results may be incorrect'
+      )
+    }
+  }
+
+  const cells: TracedCell[] = []
+  let distance = 0
+  for (const piece of pieces) {
+    const path = lineToPixelPath(
+      piece,
+      sourceBounds,
+      level.width,
+      level.height,
+      projectionDef,
+      context.latIsAscending,
+      context.projection.toWGS84 ?? undefined
+    )
+    if (path.length === 0) {
+      distance += lineLengthMeters(piece)
+      continue
+    }
+    const traced = traceLineCells(path, level.width, level.height, distance)
+    cells.push(...traced.cells)
+    distance = traced.endDistance
+  }
+
+  const emptyResult = (): QueryResult => ({
+    [context.variable]: [],
+    dimensions: [],
+    coordinates: { [yDim]: [], [xDim]: [], distance: [] },
+  })
+
+  const runs = groupCellsIntoRuns(cells, QUERY_LINE_RUN_MAX_PX)
+  if (runs.length === 0) return emptyResult()
+
+  let merged: QueryResult | null = null
+  for (const run of runs) {
+    if (signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+    const fetched = await fetchQueryData(
+      context,
+      level,
+      selector,
+      run.rect,
+      signal
+    )
+    const builder = createResultBuilder({
+      variable: context.variable,
+      selector,
+      data: fetched.data,
+      width: fetched.width,
+      height: fetched.height,
+      dimensions: desc.dimensions,
+      coordinates: desc.coordinates,
+      sourceBounds: pixelRectToSourceBounds(
+        run.rect,
+        sourceBounds,
+        level.width,
+        level.height,
+        context.latIsAscending
+      ),
+      channels: fetched.channels,
+      channelLabels: fetched.channelLabels,
+      multiValueDimNames: fetched.multiValueDimNames,
+      latIsAscending: context.latIsAscending,
+      transforms,
+      includeSpatialCoordinates,
+      dimIndices: desc.dimIndices,
+    })
+
+    const distances: number[] = []
+    for (const cell of run.cells) {
+      const emitted = builder.processPixel(
+        cell.x - run.rect.minX,
+        cell.y - run.rect.minY
+      )
+      if (emitted && includeSpatialCoordinates) distances.push(cell.distance)
+    }
+    const result = builder.buildResult()
+    if (includeSpatialCoordinates) result.coordinates.distance = distances
+
+    merged = merged
+      ? mergeQueryResults(merged, result, context.variable, yDim, xDim, [
+          'distance',
+        ])
+      : result
+  }
+
+  return merged!
+}
+
 /**
  * Merge two QueryResult objects from west and east strips.
  *
@@ -366,17 +551,19 @@ export async function queryData(
  * preserve row-major scan order. The QueryResult contract provides parallel
  * coordinate arrays so consumers index by position, not implicit grid layout.
  *
- * Spatial coordinate arrays (yDim, xDim) are concatenated.
- * Non-spatial coordinate arrays are taken from the first result unchanged.
+ * Spatial coordinate arrays (yDim, xDim) and any `perPixelKeys` are
+ * concatenated. Other coordinate arrays are taken from the first result
+ * unchanged.
  */
 export function mergeQueryResults(
   a: QueryResult,
   b: QueryResult,
   variable: string,
   yDim: string,
-  xDim: string
+  xDim: string,
+  perPixelKeys: string[] = []
 ): QueryResult {
-  const spatialKeys = new Set([yDim, xDim])
+  const spatialKeys = new Set([yDim, xDim, ...perPixelKeys])
 
   // Merge coordinates: concatenate spatial, take first for non-spatial
   const coordinates: Record<string, (number | string)[]> = {}

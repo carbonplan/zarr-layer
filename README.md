@@ -284,7 +284,7 @@ A store declaring `proj:wkt2` or `proj:projjson` carries its own definition and 
 
 ## queries
 
-Supports `Point`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
+Supports `Point`, `LineString`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
 
 ```ts
 // Point query
@@ -308,6 +308,17 @@ const result = await layer.queryData({
 // }
 ```
 
+A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order, with no duplicates and no gaps. Alongside the spatial coordinates it returns `distance`, the great-circle distance in meters from the start of the line to where the line enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
+
+```ts
+// Profile along a line
+const profile = await layer.queryData({
+  type: 'LineString',
+  coordinates: [[lng0, lat0], [lng1, lat1], ...],
+})
+// profile.coordinates.distance[i] is meters along the line for profile[variable][i]
+```
+
 Spatial query results are returned in the dataset's source CRS, under the store's own spatial axis names. An `EPSG:3857` dataset with `y`/`x` axes returns Web Mercator meters under `y`/`x`; an `EPSG:4326` dataset with `latitude`/`longitude` axes returns degrees under `latitude`/`longitude`; a custom-proj4 dataset returns its source-CRS values under whatever the store calls them. Input geometries are still supplied as GeoJSON lon/lat regardless of the source CRS.
 
 You can pass a third `options` argument to control query behavior:
@@ -326,7 +337,7 @@ const result = await layer.queryData(geometry, selector, {
 
 By default a query reads the level the map is currently drawing, so results agree with what the user sees and zooming out coarsens them. Pass `level: 'finest'` to always read the highest-resolution level in the store, which is what you want when the answer shouldn't depend on the camera — sampling point features, for instance.
 
-`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
+`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a line reads a chain of small windows along its path, so its cost grows with its length in pixels; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
 
 ### query readiness
 
