@@ -5,6 +5,7 @@ import {
   buildSliceArgsForSelector,
   classifyDimension,
   resolveSelectionIndex,
+  SelectorResolutionError,
   type SelectorResolutionContext,
 } from './selector-resolution'
 import { loadDimensionValues } from './zarr-utils'
@@ -39,6 +40,7 @@ function makeContext(
     isMultiscale: false,
     dimensionValues: {},
     coordLevelIndex: 0,
+    warnedDimensions: new Set(),
     ...overrides,
   }
 }
@@ -93,12 +95,32 @@ describe('resolveSelectionIndex', () => {
     expect(await resolveSelectionIndex(context, 'time', DIM_INFO, 7)).toBe(7)
   })
 
-  it('falls back to a direct index without a store root', async () => {
+  it('throws for a string missing from preloaded coords, listing values', async () => {
+    const context = makeContext({
+      zarrStore: {
+        coordinates: { band: ['red', 'green', 'blue'] },
+        root: {},
+        version: 3,
+      } as unknown as ZarrStore,
+    })
+    await expect(
+      resolveSelectionIndex(context, 'band', DIM_INFO, 'bleu')
+    ).rejects.toThrow(/'bleu'.*'band'.*red, green, blue/)
+    await expect(
+      resolveSelectionIndex(context, 'band', DIM_INFO, 'bleu')
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
+  })
+
+  it('treats a number as a direct index without a store root', async () => {
     const context = makeContext()
     expect(await resolveSelectionIndex(context, 'time', DIM_INFO, 4)).toBe(4)
-    expect(await resolveSelectionIndex(context, 'time', DIM_INFO, 'jan')).toBe(
-      0
-    )
+  })
+
+  it('throws for a string without a store root', async () => {
+    const context = makeContext()
+    await expect(
+      resolveSelectionIndex(context, 'time', DIM_INFO, 'jan')
+    ).rejects.toThrow(/'jan'.*'time'/)
   })
 
   it('resolves against root coordinate arrays for single-level datasets', async () => {
@@ -151,8 +173,8 @@ describe('resolveSelectionIndex', () => {
     expect(mockedLoadDimensionValues.mock.calls[0][1]).toBe('1')
   })
 
-  it('falls back to a direct index when coordinate resolution fails', async () => {
-    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+  it('warns and treats a number as a direct index when the coordinate load fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       mockedLoadDimensionValues.mockRejectedValue(new Error('404'))
       const context = makeContext({
@@ -163,8 +185,57 @@ describe('resolveSelectionIndex', () => {
         } as unknown as ZarrStore,
       })
       expect(await resolveSelectionIndex(context, 'time', DIM_INFO, 5)).toBe(5)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0][0]).toContain('[zarr-layer]')
+      expect(warnSpy.mock.calls[0][0]).toContain("'time'")
     } finally {
-      debugSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('warns and throws a non-latching error when coordinate loading fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      mockedLoadDimensionValues.mockRejectedValue(
+        new Error('Unknown or unsupported dataType')
+      )
+      const context = makeContext({
+        zarrStore: {
+          coordinates: {},
+          root: {},
+          version: 3,
+        } as unknown as ZarrStore,
+      })
+      await expect(
+        resolveSelectionIndex(context, 'band', DIM_INFO, 'red')
+      ).rejects.toThrow(/'red'.*'band'.*Unknown or unsupported dataType/)
+      await expect(
+        resolveSelectionIndex(context, 'band', DIM_INFO, 'red')
+      ).rejects.not.toBeInstanceOf(SelectorResolutionError)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('warns once per dimension across repeated load failures', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      mockedLoadDimensionValues.mockRejectedValue(new Error('404'))
+      const context = makeContext({
+        zarrStore: {
+          coordinates: {},
+          root: {},
+          version: 3,
+        } as unknown as ZarrStore,
+      })
+      await resolveSelectionIndex(context, 'time', DIM_INFO, 5)
+      await resolveSelectionIndex(context, 'time', DIM_INFO, 6)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      await resolveSelectionIndex(context, 'band', DIM_INFO, 2)
+      expect(warnSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      warnSpy.mockRestore()
     }
   })
 })

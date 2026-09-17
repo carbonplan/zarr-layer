@@ -1,5 +1,6 @@
 import type * as zarr from 'zarrita'
 import type { LevelRuntime } from './region-state'
+import { SelectorResolutionError } from './selector-resolution'
 import type { NormalizedSelector } from './types'
 
 type ResolvedLevel = Pick<
@@ -19,7 +20,7 @@ export type LevelLoadOutcome =
   | 'committed'
   | 'superseded'
   | 'failed'
-  /** Index out of range, or non-zero on a single-level store. */
+  /** Invalid level or one latched by a selector-resolution failure. */
   | 'ignored'
 
 export type LevelLoaderContext = {
@@ -35,6 +36,7 @@ export type LevelLoaderContext = {
   isRemoved: () => boolean
   onCancelInflight: () => void
   onNewArrayCommitted: () => void
+  onLoadErrorChange: (error: Error | null) => void
   invalidate: () => void
   getAssetLabel: (levelIndex: number) => string
 }
@@ -45,6 +47,10 @@ export class LevelLoader {
   private loadingLevelIndex: number | null = null
   private activeLevel: LevelRuntime | null = null
   private inflight: Promise<LevelLoadOutcome> | null = null
+  private loadError: Error | null = null
+  private loadErrorLevel: number | null = null
+  // Coordinate arrays may differ by level, so latch deterministic failures per level.
+  private selectorFailedLevels = new Set<number>()
 
   constructor(private context: LevelLoaderContext) {}
 
@@ -59,6 +65,9 @@ export class LevelLoader {
   }
   get loadingIndex(): number | null {
     return this.loadingLevelIndex
+  }
+  get lastError(): Error | null {
+    return this.loadError
   }
 
   /**
@@ -86,6 +95,11 @@ export class LevelLoader {
         return Promise.resolve('ignored')
       }
     } else if (levelIndex !== 0) {
+      return Promise.resolve('ignored')
+    }
+
+    // Avoid retrying deterministic failures on every render.
+    if (this.selectorFailedLevels.has(levelIndex)) {
       return Promise.resolve('ignored')
     }
 
@@ -199,6 +213,7 @@ export class LevelLoader {
       // regions load, and the LRU disposes them properly once they're no
       // longer protected. Bare `.clear()` here would leak WebGL resources.
       if (!resolved.reusedArray) this.context.onNewArrayCommitted()
+      this.setLoadError(null)
       this.context.invalidate()
       return 'committed'
     } catch (err) {
@@ -206,14 +221,53 @@ export class LevelLoader {
       // a failure: its error is about an attempt nobody is waiting on, and
       // calling it a failure would stop `ensureActive` retrying.
       if (token !== this.loadToken) return 'superseded'
-      console.error(
-        `Failed to load level ${this.context.getAssetLabel(levelIndex)}:`,
-        err
-      )
+      // Do not latch an error from a selector that has already been replaced.
+      if (this.context.getSelector() !== selectorSnapshot) {
+        this.context.invalidate()
+        return 'superseded'
+      }
+      const error = err instanceof Error ? err : new Error(String(err))
+      // Other failures may be transient and remain retryable.
+      if (error instanceof SelectorResolutionError) {
+        this.selectorFailedLevels.add(levelIndex)
+      }
+      // Do not retain slice args built for the previous selector.
+      if (reuseArray) this.activeLevel = null
+      // Retryable failures repeat every frame until they recover, so log
+      // only when the error is new for this level.
+      if (this.setLoadError(error, levelIndex)) {
+        console.error(
+          `Failed to load level ${this.context.getAssetLabel(levelIndex)}:`,
+          error
+        )
+      }
       return 'failed'
     } finally {
       if (token === this.loadToken) this.loadingLevelIndex = null
     }
+  }
+
+  clearSelectorFailures(): void {
+    this.selectorFailedLevels.clear()
+    this.setLoadError(null)
+  }
+
+  /** Record the latest load error. Returns whether it differs from the last. */
+  private setLoadError(
+    error: Error | null,
+    levelIndex: number | null = null
+  ): boolean {
+    const unchanged =
+      this.loadErrorLevel === levelIndex &&
+      (this.loadError === error ||
+        (this.loadError !== null &&
+          error !== null &&
+          this.loadError.name === error.name &&
+          this.loadError.message === error.message))
+    this.loadError = error
+    this.loadErrorLevel = levelIndex
+    if (!unchanged) this.context.onLoadErrorChange(error)
+    return !unchanged
   }
 
   dispose(): void {
@@ -222,5 +276,7 @@ export class LevelLoader {
     this.loadingLevelIndex = null
     this.activeLevel = null
     this.inflight = null
+    this.loadError = null
+    this.loadErrorLevel = null
   }
 }

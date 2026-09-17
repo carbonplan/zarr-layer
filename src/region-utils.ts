@@ -53,6 +53,7 @@ export interface LoadingManager {
   callback: LoadingStateCallback | undefined
   metadataLoading: boolean
   chunksLoading: boolean
+  error: Error | null
 }
 
 export function createLoadingManager(): LoadingManager {
@@ -60,6 +61,7 @@ export function createLoadingManager(): LoadingManager {
     callback: undefined,
     metadataLoading: false,
     chunksLoading: false,
+    error: null,
   }
 }
 
@@ -76,7 +78,7 @@ export function emitLoadingState(manager: LoadingManager): void {
     loading: manager.metadataLoading || manager.chunksLoading,
     metadata: manager.metadataLoading,
     chunks: manager.chunksLoading,
-    error: null,
+    error: manager.error,
   }
   manager.callback(state)
 }
