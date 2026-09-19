@@ -74,10 +74,14 @@ export interface RecordingGl extends WebGL2RenderingContext {
 /**
  * @param failTextures - make createTexture return null, to drive the
  *   "region cannot be uploaded" branches.
+ * @param inactiveUniforms - uniform names whose location is null even though
+ *   the source references them, the way Mesa reports a uniform whose only
+ *   consumer is a varying the fragment shader never reads.
  */
 export function createRecordingGl({
   failTextures = false,
-}: { failTextures?: boolean } = {}): RecordingGl {
+  inactiveUniforms = [],
+}: { failTextures?: boolean; inactiveUniforms?: string[] } = {}): RecordingGl {
   const calls: RecordedCall[] = []
   const record = (name: string, ...args: unknown[]) => {
     calls.push({ name, args })
@@ -169,6 +173,7 @@ export function createRecordingGl({
 
     getUniformLocation: vi.fn(
       (program: ProgramStub, name: string): UniformLocationStub | null => {
+        if (inactiveUniforms.includes(name)) return null
         const { vertex, fragment } = sourcesOf(program)
         return isActiveUniform(vertex, name) || isActiveUniform(fragment, name)
           ? { name }
