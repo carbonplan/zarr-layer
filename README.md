@@ -286,7 +286,7 @@ A store declaring `proj:wkt2` or `proj:projjson` carries its own definition and 
 
 ## queries
 
-Supports `Point`, `LineString`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
+Supports `Point`, `LineString`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass a `selector`, which overrides the layer's `selector` key by key. A dimension the query leaves out stays on the slice the layer is showing, so `{ time: [0, 1, 2] }` on a layer showing one band returns that band's time series.
 
 ```ts
 // Point query

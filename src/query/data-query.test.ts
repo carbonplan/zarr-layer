@@ -9,6 +9,7 @@ import type { NestedValues, QueryGeometry, QueryResult } from './types'
 import { ZarrStore } from '../zarr-store'
 import { createProjectionContext } from '../projection-utils'
 import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
+import { normalizeSelector } from '../zarr-utils'
 import { SelectorResolutionError } from '../selector-resolution'
 
 /**
@@ -476,5 +477,97 @@ describe('mergeNestedValues', () => {
       a: [1],
       b: [2],
     })
+  })
+})
+
+/**
+ * A query selector layered over the layer's own selector, on a store with
+ * two non-spatial dimensions: value = b*64 + t*32 + y*8 + x.
+ */
+describe('queryData — query selector over the layer selector', () => {
+  async function makeBandedContext(): Promise<QueryContext> {
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temp',
+          shape: [2, 2, 4, 8],
+          chunkShape: [2, 2, 4, 8],
+          dimensionNames: ['band', 'time', 'lat', 'lon'],
+          chunks: { '0/0/0/0': ramp(2 * 2 * 4 * 8) },
+        },
+        {
+          name: 'band',
+          shape: [2],
+          chunkShape: [2],
+          dimensionNames: ['band'],
+          chunks: { '0': [100, 200] },
+        },
+        {
+          name: 'time',
+          shape: [2],
+          chunkShape: [2],
+          dimensionNames: ['time'],
+          chunks: { '0': [10, 20] },
+        },
+      ],
+    })
+    const store = new ZarrStore({
+      customStore: memory,
+      variable: 'temp',
+      version: 3,
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+    })
+    await store.initialized
+    const zarrArray = await store.getArray()
+    return {
+      zarrStore: store,
+      variable: 'temp',
+      selector: normalizeSelector({ band: 200, time: 10 }),
+      xyLimits: WORLD,
+      mercatorBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },
+      latIsAscending: false,
+      levels: [],
+      level: { index: 0, zarrArray, width: 8, height: 4 },
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: WORLD,
+      }),
+      antimeridianWarnings: new Set(),
+      dimensionValues: {},
+      isMultiscale: false,
+      coordLevelIndex: 0,
+      warnedDimensions: new Set(),
+    }
+  }
+
+  it('reads the layer selector when the query passes none', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5))
+    expect(result.temp).toEqual([64])
+  })
+
+  it('keeps the band the layer shows when the query selects only time', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      time: [10, 20],
+    })
+    expect(result.temp).toEqual({ 10: [64], 20: [96] })
+  })
+
+  it('lets the query override a dimension the layer has set', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      band: 100,
+    })
+    expect(result.temp).toEqual([0])
+  })
+
+  it('rejects an unknown key even when the query selects nothing on the raster', async () => {
+    const context = await makeBandedContext()
+    await expect(
+      queryData(context, point(0, 95), { month: 1 })
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
   })
 })

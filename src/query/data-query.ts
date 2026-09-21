@@ -211,8 +211,10 @@ export async function queryData(
   const sourceBounds: Bounds | null = queryLimits
     ? [queryLimits.xMin, queryLimits.yMin, queryLimits.xMax, queryLimits.yMax]
     : null
+  // A query selector overrides the layer's selector key by key, so a
+  // dimension it leaves out stays on the slice the layer is showing.
   const normalizedSelector = selector
-    ? normalizeSelector(selector)
+    ? { ...context.selector, ...normalizeSelector(selector) }
     : context.selector
   assertSelectorKeysAreDimensions(normalizedSelector, desc.dimIndices)
   if (geometry.type === 'LineString') {
