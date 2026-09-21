@@ -22,6 +22,7 @@ import {
   queryRegion,
   findSpatialDimNames,
   createResultBuilder,
+  buildEmptyResult,
 } from './region-query'
 import {
   computePixelBoundsFromGeometry,
@@ -49,6 +50,28 @@ import type {
   QueryResult,
   QueryTransformOptions,
 } from './types'
+
+const DEFAULT_LINE_DISTANCE_KEY = 'distance'
+
+/**
+ * Key that a LineString result reports distance under. Every other key in
+ * `coordinates` is a store dimension name, so a clash would overwrite that
+ * dimension's values and is rejected.
+ */
+function resolveLineDistanceKey(
+  dimensions: string[],
+  dimIndices: Parameters<typeof findSpatialDimNames>[1],
+  options?: QueryOptions
+): string {
+  const key = options?.distanceKey ?? DEFAULT_LINE_DISTANCE_KEY
+  const { yDim, xDim } = findSpatialDimNames(dimensions, dimIndices)
+  if (key === yDim || key === xDim || dimensions.includes(key)) {
+    throw new Error(
+      `[ZarrLayer] LineString queries report distance under the result coordinate \`${key}\`, which this store already uses as a dimension name. Pass a different \`distanceKey\` in the query options.`
+    )
+  }
+  return key
+}
 
 export type QueryContext = {
   zarrStore: ZarrStore
@@ -107,6 +130,7 @@ export async function fetchQueryData(
         {
           includeSpatialSlices: false,
           trackMultiValue: true,
+          labelSingleElementArrays: true,
           spatialBounds: spatialQuery,
           array: level.zarrArray,
         }
@@ -186,20 +210,25 @@ export async function queryData(
   const sourceBounds: Bounds | null = queryLimits
     ? [queryLimits.xMin, queryLimits.yMin, queryLimits.xMax, queryLimits.yMax]
     : null
-  const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
-    desc.dimensions,
-    desc.dimIndices
-  )
-  const emptyResult = (): QueryResult => ({
-    [context.variable]: [],
-    dimensions: [],
-    coordinates: { [emptyYDim]: [], [emptyXDim]: [] },
-  })
-
   const normalizedSelector = selector
     ? normalizeSelector(selector)
     : context.selector
   assertSelectorKeysAreDimensions(normalizedSelector, desc.dimIndices)
+  const lineDistanceKey =
+    geometry.type === 'LineString'
+      ? resolveLineDistanceKey(desc.dimensions, desc.dimIndices, options)
+      : null
+  const emptyResult = (): QueryResult => {
+    const result = buildEmptyResult(
+      context.variable,
+      normalizedSelector,
+      desc.dimensions,
+      desc.coordinates,
+      desc.dimIndices
+    )
+    if (lineDistanceKey !== null) result.coordinates[lineDistanceKey] = []
+    return result
+  }
 
   const level = context.level
   if (!context.mercatorBounds || !level || !sourceBounds) {
@@ -224,6 +253,8 @@ export async function queryData(
       projectionDef,
       normalizedSelector,
       transforms,
+      emptyResult,
+      lineDistanceKey!,
       options
     )
   }
@@ -408,7 +439,7 @@ function pixelRectToSourceBounds(
  * The line is traced once through the level's full pixel grid, and the
  * traced cells are read in runs of bounded extent so a long line costs a
  * chain of small windows rather than the rectangle it spans. Each sample
- * carries the great-circle distance from the line's start in `distance`.
+ * carries the distance along the line from its start in `distance`.
  */
 async function queryLineString(
   context: QueryContext,
@@ -418,6 +449,8 @@ async function queryLineString(
   projectionDef: string,
   selector: NormalizedSelector,
   transforms: QueryTransformOptions,
+  emptyResult: () => QueryResult,
+  distanceKey: string,
   options?: QueryOptions
 ): Promise<QueryResult> {
   const desc = context.zarrStore.describe()
@@ -474,15 +507,9 @@ async function queryLineString(
       continue
     }
     const traced = traceLineCells(path, level.width, level.height, distance)
-    cells.push(...traced.cells)
+    for (const cell of traced.cells) cells.push(cell)
     distance = traced.endDistance
   }
-
-  const emptyResult = (): QueryResult => ({
-    [context.variable]: [],
-    dimensions: [],
-    coordinates: { [yDim]: [], [xDim]: [], distance: [] },
-  })
 
   const runs = groupCellsIntoRuns(cells, QUERY_LINE_RUN_MAX_PX)
   if (runs.length === 0) return emptyResult()
@@ -532,11 +559,11 @@ async function queryLineString(
       if (emitted && includeSpatialCoordinates) distances.push(cell.distance)
     }
     const result = builder.buildResult()
-    if (includeSpatialCoordinates) result.coordinates.distance = distances
+    result.coordinates[distanceKey] = distances
 
     merged = merged
       ? mergeQueryResults(merged, result, context.variable, yDim, xDim, [
-          'distance',
+          distanceKey,
         ])
       : result
   }

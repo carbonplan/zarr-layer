@@ -337,6 +337,28 @@ describe('buildSliceArgsForSelector', () => {
     expect(sliceArgs[1]).toBe(0)
   })
 
+  it('treats a one-element array as single-value unless asked to label it', async () => {
+    const selector = { time: { selected: [3], type: 'index' as const } }
+    const plain = await buildSliceArgsForSelector(makeContext(), selector, {
+      includeSpatialSlices: false,
+      trackMultiValue: true,
+      array,
+    })
+    expect(plain.sliceArgs[0]).toBe(3)
+    expect(plain.multiValueDims).toEqual([])
+
+    const labelled = await buildSliceArgsForSelector(makeContext(), selector, {
+      includeSpatialSlices: false,
+      trackMultiValue: true,
+      labelSingleElementArrays: true,
+      array,
+    })
+    expect(labelled.sliceArgs[0]).toBe(3)
+    expect(labelled.multiValueDims).toEqual([
+      { dimIndex: 0, dimName: 'time', values: [3], labels: [3] },
+    ])
+  })
+
   it('rejects a selector key that names no dimension, listing the real ones', async () => {
     const context = makeContext({
       dimIndices: {

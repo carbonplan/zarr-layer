@@ -61,6 +61,11 @@ export async function buildSliceArgsForSelector(
     includeSpatialSlices: boolean
     /** If true, track multi-value dimensions for channel packing */
     trackMultiValue: boolean
+    /**
+     * If true, a one-element array also counts as multi-value, so an array
+     * selector always yields a labelled channel whatever its length.
+     */
+    labelSingleElementArrays?: boolean
     /** Spatial bounds for fetch - bbox for region subset */
     spatialBounds?: {
       minX: number
@@ -133,7 +138,7 @@ export async function buildSliceArgsForSelector(
         if (
           options.trackMultiValue &&
           Array.isArray(selectionValue) &&
-          selectionValue.length > 1
+          selectionValue.length > (options.labelSingleElementArrays ? 0 : 1)
         ) {
           const resolvedIndices: number[] = []
           const labelValues: (number | string)[] = []

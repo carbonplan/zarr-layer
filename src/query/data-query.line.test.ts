@@ -23,21 +23,28 @@ vi.mock('../constants', async (importOriginal) => ({
 
 const WORLD = { xMin: -180, xMax: 180, yMin: -90, yMax: 90 }
 
-async function makeContext(): Promise<QueryContext> {
+async function makeContext(
+  values: number[] = ramp(2 * 4 * 8),
+  dims: { extra: string; lat: string; lon: string } = {
+    extra: 'time',
+    lat: 'lat',
+    lon: 'lon',
+  }
+): Promise<QueryContext> {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
         name: 'temp',
         shape: [2, 4, 8],
         chunkShape: [2, 4, 8],
-        dimensionNames: ['time', 'lat', 'lon'],
-        chunks: { '0/0/0': ramp(2 * 4 * 8) },
+        dimensionNames: [dims.extra, dims.lat, dims.lon],
+        chunks: { '0/0/0': values },
       },
       {
-        name: 'time',
+        name: dims.extra,
         shape: [2],
         chunkShape: [2],
-        dimensionNames: ['time'],
+        dimensionNames: [dims.extra],
         chunks: { '0': [10, 20] },
       },
     ],
@@ -48,6 +55,7 @@ async function makeContext(): Promise<QueryContext> {
     version: 3,
     bounds: [-180, -90, 180, 90],
     latIsAscending: false,
+    spatialDimensions: { lat: dims.lat, lon: dims.lon },
   })
   await store.initialized
   const zarrArray = await store.getArray()
@@ -184,7 +192,18 @@ describe('queryData LineString', () => {
     expect(result.coordinates.distance).toHaveLength(4)
   })
 
-  it('omits distance along with the spatial coordinates when asked', async () => {
+  it('returns a flat profile with no selector and a labelled one for a one-element array', async () => {
+    const context = await makeContext()
+    const geometry = line([-157.5, 67.5], [-67.5, 67.5])
+    const unselected = await queryData(context, geometry)
+    expect(unselected.temp).toEqual([0, 1, 2])
+
+    const single = await queryData(context, geometry, { time: [20] })
+    expect(single.temp).toEqual({ 20: [32, 33, 34] })
+    expect(single.coordinates.distance).toHaveLength(3)
+  })
+
+  it('returns empty per-sample coordinates, distance included, when asked to omit them', async () => {
     const context = await makeContext()
     const result = await queryData(
       context,
@@ -193,8 +212,128 @@ describe('queryData LineString', () => {
       { includeSpatialCoordinates: false }
     )
     expect(result.temp).toEqual([0, 1, 2, 3])
-    expect(result.coordinates.lon).toEqual([])
+    expect(result.coordinates).toEqual({ lat: [], lon: [], distance: [] })
+  })
+
+  it('keeps every series aligned with distance when a cell is fill in only some', async () => {
+    const values = ramp(2 * 4 * 8)
+    values[1] = NaN // time 10, pixel (1, 0)
+    const context = await makeContext(values)
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [-67.5, 67.5]),
+      { time: [10, 20] }
+    )
+    expect(result.temp).toEqual({ 10: [0, NaN, 2], 20: [32, 33, 34] })
+    expect(result.coordinates.lon).toEqual([-157.5, -112.5, -67.5])
+    expect(result.coordinates.distance).toHaveLength(3)
+  })
+
+  it('stays aligned when one series is fill across a whole fetch run', async () => {
+    const values = ramp(2 * 4 * 8)
+    // Runs are 3 pixels wide: x 0-2, 3-5, 6-7. Blank time 10 across the
+    // middle run, and both series at x = 6 so that cell drops out entirely.
+    for (const x of [3, 4, 5, 6]) values[x] = NaN
+    values[32 + 6] = NaN
+    const context = await makeContext(values)
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [157.5, 67.5]),
+      { time: [10, 20] }
+    )
+    expect(result.temp).toEqual({
+      10: [0, 1, 2, NaN, NaN, NaN, 7],
+      20: [32, 33, 34, 35, 36, 37, 39],
+    })
+    expect(result.coordinates.lon).toEqual([
+      -157.5, -112.5, -67.5, -22.5, 22.5, 67.5, 157.5,
+    ])
+    expect(result.coordinates.distance).toHaveLength(7)
+  })
+
+  it('drops a fill cell from a single-series profile and leaves a gap in distance', async () => {
+    const values = ramp(2 * 4 * 8)
+    values[1] = NaN
+    const context = await makeContext(values)
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [-67.5, 67.5]),
+      { time: 10 }
+    )
+    expect(result.temp).toEqual([0, 2])
+    expect(result.coordinates.lon).toEqual([-157.5, -67.5])
+  })
+
+  it('reports distance under a caller-chosen key', async () => {
+    const context = await makeContext()
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [-67.5, 67.5]),
+      { time: 10 },
+      { distanceKey: 'along' }
+    )
+    expect(result.coordinates.along).toHaveLength(3)
     expect(result.coordinates.distance).toBeUndefined()
+  })
+
+  it('rejects a distance key that names a store dimension, spatial or not', async () => {
+    const geometry = line([-157.5, 67.5], [-67.5, 67.5])
+
+    const nonSpatial = await makeContext(undefined, {
+      extra: 'distance',
+      lat: 'lat',
+      lon: 'lon',
+    })
+    await expect(queryData(nonSpatial, geometry)).rejects.toThrow(/distanceKey/)
+
+    const spatial = await makeContext(undefined, {
+      extra: 'time',
+      lat: 'lat',
+      lon: 'distance',
+    })
+    await expect(queryData(spatial, geometry, { time: 10 })).rejects.toThrow(
+      /distanceKey/
+    )
+    // Rejected before any result is built, including the no-level empty one.
+    await expect(
+      queryData({ ...spatial, level: null }, geometry, { time: 10 })
+    ).rejects.toThrow(/distanceKey/)
+
+    const context = await makeContext()
+    await expect(
+      queryData(context, geometry, { time: 10 }, { distanceKey: 'time' })
+    ).rejects.toThrow(/distanceKey/)
+  })
+
+  it('queries a store that has a distance dimension once given another key', async () => {
+    const context = await makeContext(undefined, {
+      extra: 'time',
+      lat: 'lat',
+      lon: 'distance',
+    })
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [-67.5, 67.5]),
+      { time: 10 },
+      { distanceKey: 'along' }
+    )
+    expect(result.temp).toEqual([0, 1, 2])
+    expect(result.coordinates.distance).toEqual([-157.5, -112.5, -67.5])
+    expect(result.coordinates.along).toHaveLength(3)
+  })
+
+  it('leaves point and polygon queries alone on a store with a distance dimension', async () => {
+    const context = await makeContext(undefined, {
+      extra: 'time',
+      lat: 'lat',
+      lon: 'distance',
+    })
+    const result = await queryData(
+      context,
+      { type: 'Point', coordinates: [-157.5, 67.5] },
+      { time: 10 }
+    )
+    expect(result.temp).toEqual([0])
   })
 
   it('returns an empty result for a line entirely off the raster', async () => {

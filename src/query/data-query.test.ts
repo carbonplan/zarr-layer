@@ -119,6 +119,7 @@ describe('queryData', () => {
       point(-157.5, 67.5)
     )
     expect(result.temp).toEqual([])
+    expect(result.dimensions).toEqual(['lat', 'lon'])
     expect(result.coordinates).toEqual({ lat: [], lon: [] })
   })
 
@@ -131,6 +132,19 @@ describe('queryData', () => {
     await expect(
       queryData({ ...context, level: null }, offRaster, { typo: 5 })
     ).rejects.toBeInstanceOf(SelectorResolutionError)
+  })
+
+  it('shapes an empty result like a populated one for the same selector', async () => {
+    const { context } = await makeQueryHarness()
+    const offRaster = point(0, 95)
+    const flat = await queryData(context, offRaster, { time: 10 })
+    expect(flat.temp).toEqual([])
+    expect(flat.dimensions).toEqual(['lat', 'lon'])
+
+    const nested = await queryData(context, offRaster, { time: [10, 20] })
+    expect(nested.temp).toEqual({})
+    expect(nested.dimensions).toEqual(['time', 'lat', 'lon'])
+    expect(nested.coordinates).toEqual({ lat: [], lon: [], time: [10, 20] })
   })
 
   it('resolves point queries to the correct pixel', async () => {
@@ -194,6 +208,37 @@ describe('queryData', () => {
     // time=20 is coordinate VALUE 20 (index 1): plane offset 32.
     const result = await queryData(context, point(-157.5, 67.5), { time: 20 })
     expect(result.temp).toEqual([32])
+  })
+
+  it('reads an unselected dimension at index 0 and returns a flat result', async () => {
+    const { context } = await makeQueryHarness()
+    const result = await queryData(context, point(157.5, -67.5))
+    expect(result.temp).toEqual([31])
+    expect(result.dimensions).toEqual(['lat', 'lon'])
+
+    const region = await queryData(context, {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [-180, 45],
+          [-90, 45],
+          [-90, 90],
+          [-180, 90],
+          [-180, 45],
+        ],
+      ],
+    })
+    expect(region.temp).toEqual([0, 1])
+  })
+
+  it('nests a one-element array selector by label, like any other array', async () => {
+    const { context } = await makeQueryHarness()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      time: [20],
+    })
+    expect(result.temp).toEqual({ 20: [32] })
+    expect(result.dimensions).toEqual(['time', 'lat', 'lon'])
+    expect(result.coordinates.time).toEqual([20])
   })
 
   it('packs multi-value selectors into label-keyed channels', async () => {

@@ -186,6 +186,8 @@ const result = await layer.queryData(
 )
 ```
 
+An array value, of any length, nests the result by label: `{ time: [3] }` returns `{ 3: number[] }`. A single value returns a flat `number[]`, and so does a dimension left out of the selector, which is read at index 0.
+
 **Type options:**
 
 | Type                | Behavior                                                      |
@@ -308,7 +310,7 @@ const result = await layer.queryData({
 // }
 ```
 
-A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order, with no duplicates and no gaps. Alongside the spatial coordinates it returns `distance`, the great-circle distance in meters from the start of the line to where the line enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
+A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order. A cell is sampled once per pass, so a line that doubles back samples it again. Cells with no data are left out, and `distance` shows the gap. Alongside the spatial coordinates it returns `distance`, the distance in meters along the line from its start to where it enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
 
 ```ts
 // Profile along a line
@@ -328,10 +330,15 @@ const result = await layer.queryData(geometry, selector, {
   signal: abortController.signal, // cancel in-flight query
   includeSpatialCoordinates: false, // omit per-pixel coordinates for slimmer results
   level: 'finest', // read the highest-resolution level instead of the drawn one
+  distanceKey: 'along', // LineString only: result key for distance, default 'distance'
 })
 ```
 
-**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
+Every other key in `coordinates` is a dimension name from the store. A `LineString` query on a store that has a dimension named `distance` throws, so that dimension's values are never overwritten. Pass a different `distanceKey` to query it.
+
+**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). A cell with no data is left out of the result.
+
+With a multi-value selector such as `{ time: [0, 1, 2] }`, a cell is kept when it has data in at least one series, and the series without data hold `NaN` at that position. Every series therefore has the same length as the coordinate arrays, and index `i` refers to the same cell in all of them. Skip non-finite values when aggregating. `JSON.stringify` writes `NaN` as `null`.
 
 ### query resolution
 

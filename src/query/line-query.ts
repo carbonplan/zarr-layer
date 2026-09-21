@@ -32,6 +32,80 @@ export function haversineMeters(
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(a)))
 }
 
+/** Longest lon/lat span measured as a single great-circle chord. */
+const MAX_CHORD_DEGREES = 0.25
+
+/**
+ * Length in meters of the straight lon/lat segment between two positions.
+ *
+ * Query edges are straight in lon/lat, which is not a great circle, so long
+ * spans are measured as a chain of short chords. The result does not depend
+ * on how finely a caller happens to split the segment.
+ */
+export function segmentLengthMeters(
+  lon0: number,
+  lat0: number,
+  lon1: number,
+  lat1: number
+): number {
+  const span = Math.max(Math.abs(lon1 - lon0), Math.abs(lat1 - lat0))
+  const steps = Math.max(1, Math.ceil(span / MAX_CHORD_DEGREES))
+  if (steps === 1) return haversineMeters(lon0, lat0, lon1, lat1)
+
+  let total = 0
+  let prevLon = lon0
+  let prevLat = lat0
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps
+    const lon = lon0 + t * (lon1 - lon0)
+    const lat = lat0 + t * (lat1 - lat0)
+    total += haversineMeters(prevLon, prevLat, lon, lat)
+    prevLon = lon
+    prevLat = lat
+  }
+  return total
+}
+
+/**
+ * Liang–Barsky clip of a segment against the rectangle [0, width] x
+ * [0, height]. Returns the parameter range of the part inside, or null when
+ * the segment misses the rectangle.
+ */
+function clipSegmentToGrid(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  width: number,
+  height: number
+): [number, number] | null {
+  const dx = bx - ax
+  const dy = by - ay
+  let t0 = 0
+  let t1 = 1
+  const edges: [number, number][] = [
+    [-dx, ax],
+    [dx, width - ax],
+    [-dy, ay],
+    [dy, height - ay],
+  ]
+  for (const [p, q] of edges) {
+    if (p === 0) {
+      if (q < 0) return null
+      continue
+    }
+    const r = q / p
+    if (p < 0) {
+      if (r > t1) return null
+      if (r > t0) t0 = r
+    } else {
+      if (r < t0) return null
+      if (r < t1) t1 = r
+    }
+  }
+  return [t0, t1]
+}
+
 /**
  * Split a lon/lat line at the antimeridian into ordered pieces whose
  * longitudes all lie within [-180, 180].
@@ -132,12 +206,14 @@ export function lineToPixelPath(
 /**
  * Walk a pixel-space path cell by cell (Amanatides–Woo grid traversal) and
  * return every cell it passes through, in path order, with consecutive
- * repeats removed and cells outside the grid dropped.
+ * repeats removed.
  *
- * `distance` accumulates along the whole path, including parts outside the
- * grid, so a line that leaves and re-enters the raster keeps a continuous
- * axis. `distanceOffset` seeds the accumulator for a path that continues an
- * earlier one, and `endDistance` is where the next continuation should start.
+ * Each segment is clipped to the grid before it is walked, so the cost
+ * follows the cells returned and not the length of the line. `distance`
+ * still accumulates along the whole path, including the clipped-away parts,
+ * so a line that leaves and re-enters the raster keeps a continuous axis.
+ * `distanceOffset` seeds the accumulator for a path that continues an earlier
+ * one, and `endDistance` is where the next continuation should start.
  */
 export function traceLineCells(
   path: DensifiedVertex[],
@@ -154,10 +230,19 @@ export function traceLineCells(
   let prevLon = path[0].lon
   let prevLat = path[0].lat
 
-  const emit = (x: number, y: number, lon: number, lat: number) => {
-    distance += haversineMeters(prevLon, prevLat, lon, lat)
+  const advanceTo = (lon: number, lat: number) => {
+    distance += segmentLengthMeters(prevLon, prevLat, lon, lat)
     prevLon = lon
     prevLat = lat
+  }
+  // A re-entry after time off the grid is a new sample even in the same cell.
+  const forgetLastCell = () => {
+    lastX = NaN
+    lastY = NaN
+  }
+
+  const emit = (x: number, y: number, lon: number, lat: number) => {
+    advanceTo(lon, lat)
     if (x === lastX && y === lastY) return
     lastX = x
     lastY = y
@@ -174,25 +259,43 @@ export function traceLineCells(
   for (let i = 0; i < path.length - 1; i++) {
     const a = path[i]
     const b = path[i + 1]
-    const dx = b.px - a.px
-    const dy = b.py - a.py
 
-    let x = Math.floor(a.px)
-    let y = Math.floor(a.py)
+    const clip = clipSegmentToGrid(a.px, a.py, b.px, b.py, width, height)
+    if (!clip) {
+      forgetLastCell()
+      advanceTo(b.lon, b.lat)
+      continue
+    }
+    const [t0, t1] = clip
+    const at = (t: number) => ({
+      px: a.px + t * (b.px - a.px),
+      py: a.py + t * (b.py - a.py),
+      lon: a.lon + t * (b.lon - a.lon),
+      lat: a.lat + t * (b.lat - a.lat),
+    })
+    const start = t0 > 0 ? at(t0) : a
+    const end = t1 < 1 ? at(t1) : b
+    if (t0 > 0) forgetLastCell()
+
+    const dx = end.px - start.px
+    const dy = end.py - start.py
+
+    let x = Math.floor(start.px)
+    let y = Math.floor(start.py)
     // A start on a cell boundary heading down belongs to the lower cell.
-    if (dx < 0 && x === a.px) x -= 1
-    if (dy < 0 && y === a.py) y -= 1
+    if (dx < 0 && x === start.px) x -= 1
+    if (dy < 0 && y === start.py) y -= 1
 
     const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0
     const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0
     let tMaxX =
-      dx > 0 ? (x + 1 - a.px) / dx : dx < 0 ? (x - a.px) / dx : Infinity
+      dx > 0 ? (x + 1 - start.px) / dx : dx < 0 ? (x - start.px) / dx : Infinity
     let tMaxY =
-      dy > 0 ? (y + 1 - a.py) / dy : dy < 0 ? (y - a.py) / dy : Infinity
+      dy > 0 ? (y + 1 - start.py) / dy : dy < 0 ? (y - start.py) / dy : Infinity
     const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity
     const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity
 
-    emit(x, y, a.lon, a.lat)
+    emit(x, y, start.lon, start.lat)
 
     for (;;) {
       let t: number
@@ -207,13 +310,16 @@ export function traceLineCells(
         y += stepY
         tMaxY += tDeltaY
       }
-      emit(x, y, a.lon + t * (b.lon - a.lon), a.lat + t * (b.lat - a.lat))
+      emit(
+        x,
+        y,
+        start.lon + t * (end.lon - start.lon),
+        start.lat + t * (end.lat - start.lat)
+      )
     }
 
-    // Close out the segment so distance reaches the vertex itself.
-    distance += haversineMeters(prevLon, prevLat, b.lon, b.lat)
-    prevLon = b.lon
-    prevLat = b.lat
+    if (t1 < 1) forgetLastCell()
+    advanceTo(b.lon, b.lat)
   }
 
   return { cells, endDistance: distance }
@@ -278,11 +384,11 @@ export function groupCellsIntoRuns(
   return runs
 }
 
-/** Total great-circle length of a lon/lat line in meters. */
+/** Total length of a lon/lat line in meters. */
 export function lineLengthMeters(coords: number[][]): number {
   let total = 0
   for (let i = 1; i < coords.length; i++) {
-    total += haversineMeters(
+    total += segmentLengthMeters(
       coords[i - 1][0],
       coords[i - 1][1],
       coords[i][0],

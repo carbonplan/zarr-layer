@@ -108,6 +108,53 @@ describe('queryRegion — value handling', () => {
     expect(result.v).toEqual([21, 41])
   })
 
+  it('drops a value that scale and offset push out of the finite range', () => {
+    const data = new Float32Array([1, 3e38]) // 2x1
+    const result = queryRegion(
+      'v',
+      rect(-180, -90, 180, 90),
+      {},
+      data,
+      2,
+      1,
+      ['lat', 'lon'],
+      {},
+      WORLD,
+      'EPSG:4326',
+      1,
+      undefined,
+      undefined,
+      false,
+      { scaleFactor: 1e300 }
+    )
+    expect(result.v).toEqual([1e300])
+  })
+
+  it('keeps multi-value series aligned with coordinates when a cell is fill in only some', () => {
+    // 3x1 grid, two series interleaved per pixel: [t10, t20].
+    // Pixel 1 is fill at t10 only; pixel 2 is fill in both.
+    const data = new Float32Array([0, 10, NaN, 11, NaN, NaN])
+    const result = queryRegion(
+      'v',
+      rect(-180, -90, 180, 90),
+      { time: [10, 20] },
+      data,
+      3,
+      1,
+      ['time', 'lat', 'lon'],
+      {},
+      WORLD,
+      'EPSG:4326',
+      2,
+      [[10], [20]],
+      ['time'],
+      false
+    )
+    expect(result.v).toEqual({ 10: [0, NaN], 20: [10, 11] })
+    expect(result.coordinates.lon).toEqual([-120, 0])
+    expect(result.coordinates.lat).toHaveLength(2)
+  })
+
   it('reports spatial dimension names and coordinate arrays', () => {
     const { data } = indexRamp(4, 4)
     const result = queryRegion(

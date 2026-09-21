@@ -3,6 +3,7 @@ import {
   groupCellsIntoRuns,
   haversineMeters,
   lineToPixelPath,
+  segmentLengthMeters,
   splitLineAtAntimeridian,
   traceLineCells,
   type TracedCell,
@@ -257,9 +258,97 @@ describe('traceLineCells', () => {
     ])
   })
 
+  it('skips the off-grid part of a segment without walking it', () => {
+    const start = performance.now()
+    const { cells, endDistance } = traceLineCells(
+      [
+        { px: -1e9, py: 0.5, lon: -60, lat: 10 },
+        { px: 1e9, py: 0.5, lon: 60, lat: 10 },
+      ],
+      3,
+      3
+    )
+    expect(performance.now() - start).toBeLessThan(50)
+    expect(xy(cells)).toEqual([
+      [0, 0],
+      [1, 0],
+      [2, 0],
+    ])
+    // The grid sits at the middle of the line, and the axis covers all of it.
+    expect(cells[0].distance).toBeCloseTo(
+      segmentLengthMeters(-60, 10, 0, 10),
+      0
+    )
+    expect(endDistance).toBeCloseTo(segmentLengthMeters(-60, 10, 60, 10), 0)
+  })
+
+  it('returns nothing, quickly, for a line that never touches the grid', () => {
+    const start = performance.now()
+    const { cells, endDistance } = traceLineCells(
+      [
+        { px: 5000, py: 5000, lon: 0, lat: 0 },
+        { px: 1e9, py: 3e8, lon: 40, lat: 20 },
+      ],
+      1000,
+      1000
+    )
+    expect(performance.now() - start).toBeLessThan(50)
+    expect(cells).toEqual([])
+    expect(endDistance).toBeCloseTo(segmentLengthMeters(0, 0, 40, 20), 0)
+  })
+
+  it('samples a cell again when the line leaves the grid and comes back', () => {
+    const { cells } = traceLineCells(
+      path([
+        [0.5, 0.5],
+        [-5, 0.5],
+        [0.5, 0.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(cells)).toEqual([
+      [0, 0],
+      [0, 0],
+    ])
+    expect(cells[1].distance).toBeGreaterThan(cells[0].distance)
+  })
+
+  it('clips a diagonal that cuts a corner of the grid', () => {
+    const { cells } = traceLineCells(
+      path([
+        [-1.5, 1.5],
+        [1.5, -1.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(cells)).toContainEqual([0, 0])
+    for (const [x, y] of xy(cells)) {
+      expect(x).toBeGreaterThanOrEqual(0)
+      expect(y).toBeGreaterThanOrEqual(0)
+    }
+  })
+
   it('samples one cell for a degenerate single-point path', () => {
     const { cells } = traceLineCells(path([[4.2, 4.8]]), 10, 10)
     expect(xy(cells)).toEqual([[4, 4]])
+  })
+})
+
+describe('segmentLengthMeters', () => {
+  it('does not depend on how the segment is split', () => {
+    const whole = segmentLengthMeters(-100, 60, 40, 60)
+    const halves =
+      segmentLengthMeters(-100, 60, -30, 60) +
+      segmentLengthMeters(-30, 60, 40, 60)
+    expect(halves / whole).toBeCloseTo(1, 6)
+  })
+
+  it('measures along the lon/lat line, which is longer than the great circle', () => {
+    expect(segmentLengthMeters(-100, 60, 40, 60)).toBeGreaterThan(
+      haversineMeters(-100, 60, 40, 60)
+    )
   })
 })
 

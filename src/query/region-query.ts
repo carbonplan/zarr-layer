@@ -44,12 +44,13 @@ function findByAlias(dimensions: string[], axis: 'lat' | 'lon'): string {
   return dimensions.find((d) => aliases.includes(d.toLowerCase())) ?? axis
 }
 
+/** An array selector of any length, which nests the result by label. */
 function isMultiValSelector(value: Selector[string]): boolean {
-  if (Array.isArray(value)) return true
-  if (value && typeof value === 'object' && 'selected' in value) {
-    return Array.isArray((value as any).selected)
-  }
-  return false
+  const selected =
+    value && typeof value === 'object' && 'selected' in value
+      ? (value as { selected: unknown }).selected
+      : value
+  return Array.isArray(selected) && selected.length > 0
 }
 
 function checkAborted(signal?: AbortSignal) {
@@ -80,7 +81,7 @@ function transformValue(
     result += transforms.addOffset
   }
 
-  return result
+  return Number.isFinite(result) ? result : null
 }
 
 export interface ResultBuilderParams {
@@ -104,8 +105,9 @@ export interface ResultBuilderParams {
 export interface ResultBuilder {
   /**
    * Read the pixel at (x, y) of the fetched window into the result.
-   * Returns false when every channel was fill or non-finite and nothing was
-   * emitted.
+   * Returns false when every series was fill or non-finite and nothing was
+   * emitted. A cell with a value in at least one series is emitted to all of
+   * them, with NaN standing in where a series has none.
    */
   processPixel: (x: number, y: number) => boolean
   /** Assemble the result from everything processed so far. */
@@ -144,12 +146,9 @@ export function createResultBuilder(
     dimIndices,
   } = params
 
-  const singleValuedDims = Object.keys(selector).filter(
-    (k) => !isMultiValSelector(selector[k])
-  ).length
-  const resultDim = dimensions.length - singleValuedDims
-
-  const useNestedResults = resultDim > 2
+  // Nesting follows the selector's syntax: an array value nests by label, a
+  // scalar or an unselected dimension (read at index 0) stays flat.
+  const useNestedResults = Object.values(selector).some(isMultiValSelector)
   const results: QueryDataValues = useNestedResults ? {} : []
 
   const { yDim, xDim } = findSpatialDimNames(dimensions, dimIndices)
@@ -224,29 +223,59 @@ export function createResultBuilder(
       return true
     }
 
+    // Every series gets an entry for every emitted cell, NaN where that
+    // series has no value, so each stays index-aligned with the coordinates.
+    const values: number[] = new Array(channels)
     let hasValid = false
     for (let c = 0; c < channels; c++) {
       const transformed = transformValue(data[baseIndex + c], transforms)
-      if (transformed === null) continue
+      values[c] = transformed ?? NaN
+      if (transformed !== null) hasValid = true
+    }
+    if (!hasValid) return false
 
-      if (!hasValid) {
-        if (includeSpatialCoordinates) emitCoords(x, y)
-        hasValid = true
-      }
-
+    if (includeSpatialCoordinates) emitCoords(x, y)
+    for (let c = 0; c < channels; c++) {
       if (useNestedResults && multiValueDimNames) {
         const labels = channelLabels?.[c]
         const keys =
           labels && labels.length === multiValueDimNames.length ? labels : [c]
-        setObjectValues(results, keys, transformed)
+        setObjectValues(results, keys, values[c])
       } else if (Array.isArray(results)) {
-        results.push(transformed)
+        results.push(values[c])
       }
     }
-    return hasValid
+    return true
   }
 
   return { processPixel, buildResult, yDim, xDim }
+}
+
+/**
+ * Result for a query that selected nothing, shaped like any other result for
+ * the same selector: the same dimensions, selector coordinates, and flat or
+ * nested values.
+ */
+export function buildEmptyResult(
+  variable: string,
+  selector: Selector,
+  dimensions: string[],
+  coordinates: Record<string, (string | number)[]>,
+  dimIndices?: DimIndicesProps
+): QueryResult {
+  return createResultBuilder({
+    variable,
+    selector,
+    data: new Float32Array(0),
+    width: 0,
+    height: 0,
+    dimensions,
+    coordinates,
+    sourceBounds: [0, 0, 0, 0],
+    channels: 1,
+    includeSpatialCoordinates: false,
+    dimIndices,
+  }).buildResult()
 }
 
 /**
