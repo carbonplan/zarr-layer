@@ -9,6 +9,7 @@ import type { NestedValues, QueryGeometry, QueryResult } from './types'
 import { ZarrStore } from '../zarr-store'
 import { createProjectionContext } from '../projection-utils'
 import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
+import { SelectorResolutionError } from '../selector-resolution'
 
 /**
  * End-to-end orchestration tests against the in-memory Zarr fixture (real
@@ -119,6 +120,17 @@ describe('queryData', () => {
     )
     expect(result.temp).toEqual([])
     expect(result.coordinates).toEqual({ lat: [], lon: [] })
+  })
+
+  it('rejects an unknown selector key even when the query selects nothing', async () => {
+    const { context } = await makeQueryHarness()
+    const offRaster = point(0, 95)
+    await expect(
+      queryData(context, offRaster, { typo: 5 })
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
+    await expect(
+      queryData({ ...context, level: null }, offRaster, { typo: 5 })
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
   })
 
   it('resolves point queries to the correct pixel', async () => {

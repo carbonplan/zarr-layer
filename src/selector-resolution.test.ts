@@ -3,7 +3,6 @@ import * as zarr from 'zarrita'
 import {
   buildChannelCombinations,
   buildSliceArgsForSelector,
-  classifyDimension,
   resolveSelectionIndex,
   SelectorResolutionError,
   type SelectorResolutionContext,
@@ -46,20 +45,6 @@ function makeContext(
 }
 
 const DIM_INFO = { index: 0, name: 'time', array: null }
-
-describe('classifyDimension', () => {
-  it('recognizes spatial, time, and other dimensions', () => {
-    expect(classifyDimension('lon')).toBe('lon')
-    expect(classifyDimension('x')).toBe('lon')
-    expect(classifyDimension('longitude')).toBe('lon')
-    expect(classifyDimension('lat')).toBe('lat')
-    expect(classifyDimension('y')).toBe('lat')
-    expect(classifyDimension('Latitude')).toBe('lat')
-    expect(classifyDimension('time')).toBe('time')
-    expect(classifyDimension('valid_time')).toBe('time')
-    expect(classifyDimension('band')).toBe('other')
-  })
-})
 
 describe('resolveSelectionIndex', () => {
   it('passes numeric values through for type "index"', async () => {
@@ -309,7 +294,50 @@ describe('buildSliceArgsForSelector', () => {
     ])
   })
 
-  it('lets a "time" selector drive any time-classified dimension', async () => {
+  it('selects a dimension whose name merely contains lat, lon, or time', async () => {
+    const array4d = {
+      shape: [5, 6, 180, 360],
+    } as unknown as zarr.Array<zarr.DataType>
+    for (const name of ['simulation', 'longwave', 'population', 'lifetime']) {
+      const context = makeContext({
+        dimIndices: {
+          time: { index: 0, name: 'time', array: null },
+          [name]: { index: 1, name, array: null },
+          lat: { index: 2, name: 'lat', array: null },
+          lon: { index: 3, name: 'lon', array: null },
+        },
+      })
+      const { sliceArgs } = await buildSliceArgsForSelector(
+        context,
+        { [name]: { selected: 4, type: 'index' } },
+        { includeSpatialSlices: false, trackMultiValue: false, array: array4d }
+      )
+      expect(sliceArgs[1]).toBe(4)
+    }
+  })
+
+  it('applies a time selector to the time dimension only', async () => {
+    const array4d = {
+      shape: [5, 6, 180, 360],
+    } as unknown as zarr.Array<zarr.DataType>
+    const context = makeContext({
+      dimIndices: {
+        time: { index: 0, name: 'time', array: null },
+        lead_time: { index: 1, name: 'lead_time', array: null },
+        lat: { index: 2, name: 'lat', array: null },
+        lon: { index: 3, name: 'lon', array: null },
+      },
+    })
+    const { sliceArgs } = await buildSliceArgsForSelector(
+      context,
+      { time: { selected: 3, type: 'index' } },
+      { includeSpatialSlices: false, trackMultiValue: false, array: array4d }
+    )
+    expect(sliceArgs[0]).toBe(3)
+    expect(sliceArgs[1]).toBe(0)
+  })
+
+  it('rejects a selector key that names no dimension, listing the real ones', async () => {
     const context = makeContext({
       dimIndices: {
         valid_time: { index: 0, name: 'valid_time', array: null },
@@ -317,12 +345,23 @@ describe('buildSliceArgsForSelector', () => {
         lon: { index: 2, name: 'lon', array: null },
       },
     })
-    const { sliceArgs } = await buildSliceArgsForSelector(
+    const build = buildSliceArgsForSelector(
       context,
       { time: { selected: 2, type: 'index' } },
       { includeSpatialSlices: false, trackMultiValue: false, array }
     )
-    expect(sliceArgs[0]).toBe(2)
+    await expect(build).rejects.toBeInstanceOf(SelectorResolutionError)
+    await expect(build).rejects.toThrow(/'time'.*\[valid_time\]/)
+  })
+
+  it('rejects a selector on a spatial axis', async () => {
+    await expect(
+      buildSliceArgsForSelector(
+        makeContext(),
+        { lat: { selected: 2, type: 'index' } },
+        { includeSpatialSlices: false, trackMultiValue: false, array }
+      )
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
   })
 })
 

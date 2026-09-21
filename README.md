@@ -141,7 +141,7 @@ layer.setUniforms({ u_weight: 1.5 }) // no-op unless layer has customFrag
 
 ## selectors
 
-Selectors specify which slice of your multidimensional data to render. Dimensions not specified default to index 0.
+Selectors specify which slice of your multidimensional data to render. Dimensions not specified default to index 0. Keys are the store's own non-spatial dimension names, matched exactly. A key that names no dimension is an error that lists the valid names. It surfaces through `onLoadingStateChange` for the layer's selector, and as a rejection from `queryData`.
 
 **Basic syntax:**
 
