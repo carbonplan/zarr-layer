@@ -76,7 +76,7 @@ export interface RecordingGl extends WebGL2RenderingContext {
  *   "region cannot be uploaded" branches.
  * @param inactiveUniforms - uniform names whose location is null even though
  *   the source references them, the way Mesa reports a uniform whose only
- *   consumer is a varying the fragment shader never reads.
+ *   consumer is a varying component the fragment shader never reads.
  */
 export function createRecordingGl({
   failTextures = false,

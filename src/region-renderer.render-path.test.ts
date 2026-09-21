@@ -262,8 +262,9 @@ describe('MapLibre render path', () => {
 
   it('still draws in mercator when the driver drops the mercator-only uniforms', async () => {
     // The flat source-projected shader positions vertices from
-    // u_anchor_clip + deltaClip; shift_x/shift_y/u_worldXOffset only feed a
-    // varying the fragment shader ignores, and Mesa reports them inactive.
+    // u_anchor_clip + deltaClip; shift_x/u_worldXOffset only feed
+    // v_mercatorPos.x, which the default fragment shader ignores.
+    // shift_y still feeds the fragment's Y reprojection; null is simulated here.
     // The frame must draw anyway rather than throw out of render().
     const { gl, mode } = await frame((g) => maplibreContext(g, 0), {
       inactiveUniforms: ['shift_x', 'shift_y', 'u_worldXOffset'],

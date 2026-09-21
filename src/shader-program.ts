@@ -216,13 +216,14 @@ export function createShaderProgram(
     scaleXLoc: mustGetUniformLocation(gl, program, 'scale_x'),
     scaleYLoc: mustGetUniformLocation(gl, program, 'scale_y'),
     // In the source-projected flat (wgs84) shader gl_Position comes from
-    // u_anchor_clip + deltaClip, so shift_x/shift_y/u_worldXOffset only feed
-    // the v_mercatorPos varying, which the fragment shader never reads. Mesa
+    // u_anchor_clip + deltaClip, so shift_x/u_worldXOffset only feed
+    // v_mercatorPos.x, which the default fragment shader never reads. Mesa
     // (Intel/AMD/llvmpipe) eliminates that chain at link time and reports the
     // uniforms inactive, which made mustGetUniformLocation throw on every
     // frame from the moment the map left the globe transition, so the layer
     // silently vanished at zoom >= 12 on those GPUs. A null location is a
     // no-op for gl.uniform1f, so look these up without throwing.
+    // shift_y still feeds v_mercatorPos.y in the fragment reprojection branch.
     shiftXLoc: gl.getUniformLocation(program, 'shift_x'),
     shiftYLoc: gl.getUniformLocation(program, 'shift_y'),
     worldXOffsetLoc: gl.getUniformLocation(program, 'u_worldXOffset'),
