@@ -290,3 +290,36 @@ describe('transformGeometryToPixelSpace — unprojectable vertices', () => {
     expect(ring[ring.length - 1]).toEqual(ring[0])
   })
 })
+
+describe('transformGeometryToPixelSpace — curvature that cancels at the midpoint', () => {
+  it('densifies a Mercator polygon edge centred on the equator', () => {
+    const bounds: Bounds = [
+      -WEB_MERCATOR_EXTENT,
+      -WEB_MERCATOR_EXTENT,
+      WEB_MERCATOR_EXTENT,
+      WEB_MERCATOR_EXTENT,
+    ]
+    const result = transformGeometryToPixelSpace(
+      {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [-60, -60],
+            [60, 60],
+            [60, -60],
+            [-60, -60],
+          ],
+        ],
+      },
+      bounds,
+      1024,
+      1024,
+      'EPSG:3857',
+      false
+    )
+    const ring = (result as { coordinates: number[][][] }).coordinates[0]
+    // The other two edges are straight in Mercator, so every added vertex
+    // comes from the diagonal.
+    expect(ring.length).toBeGreaterThan(10)
+  })
+})

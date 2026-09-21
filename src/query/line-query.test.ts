@@ -543,6 +543,44 @@ describe('lineToPixelPaths', () => {
     expect(last).toMatchObject({ px: 10, py: 10, lon: 180, lat: -90 })
   })
 
+  it('follows a Mercator edge whose bends cancel at its midpoint', () => {
+    // Centred on the equator, the southern and northern halves curve opposite
+    // ways, so the projected midpoint sits exactly on the straight chord.
+    const extent = 20037508.342789244
+    const bounds: Bounds = [-extent, -extent, extent, extent]
+    const size = 1024
+    const a = [-60, -60]
+    const b = [60, 60]
+    const { sections } = lineToPixelPaths(
+      [a, b],
+      bounds,
+      size,
+      size,
+      'EPSG:3857',
+      false
+    )
+    const traced = sections[0].path
+    expect(traced.length).toBeGreaterThan(2)
+
+    const mercatorY = (lat: number) =>
+      Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360))
+    const truePy = (lat: number) =>
+      (1 - (mercatorY(lat) / Math.PI + 1) / 2) * size
+    let worst = 0
+    for (let i = 1; i < 200; i++) {
+      const t = i / 200
+      const lon = a[0] + t * (b[0] - a[0])
+      const lat = a[1] + t * (b[1] - a[1])
+      const px = ((lon + 180) / 360) * size
+      let k = 0
+      while (k < traced.length - 2 && traced[k + 1].px < px) k++
+      const s = (px - traced[k].px) / (traced[k + 1].px - traced[k].px)
+      const tracedPy = traced[k].py + s * (traced[k + 1].py - traced[k].py)
+      worst = Math.max(worst, Math.abs(tracedPy - truePy(lat)))
+    }
+    expect(worst).toBeLessThan(0.25)
+  })
+
   it('breaks the line at a vertex the projection cannot place', () => {
     // Orthographic centred on 0,0 cannot place the far side of the globe.
     const ortho = '+proj=ortho +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs'

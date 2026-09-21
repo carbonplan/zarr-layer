@@ -232,9 +232,9 @@ export interface DensifiedVertex {
 /**
  * Densify a lon/lat path by adaptively subdividing edges until the pixel-space
  * error is below DEFAULT_QUERY_DENSIFY_MAX_ERROR. For each edge, the midpoint
- * is interpolated in lon/lat, transformed to pixel space, and compared to the
- * straight-line midpoint in pixel space. If the deviation exceeds the
- * threshold, the edge is recursively split.
+ * and quarter points are interpolated in lon/lat, transformed to pixel space,
+ * and compared to the same fractions along the straight pixel-space chord. If
+ * any deviates by more than the threshold, the edge is recursively split.
  *
  * This matches the adaptive mesh reprojection precision (0.125px) so query
  * geometry edges align with rendered pixel boundaries. Vertices that do not
@@ -246,6 +246,30 @@ export function densifyAndTransformPath(
 ): DensifiedVertex[] {
   const result: DensifiedVertex[] = []
   const isValid = (px: [number, number]) => isFinite(px[0]) && isFinite(px[1])
+
+  const maxErrorSq =
+    DEFAULT_QUERY_DENSIFY_MAX_ERROR * DEFAULT_QUERY_DENSIFY_MAX_ERROR
+
+  // Squared distance from the true projection of the point a fraction `t`
+  // along the edge to the same fraction along the straight pixel-space chord.
+  const chordErrorSq = (
+    lon0: number,
+    lat0: number,
+    px0: [number, number],
+    lon1: number,
+    lat1: number,
+    px1: [number, number],
+    t: number
+  ): number => {
+    const px = transformVertex(
+      lon0 + t * (lon1 - lon0),
+      lat0 + t * (lat1 - lat0)
+    )
+    if (!isValid(px)) return 0
+    const dx = px[0] - (px0[0] + t * (px1[0] - px0[0]))
+    const dy = px[1] - (px0[1] + t * (px1[1] - px0[1]))
+    return dx * dx + dy * dy
+  }
 
   function subdivide(
     lon0: number,
@@ -267,12 +291,16 @@ export function densifyAndTransformPath(
     const expectedY = (px0[1] + px1[1]) * 0.5
     const dx = pxM[0] - expectedX
     const dy = pxM[1] - expectedY
-    const error = dx * dx + dy * dy
 
-    if (
-      error >
-      DEFAULT_QUERY_DENSIFY_MAX_ERROR * DEFAULT_QUERY_DENSIFY_MAX_ERROR
-    ) {
+    // The midpoint alone misses an edge that bends one way and then the
+    // other, such as a Mercator edge centred on the equator, where the two
+    // halves cancel there. The quarter points catch it.
+    const bends =
+      dx * dx + dy * dy > maxErrorSq ||
+      chordErrorSq(lon0, lat0, px0, lon1, lat1, px1, 0.25) > maxErrorSq ||
+      chordErrorSq(lon0, lat0, px0, lon1, lat1, px1, 0.75) > maxErrorSq
+
+    if (bends) {
       subdivide(lon0, lat0, px0, lonM, latM, pxM, depth + 1)
       result.push({ px: pxM[0], py: pxM[1], lon: lonM, lat: latM })
       subdivide(lonM, latM, pxM, lon1, lat1, px1, depth + 1)
