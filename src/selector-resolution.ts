@@ -23,23 +23,30 @@ export type SelectorResolutionContext = {
 }
 
 /**
- * Classify a dimension by its name.
- * Used to identify spatial (lat/lon) vs non-spatial dimensions.
+ * Reject selector keys that name no selectable dimension. The spatial axes
+ * are filed under the `lat` and `lon` keys of `dimIndices`, and every other
+ * dimension under its own name, which is the only name a selector can use.
  */
-export function classifyDimension(
-  dimKey: string
-): 'lon' | 'lat' | 'time' | 'other' {
-  const key = dimKey.toLowerCase()
-  if (key === 'lon' || key === 'x' || key === 'lng' || key.includes('lon')) {
-    return 'lon'
-  }
-  if (key === 'lat' || key === 'y' || key.includes('lat')) {
-    return 'lat'
-  }
-  if (key.includes('time')) {
-    return 'time'
-  }
-  return 'other'
+export function assertSelectorKeysAreDimensions(
+  selector: NormalizedSelector,
+  dimIndices: DimIndicesProps
+): void {
+  const selectable = Object.keys(dimIndices).filter(
+    (key) => key !== 'lat' && key !== 'lon'
+  )
+  const unknown = Object.keys(selector).filter(
+    (key) => !selectable.includes(key)
+  )
+  if (unknown.length === 0) return
+  throw new SelectorResolutionError(
+    `[ZarrLayer] selector ${unknown
+      .map((k) => `'${k}'`)
+      .join(
+        ', '
+      )} does not name a dimension of this variable. Selectable dimensions: [${selectable.join(
+      ', '
+    )}]`
+  )
 }
 
 /**
@@ -89,11 +96,12 @@ export async function buildSliceArgsForSelector(
     labels: (number | string)[]
   }> = []
 
+  assertSelectorKeysAreDimensions(selector, context.dimIndices)
+
   for (const dimName of Object.keys(context.dimIndices)) {
     const dimInfo = context.dimIndices[dimName]
-    const dimType = classifyDimension(dimName)
 
-    if (dimType === 'lon') {
+    if (dimName === 'lon') {
       if (options.spatialBounds) {
         sliceArgs[dimInfo.index] = zarr.slice(
           options.spatialBounds.minX,
@@ -104,7 +112,7 @@ export async function buildSliceArgsForSelector(
           ? zarr.slice(0, array.shape[dimInfo.index] ?? 0)
           : 0
       }
-    } else if (dimType === 'lat') {
+    } else if (dimName === 'lat') {
       if (options.spatialBounds) {
         sliceArgs[dimInfo.index] = zarr.slice(
           options.spatialBounds.minY,
@@ -116,8 +124,7 @@ export async function buildSliceArgsForSelector(
           : 0
       }
     } else {
-      const selectionSpec =
-        selector[dimName] || (dimType === 'time' ? selector['time'] : undefined)
+      const selectionSpec = selector[dimName]
 
       if (selectionSpec !== undefined) {
         const selectionValue = selectionSpec.selected

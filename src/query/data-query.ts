@@ -12,6 +12,7 @@ import type { QueryLevelSnapshot } from '../region-state'
 import type { ZarrStore } from '../zarr-store'
 import {
   buildChannelCombinations,
+  assertSelectorKeysAreDimensions,
   buildSliceArgsForSelector,
   type DimensionValuesCache,
 } from '../selector-resolution'
@@ -180,6 +181,11 @@ export async function queryData(
     coordinates: { [emptyYDim]: [], [emptyXDim]: [] },
   })
 
+  const normalizedSelector = selector
+    ? normalizeSelector(selector)
+    : context.selector
+  assertSelectorKeysAreDimensions(normalizedSelector, desc.dimIndices)
+
   const level = context.level
   if (!context.mercatorBounds || !level || !sourceBounds) {
     return emptyResult()
@@ -187,9 +193,6 @@ export async function queryData(
   const projectionDef = context.projection.def
   if (!projectionDef) return emptyResult()
 
-  const normalizedSelector = selector
-    ? normalizeSelector(selector)
-    : context.selector
   const currentLevel = context.levels[level.index]
   const transforms = {
     scaleFactor: currentLevel?.scaleFactor ?? desc.scaleFactor,
