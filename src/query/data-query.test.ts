@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   queryData,
+  concatQueryResults,
   mergeQueryResults,
   mergeNestedValues,
   type QueryContext,
@@ -477,6 +478,85 @@ describe('mergeNestedValues', () => {
       a: [1],
       b: [2],
     })
+  })
+})
+
+describe('concatQueryResults', () => {
+  const keys = ['lat', 'lon', 'distance']
+
+  it('joins flat windows in order, per-pixel coordinates included', () => {
+    const windows: QueryResult[] = [
+      {
+        temp: [1, 2],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [10, 10], lon: [0, 1], distance: [0, 5] },
+      },
+      {
+        temp: [],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [], lon: [], distance: [] },
+      },
+      {
+        temp: [3],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [10], lon: [2], distance: [9] },
+      },
+    ]
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(joined.temp).toEqual([1, 2, 3])
+    expect(joined.coordinates).toEqual({
+      lat: [10, 10, 10],
+      lon: [0, 1, 2],
+      distance: [0, 5, 9],
+    })
+  })
+
+  it('joins nested series leaf by leaf and keeps selection coordinates once', () => {
+    const windows: QueryResult[] = [
+      {
+        temp: { 10: [1, NaN], 20: [5, 6] },
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: {
+          lat: [0, 0],
+          lon: [0, 1],
+          distance: [0, 1],
+          time: [10, 20],
+        },
+      },
+      {
+        // A window that emitted no samples has no series keys at all.
+        temp: {},
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: { lat: [], lon: [], distance: [], time: [10, 20] },
+      },
+      {
+        temp: { 10: [3], 20: [7] },
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: { lat: [0], lon: [2], distance: [2], time: [10, 20] },
+      },
+    ]
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(joined.temp).toEqual({ 10: [1, NaN, 3], 20: [5, 6, 7] })
+    expect(joined.coordinates.time).toEqual([10, 20])
+    expect(joined.coordinates.distance).toEqual([0, 1, 2])
+  })
+
+  it('stays linear over many windows', () => {
+    const windows: QueryResult[] = Array.from({ length: 5000 }, (_, w) => ({
+      temp: { 10: new Array(200).fill(w), 20: new Array(200).fill(w) },
+      dimensions: ['time', 'lat', 'lon'],
+      coordinates: {
+        lat: new Array(200).fill(0),
+        lon: new Array(200).fill(w),
+        distance: new Array(200).fill(w),
+        time: [10, 20],
+      },
+    }))
+    const start = performance.now()
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(performance.now() - start).toBeLessThan(1500)
+    expect((joined.temp as NestedValues)[10]).toHaveLength(1_000_000)
+    expect(joined.coordinates.distance).toHaveLength(1_000_000)
   })
 })
 

@@ -531,7 +531,7 @@ async function queryLineString(
   const runs = groupCellsIntoRuns(cells, QUERY_LINE_RUN_MAX_PX)
   if (runs.length === 0) return emptyResult()
 
-  let merged: QueryResult | null = null
+  const runResults: QueryResult[] = []
   for (const run of runs) {
     if (signal?.aborted) {
       throw new DOMException('The operation was aborted.', 'AbortError')
@@ -578,14 +578,89 @@ async function queryLineString(
     const result = builder.buildResult()
     result.coordinates[distanceKey] = distances
 
-    merged = merged
-      ? mergeQueryResults(merged, result, context.variable, yDim, xDim, [
-          distanceKey,
-        ])
-      : result
+    runResults.push(result)
   }
 
-  return merged!
+  return concatQueryResults(runResults, context.variable, [
+    yDim,
+    xDim,
+    distanceKey,
+  ])
+}
+
+/**
+ * Join per-window results, in order, into one. Each per-pixel array is built
+ * once at its final length, so the cost is linear in the samples however
+ * many windows a long line was read in.
+ *
+ * `perPixelKeys` names the coordinate arrays that hold one entry per sample.
+ * Other coordinates describe the selection and are taken from the first
+ * result.
+ */
+export function concatQueryResults(
+  results: QueryResult[],
+  variable: string,
+  perPixelKeys: string[]
+): QueryResult {
+  const [first] = results
+  if (results.length === 1) return first
+
+  const coordinates: Record<string, (number | string)[]> = {}
+  for (const key of Object.keys(first.coordinates)) {
+    coordinates[key] = perPixelKeys.includes(key)
+      ? concatArrays(results.map((r) => r.coordinates[key] ?? []))
+      : first.coordinates[key]
+  }
+
+  return {
+    [variable]: concatValues(
+      results.map((r) => r[variable] as QueryDataValues)
+    ),
+    dimensions: first.dimensions,
+    coordinates,
+  }
+}
+
+function concatArrays<T>(parts: T[][]): T[] {
+  let total = 0
+  for (const part of parts) total += part.length
+  const out = new Array<T>(total)
+  let offset = 0
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) out[offset + i] = part[i]
+    offset += part.length
+  }
+  return out
+}
+
+/**
+ * Concatenate flat value arrays, or nested series leaf by leaf. A window that
+ * emitted no samples has no series keys and adds nothing to any leaf.
+ */
+function concatValues(parts: QueryDataValues[]): QueryDataValues {
+  if (parts.every((part) => Array.isArray(part))) {
+    return concatArrays(parts as number[][])
+  }
+  const nested = parts.filter(
+    (part): part is NestedValues => !Array.isArray(part)
+  )
+  const result: NestedValues = {}
+  const has = (target: object, key: string) =>
+    Object.prototype.hasOwnProperty.call(target, key)
+  for (const part of nested) {
+    for (const key of Object.keys(part)) {
+      if (has(result, key)) continue
+      Object.defineProperty(result, key, {
+        value: concatValues(
+          nested.filter((p) => has(p, key)).map((p) => p[key])
+        ),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+  }
+  return result
 }
 
 /**
@@ -595,19 +670,17 @@ async function queryLineString(
  * preserve row-major scan order. The QueryResult contract provides parallel
  * coordinate arrays so consumers index by position, not implicit grid layout.
  *
- * Spatial coordinate arrays (yDim, xDim) and any `perPixelKeys` are
- * concatenated. Other coordinate arrays are taken from the first result
- * unchanged.
+ * Spatial coordinate arrays (yDim, xDim) are concatenated.
+ * Non-spatial coordinate arrays are taken from the first result unchanged.
  */
 export function mergeQueryResults(
   a: QueryResult,
   b: QueryResult,
   variable: string,
   yDim: string,
-  xDim: string,
-  perPixelKeys: string[] = []
+  xDim: string
 ): QueryResult {
-  const spatialKeys = new Set([yDim, xDim, ...perPixelKeys])
+  const spatialKeys = new Set([yDim, xDim])
 
   // Merge coordinates: concatenate spatial, take first for non-spatial
   const coordinates: Record<string, (number | string)[]> = {}
