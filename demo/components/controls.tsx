@@ -406,25 +406,26 @@ const Controls = () => {
 
   const pointDisplayValue = useMemo(() => {
     if (!pointResult) return null
-    const values = collectNumbers(
-      pointResult[currentVariable] as QueryDataValues,
-      fillValue
-    )
-    if (values.length === 0) return null
+    const data = pointResult[currentVariable] as QueryDataValues | undefined
+    if (!data) return null
 
     // Range bands render with month=[1..12] so queryData caches-hit, but the
-    // displayed average must only cover the user-selected month range.
-    const coordMonths = pointResult.coordinates?.month as number[] | undefined
+    // displayed average must only cover the user-selected month range. The
+    // result is keyed by month, so each month is read by its label and a
+    // month with no data here is skipped without shifting the others.
+    const months: number[] = []
+    if (isRangeBand && monthStart !== null && monthEnd !== null) {
+      for (let m = monthStart; m <= monthEnd; m++) months.push(m)
+    }
     const filtered =
-      isRangeBand &&
-      coordMonths &&
-      coordMonths.length === values.length &&
-      monthStart !== null &&
-      monthEnd !== null
-        ? values.filter(
-            (_, i) => coordMonths[i] >= monthStart && coordMonths[i] <= monthEnd
+      months.length > 0 && !Array.isArray(data)
+        ? months.flatMap((m) =>
+            collectNumbers(
+              (data as Record<number, QueryDataValues>)[m] ?? [],
+              fillValue
+            )
           )
-        : values
+        : collectNumbers(data, fillValue)
 
     if (filtered.length === 0) return null
     const mean = filtered.reduce((acc, v) => acc + v, 0) / filtered.length
