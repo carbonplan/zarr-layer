@@ -311,7 +311,19 @@ function densifyAndTransformRing(
   const isClosed =
     ring.length > 1 && first[0] === last[0] && first[1] === last[1]
   const loop = isClosed ? ring : [...ring, first]
-  return densifyAndTransformPath(loop, transformVertex).map((v) => [v.px, v.py])
+  const result = densifyAndTransformPath(loop, transformVertex).map((v) => [
+    v.px,
+    v.py,
+  ])
+  // An unprojectable first vertex drops out at both ends of the loop.
+  if (result.length > 0) {
+    const head = result[0]
+    const tail = result[result.length - 1]
+    if (head[0] !== tail[0] || head[1] !== tail[1]) {
+      result.push([head[0], head[1]])
+    }
+  }
+  return result
 }
 
 /**

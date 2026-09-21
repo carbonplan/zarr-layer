@@ -260,3 +260,33 @@ describe('shiftGeometryIntoExtent', () => {
     ).toBe(partial)
   })
 })
+
+describe('transformGeometryToPixelSpace — unprojectable vertices', () => {
+  it('keeps a ring closed when its first vertex cannot be projected', () => {
+    const ortho = '+proj=ortho +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs'
+    const bounds: Bounds = [-6378137, -6378137, 6378137, 6378137]
+    const result = transformGeometryToPixelSpace(
+      {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [180, 0],
+            [-10, -10],
+            [10, -10],
+            [0, 10],
+            [180, 0],
+          ],
+        ],
+      },
+      bounds,
+      100,
+      100,
+      ortho,
+      false
+    )
+    expect(result).not.toBeNull()
+    const ring = (result as { coordinates: number[][][] }).coordinates[0]
+    expect(ring.length).toBeGreaterThanOrEqual(4)
+    expect(ring[ring.length - 1]).toEqual(ring[0])
+  })
+})
