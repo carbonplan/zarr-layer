@@ -322,3 +322,36 @@ describe('shader program uniform surface', () => {
     }
   })
 })
+
+describe('driver-eliminated uniforms', () => {
+  const build = (gl: ReturnType<typeof createRecordingGl>) =>
+    createShaderProgram(gl, {
+      fragmentShaderSource: maplibreFragmentShaderSource,
+      shaderData: FAKE_SHADER_DATA,
+      projectionMode: 'maplibre-proj4',
+    })
+
+  it('builds the flat source-projected shader without the mercator-only uniforms', () => {
+    // In that variant gl_Position is u_anchor_clip + deltaClip, so shift_x
+    // and u_worldXOffset only reach v_mercatorPos.x, which the default fragment
+    // shader never reads. Mesa eliminates the chain at link time and reports
+    // the uniforms inactive; NVIDIA keeps them. Throwing here made the layer
+    // vanish on Intel/AMD GPUs the moment MapLibre left the globe transition
+    // (opengeos/GeoLibre#2357).
+    // shift_y still feeds the fragment's Y reprojection; null is simulated here.
+    const gl = createRecordingGl({
+      inactiveUniforms: ['shift_x', 'shift_y', 'u_worldXOffset'],
+    })
+    const { shaderProgram } = build(gl)
+    expect(shaderProgram.shiftXLoc).toBeNull()
+    expect(shaderProgram.shiftYLoc).toBeNull()
+    expect(shaderProgram.worldXOffsetLoc).toBeNull()
+  })
+
+  it('still rejects a program missing a uniform every variant samples', () => {
+    const gl = createRecordingGl({ inactiveUniforms: ['opacity'] })
+    expect(() => build(gl)).toThrow(
+      'Failed to get uniform location for opacity'
+    )
+  })
+})

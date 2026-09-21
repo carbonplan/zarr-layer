@@ -215,13 +215,16 @@ const eyeMatrixUpload = (gl: ReturnType<typeof createRecordingGl>) =>
 
 async function frame(
   build: (gl: ReturnType<typeof createRecordingGl>) => RenderContext,
-  { isGlobe = false }: { isGlobe?: boolean } = {}
+  {
+    isGlobe = false,
+    inactiveUniforms,
+  }: { isGlobe?: boolean; inactiveUniforms?: string[] } = {}
 ) {
   const renderer = await makeRenderer()
   seedRegion(renderer)
   renderer.onProjectionChange(isGlobe)
 
-  const gl = createRecordingGl()
+  const gl = createRecordingGl({ inactiveUniforms })
   const stub = stubRenderer(gl)
   const context = build(gl)
   // Uploads happen on the first pass; clear so assertions see the draw frame.
@@ -255,6 +258,19 @@ describe('MapLibre render path', () => {
       const { requests } = await frame((gl) => maplibreContext(gl, transition))
       expect(requests.every((r) => !r.useMapbox)).toBe(true)
     }
+  })
+
+  it('still draws in mercator when the driver drops the mercator-only uniforms', async () => {
+    // The flat source-projected shader positions vertices from
+    // u_anchor_clip + deltaClip; shift_x/u_worldXOffset only feed
+    // v_mercatorPos.x, which the default fragment shader ignores.
+    // shift_y still feeds the fragment's Y reprojection; null is simulated here.
+    // The frame must draw anyway rather than throw out of render().
+    const { gl, mode } = await frame((g) => maplibreContext(g, 0), {
+      inactiveUniforms: ['shift_x', 'shift_y', 'u_worldXOffset'],
+    })
+    expect(mode).toBe('maplibre-proj4')
+    expect(gl.callsTo('drawElements').length).toBeGreaterThan(0)
   })
 
   it('draws every world copy in mercator', async () => {

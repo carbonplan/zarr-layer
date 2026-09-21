@@ -22,9 +22,9 @@ export interface ShaderProgram {
   scaleLoc: WebGLUniformLocation
   scaleXLoc: WebGLUniformLocation
   scaleYLoc: WebGLUniformLocation
-  shiftXLoc: WebGLUniformLocation
-  shiftYLoc: WebGLUniformLocation
-  worldXOffsetLoc: WebGLUniformLocation
+  shiftXLoc: WebGLUniformLocation | null
+  shiftYLoc: WebGLUniformLocation | null
+  worldXOffsetLoc: WebGLUniformLocation | null
   matrixLoc: WebGLUniformLocation | null
   // Eye-coords uniforms — only the source-projected flat (wgs84) shader uses
   // them; other variants drop them so these resolve to null and uploads no-op.
@@ -215,9 +215,18 @@ export function createShaderProgram(
     scaleLoc: mustGetUniformLocation(gl, program, 'scale'),
     scaleXLoc: mustGetUniformLocation(gl, program, 'scale_x'),
     scaleYLoc: mustGetUniformLocation(gl, program, 'scale_y'),
-    shiftXLoc: mustGetUniformLocation(gl, program, 'shift_x'),
-    shiftYLoc: mustGetUniformLocation(gl, program, 'shift_y'),
-    worldXOffsetLoc: mustGetUniformLocation(gl, program, 'u_worldXOffset'),
+    // In the source-projected flat (wgs84) shader gl_Position comes from
+    // u_anchor_clip + deltaClip, so shift_x/u_worldXOffset only feed
+    // v_mercatorPos.x, which the default fragment shader never reads. Mesa
+    // (Intel/AMD/llvmpipe) eliminates that chain at link time and reports the
+    // uniforms inactive, which made mustGetUniformLocation throw on every
+    // frame from the moment the map left the globe transition, so the layer
+    // silently vanished at zoom >= 12 on those GPUs. A null location is a
+    // no-op for gl.uniform1f, so look these up without throwing.
+    // shift_y still feeds v_mercatorPos.y in the fragment reprojection branch.
+    shiftXLoc: gl.getUniformLocation(program, 'shift_x'),
+    shiftYLoc: gl.getUniformLocation(program, 'shift_y'),
+    worldXOffsetLoc: gl.getUniformLocation(program, 'u_worldXOffset'),
     // MapLibre modes use projectTile instead of matrix. The Mapbox flat
     // source-projected (wgs84) shader uses u_eye_matrix, not matrix, so the
     // compiler drops `matrix` there too — use the non-throwing lookup. All
