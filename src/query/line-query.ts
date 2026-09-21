@@ -49,6 +49,7 @@ export function segmentLengthMeters(
   lat1: number
 ): number {
   const span = Math.max(Math.abs(lon1 - lon0), Math.abs(lat1 - lat0))
+  if (!Number.isFinite(span)) return NaN
   const steps = Math.max(1, Math.ceil(span / MAX_CHORD_DEGREES))
   if (steps === 1) return haversineMeters(lon0, lat0, lon1, lat1)
 
@@ -66,10 +67,20 @@ export function segmentLengthMeters(
   return total
 }
 
+interface ClippedSegment {
+  t0: number
+  t1: number
+  /** Grid edge the segment enters and leaves through, when it is clipped. */
+  entry: GridEdge | null
+  exit: GridEdge | null
+}
+
+type GridEdge = 'left' | 'right' | 'top' | 'bottom'
+
 /**
  * Liang–Barsky clip of a segment against the rectangle [0, width] x
- * [0, height]. Returns the parameter range of the part inside, or null when
- * the segment misses the rectangle.
+ * [0, height]. Returns the parameter range of the part inside and the edges
+ * it was cut at, or null when the segment misses the rectangle.
  */
 function clipSegmentToGrid(
   ax: number,
@@ -78,44 +89,80 @@ function clipSegmentToGrid(
   by: number,
   width: number,
   height: number
-): [number, number] | null {
+): ClippedSegment | null {
   const dx = bx - ax
   const dy = by - ay
-  let t0 = 0
-  let t1 = 1
-  const edges: [number, number][] = [
-    [-dx, ax],
-    [dx, width - ax],
-    [-dy, ay],
-    [dy, height - ay],
+  const clip: ClippedSegment = { t0: 0, t1: 1, entry: null, exit: null }
+  const edges: [number, number, GridEdge][] = [
+    [-dx, ax, 'left'],
+    [dx, width - ax, 'right'],
+    [-dy, ay, 'top'],
+    [dy, height - ay, 'bottom'],
   ]
-  for (const [p, q] of edges) {
+  for (const [p, q, edge] of edges) {
     if (p === 0) {
       if (q < 0) return null
       continue
     }
     const r = q / p
     if (p < 0) {
-      if (r > t1) return null
-      if (r > t0) t0 = r
+      if (r > clip.t1) return null
+      if (r > clip.t0) {
+        clip.t0 = r
+        clip.entry = edge
+      }
     } else {
-      if (r < t0) return null
-      if (r < t1) t1 = r
+      if (r < clip.t0) return null
+      if (r < clip.t1) {
+        clip.t1 = r
+        clip.exit = edge
+      }
     }
   }
-  return [t0, t1]
+  return clip
 }
 
 /**
- * Split a lon/lat line at the antimeridian into ordered pieces whose
- * longitudes all lie within [-180, 180].
+ * Reject line coordinates the tracer cannot walk in bounded time: anything
+ * non-finite, and longitudes far enough out that unwrapping them would mean
+ * circling the globe many times over.
+ */
+export function validateLineCoordinates(coords: number[][]): void {
+  for (const position of coords) {
+    const lon = position?.[0]
+    const lat = position?.[1]
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+      throw new RangeError(
+        '[ZarrLayer] LineString coordinates must be finite [lon, lat] pairs'
+      )
+    }
+    if (Math.abs(lon) > MAX_LINE_LONGITUDE) {
+      throw new RangeError(
+        `[ZarrLayer] LineString longitudes must lie within ±${MAX_LINE_LONGITUDE}`
+      )
+    }
+  }
+}
+
+const MAX_LINE_LONGITUDE = 720
+
+/**
+ * Split a lon/lat line into ordered pieces whose longitudes all lie within
+ * one 360-degree frame, [westEdge, westEdge + 360]. The default frame is
+ * [-180, 180], which splits at the antimeridian. A raster whose extent
+ * reaches past ±180 passes its own west edge, so pieces land on its grid.
  *
  * Longitude semantics match polygon queries: a line whose vertices all lie in
  * [-180, 180] is read literally, so a segment from 170 to -170 runs across
  * the prime meridian. Any vertex outside that range marks an explicit
  * crossing, and edges are unwrapped for continuity before splitting.
+ *
+ * A line that only touches a frame boundary and turns back is not split.
  */
-export function splitLineAtAntimeridian(coords: number[][]): number[][][] {
+export function splitLineAtAntimeridian(
+  coords: number[][],
+  westEdge = -180
+): number[][][] {
   if (coords.length === 0) return []
 
   const explicit = coords.some(([lon]) => lon > 180 || lon < -180)
@@ -130,41 +177,55 @@ export function splitLineAtAntimeridian(coords: number[][]): number[][][] {
     unwrapped.push([lon, coords[i][1]])
   }
 
-  const pieces: number[][][] = []
-  // Frame k holds longitudes in (k*360 - 180, k*360 + 180], except frame 0
-  // which also owns -180, so both ends of the literal range stay unsplit.
+  // Frame k holds (westEdge + 360k, westEdge + 360(k + 1)], except frame 0
+  // which also owns its west edge, so both ends of that range stay unsplit.
   const frameOf = (lon: number) => {
-    const f = Math.floor((lon + 180) / 360)
-    return lon - f * 360 === -180 && f > 0 ? f - 1 : f
+    const f = Math.floor((lon - westEdge) / 360)
+    return lon - f * 360 === westEdge && f > 0 ? f - 1 : f
   }
-  let piece: number[][] = []
-  let frame = frameOf(unwrapped[0][0])
   const shift = (lon: number, f: number) => lon - f * 360
 
-  piece.push([shift(unwrapped[0][0], frame), unwrapped[0][1]])
+  const pieces: { frame: number; coords: number[][] }[] = []
+  let frame = frameOf(unwrapped[0][0])
+  let piece: number[][] = [[shift(unwrapped[0][0], frame), unwrapped[0][1]]]
   for (let i = 1; i < unwrapped.length; i++) {
     const [lon0, lat0] = unwrapped[i - 1]
     const [lon1, lat1] = unwrapped[i]
     const targetFrame = frameOf(lon1)
     // Walk across every frame boundary the edge crosses, in order.
     while (frame !== targetFrame) {
-      const step = targetFrame > frame ? 1 : 0
-      const boundary = frame * 360 + (step ? 180 : -180)
+      const up = targetFrame > frame
+      const boundary = westEdge + 360 * (up ? frame + 1 : frame)
       const t = (boundary - lon0) / (lon1 - lon0)
       const latB = lat0 + t * (lat1 - lat0)
       piece.push([shift(boundary, frame), latB])
-      pieces.push(piece)
-      frame += targetFrame > frame ? 1 : -1
+      pieces.push({ frame, coords: piece })
+      frame += up ? 1 : -1
       piece = [[shift(boundary, frame), latB]]
     }
     piece.push([shift(lon1, frame), lat1])
   }
-  pieces.push(piece)
+  pieces.push({ frame, coords: piece })
 
-  if (pieces.length === 1) return pieces
-  const isDegenerate = (p: number[][]) =>
+  if (pieces.length === 1) return [pieces[0].coords]
+
+  // A piece that is a single repeated point is a touch of the boundary, not
+  // a crossing. Dropping it leaves its neighbours in the same frame, and
+  // they rejoin into one continuous piece.
+  const isPoint = (p: number[][]) =>
     p.every(([lon, lat]) => lon === p[0][0] && lat === p[0][1])
-  return pieces.filter((p) => !isDegenerate(p))
+  const merged: { frame: number; coords: number[][] }[] = []
+  for (const current of pieces) {
+    if (isPoint(current.coords)) continue
+    const previous = merged[merged.length - 1]
+    if (previous && previous.frame === current.frame) {
+      previous.coords = [...previous.coords, ...current.coords]
+    } else {
+      merged.push({ frame: current.frame, coords: [...current.coords] })
+    }
+  }
+  if (merged.length === 0) return [pieces[0].coords]
+  return merged.map((p) => p.coords)
 }
 
 /** A grid cell the line passes through, with distance along the line. */
@@ -175,11 +236,22 @@ export interface TracedCell {
   distance: number
 }
 
+/** A stretch of a line that projects onto the raster's grid. */
+export interface PixelPathSection {
+  path: DensifiedVertex[]
+  /** Meters of line skipped between the previous section and this one. */
+  gapBefore: number
+}
+
 /**
  * Project a lon/lat line into the raster's pixel grid, densifying edges so
  * curvature under nonlinear projections is preserved.
+ *
+ * A vertex the projection cannot place breaks the line there. The edges on
+ * either side of it are left out, never bridged, and their length is carried
+ * in `gapBefore` and `trailingGap` so distance stays continuous.
  */
-export function lineToPixelPath(
+export function lineToPixelPaths(
   coords: number[][],
   sourceBounds: Bounds,
   width: number,
@@ -187,8 +259,8 @@ export function lineToPixelPath(
   proj4def: string,
   latIsAscending?: boolean,
   cachedTransformer?: CachedTransformer
-): DensifiedVertex[] {
-  return densifyAndTransformPath(coords, (lon, lat) => {
+): { sections: PixelPathSection[]; trailingGap: number } {
+  const transformVertex = (lon: number, lat: number): [number, number] => {
     const px = lonLatToPixel(
       lon,
       lat,
@@ -200,7 +272,47 @@ export function lineToPixelPath(
       cachedTransformer
     )
     return px ?? [NaN, NaN]
+  }
+  const projects = coords.map(([lon, lat]) => {
+    const [px, py] = transformVertex(lon, lat)
+    return Number.isFinite(px) && Number.isFinite(py)
   })
+
+  const sections: PixelPathSection[] = []
+  let gap = 0
+  let gapBeforeRun = 0
+  let run: number[][] = []
+  const flush = () => {
+    if (run.length === 0) return
+    sections.push({
+      path: densifyAndTransformPath(run, transformVertex),
+      gapBefore: gapBeforeRun,
+    })
+    run = []
+  }
+
+  for (let i = 0; i < coords.length; i++) {
+    if (i > 0 && !(projects[i] && projects[i - 1])) {
+      gap += segmentLengthMeters(
+        coords[i - 1][0],
+        coords[i - 1][1],
+        coords[i][0],
+        coords[i][1]
+      )
+    }
+    if (!projects[i]) {
+      flush()
+      continue
+    }
+    if (run.length === 0) {
+      gapBeforeRun = gap
+      gap = 0
+    }
+    run.push(coords[i])
+  }
+  flush()
+
+  return { sections, trailingGap: gap }
 }
 
 /**
@@ -250,9 +362,14 @@ export function traceLineCells(
     cells.push({ x, y, distance })
   }
 
-  if (path.length === 1) {
+  const isSinglePoint = path.every(
+    (v) => v.px === path[0].px && v.py === path[0].py
+  )
+  if (isSinglePoint) {
     const v = path[0]
     emit(Math.floor(v.px), Math.floor(v.py), v.lon, v.lat)
+    const last = path[path.length - 1]
+    advanceTo(last.lon, last.lat)
     return { cells, endDistance: distance }
   }
 
@@ -260,22 +377,37 @@ export function traceLineCells(
     const a = path[i]
     const b = path[i + 1]
 
+    // A repeated vertex covers no ground, so it visits nothing new.
+    if (a.px === b.px && a.py === b.py) {
+      advanceTo(b.lon, b.lat)
+      continue
+    }
+
     const clip = clipSegmentToGrid(a.px, a.py, b.px, b.py, width, height)
     if (!clip) {
       forgetLastCell()
       advanceTo(b.lon, b.lat)
       continue
     }
-    const [t0, t1] = clip
-    const at = (t: number) => ({
-      px: a.px + t * (b.px - a.px),
-      py: a.py + t * (b.py - a.py),
-      lon: a.lon + t * (b.lon - a.lon),
-      lat: a.lat + t * (b.lat - a.lat),
-    })
-    const start = t0 > 0 ? at(t0) : a
-    const end = t1 < 1 ? at(t1) : b
-    if (t0 > 0) forgetLastCell()
+    const { t0, t1 } = clip
+    // A clipped end sits exactly on the edge it was cut at, however far
+    // outside the grid the segment started.
+    const at = (t: number, edge: GridEdge | null): DensifiedVertex => {
+      const v = {
+        px: a.px + t * (b.px - a.px),
+        py: a.py + t * (b.py - a.py),
+        lon: a.lon + t * (b.lon - a.lon),
+        lat: a.lat + t * (b.lat - a.lat),
+      }
+      if (edge === 'left') v.px = 0
+      else if (edge === 'right') v.px = width
+      else if (edge === 'top') v.py = 0
+      else if (edge === 'bottom') v.py = height
+      return v
+    }
+    const start = clip.entry ? at(t0, clip.entry) : a
+    const end = clip.exit ? at(t1, clip.exit) : b
+    if (clip.entry) forgetLastCell()
 
     const dx = end.px - start.px
     const dy = end.py - start.py
@@ -298,15 +430,15 @@ export function traceLineCells(
     emit(x, y, start.lon, start.lat)
 
     for (;;) {
-      let t: number
-      if (tMaxX < tMaxY) {
-        if (tMaxX >= 1) break
-        t = tMaxX
+      const t = Math.min(tMaxX, tMaxY)
+      if (t >= 1) break
+      // Through an exact cell corner the line steps diagonally, so it never
+      // samples a cell it only touches at a point.
+      if (tMaxX === t) {
         x += stepX
         tMaxX += tDeltaX
-      } else {
-        if (tMaxY >= 1) break
-        t = tMaxY
+      }
+      if (tMaxY === t) {
         y += stepY
         tMaxY += tDeltaY
       }
@@ -318,7 +450,7 @@ export function traceLineCells(
       )
     }
 
-    if (t1 < 1) forgetLastCell()
+    if (clip.exit) forgetLastCell()
     advanceTo(b.lon, b.lat)
   }
 
@@ -382,18 +514,4 @@ export function groupCellsIntoRuns(
   flush()
 
   return runs
-}
-
-/** Total length of a lon/lat line in meters. */
-export function lineLengthMeters(coords: number[][]): number {
-  let total = 0
-  for (let i = 1; i < coords.length; i++) {
-    total += segmentLengthMeters(
-      coords[i - 1][0],
-      coords[i - 1][1],
-      coords[i][0],
-      coords[i][1]
-    )
-  }
-  return total
 }

@@ -186,7 +186,7 @@ const result = await layer.queryData(
 )
 ```
 
-A non-empty array value nests the result by label, whatever its length: `{ time: [3] }` returns `{ 3: number[] }`. Repeated values collapse into one series. A single value returns a flat `number[]`, and so does an empty array or a dimension left out of the selector, both read at index 0. Selector keys that name no dimension in the store are ignored.
+A non-empty array value nests the result by label, whatever its length: `{ time: [3] }` returns `{ 3: number[] }`. Repeated values collapse into one series. A single value returns a flat `number[]`, and so does an empty array or a dimension left out of the selector, both read at index 0.
 
 **Type options:**
 
@@ -310,7 +310,7 @@ const result = await layer.queryData({
 // }
 ```
 
-A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order. A cell is sampled once per pass, so a line that doubles back samples it again. Cells with no data are left out, and `distance` shows the gap. Alongside the spatial coordinates it returns `distance`, the distance in meters along the line from its start to where it enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
+A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order. A cell is sampled once per pass, so a line that doubles back samples it again. Cells with no data are left out, and `distance` shows the gap. A line through an exact cell corner steps diagonally and does not sample the cells it only touches there. Coordinates must be finite, with longitudes within ±720, or the query throws a `RangeError`. Alongside the spatial coordinates it returns `distance`, the distance in meters along the line from its start to where it enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
 
 ```ts
 // Profile along a line
@@ -338,7 +338,7 @@ Every other key in `coordinates` is a dimension name from the store. A `LineStri
 
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). A cell with no data is left out of the result.
 
-With a multi-value selector such as `{ time: [0, 1, 2] }`, a cell is kept when it has data in at least one series, and the series without data hold `NaN` at that position. Every series therefore has the same length as the coordinate arrays, and index `i` refers to the same cell in all of them. Skip non-finite values when aggregating. `JSON.stringify` writes `NaN` as `null`.
+With a multi-value selector such as `{ time: [0, 1, 2] }`, a cell is kept when it has data in at least one series, and the series without data hold `NaN` at that position. Every series therefore has the same length, and index `i` refers to the same cell in all of them and in the coordinate arrays, which are empty when `includeSpatialCoordinates` is `false`. Skip non-finite values when aggregating. `JSON.stringify` writes `NaN` as `null`.
 
 ### query resolution
 

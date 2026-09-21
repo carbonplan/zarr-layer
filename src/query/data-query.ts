@@ -35,10 +35,10 @@ import {
 } from './query-utils'
 import {
   groupCellsIntoRuns,
-  lineLengthMeters,
-  lineToPixelPath,
+  lineToPixelPaths,
   splitLineAtAntimeridian,
   traceLineCells,
+  validateLineCoordinates,
   type TracedCell,
 } from './line-query'
 import { QUERY_LINE_RUN_MAX_PX } from '../constants'
@@ -215,6 +215,9 @@ export async function queryData(
     ? normalizeSelector(selector)
     : context.selector
   assertSelectorKeysAreDimensions(normalizedSelector, desc.dimIndices)
+  if (geometry.type === 'LineString') {
+    validateLineCoordinates(geometry.coordinates)
+  }
   const lineDistanceKey =
     geometry.type === 'LineString'
       ? resolveLineDistanceKey(desc.dimensions, desc.dimIndices, options)
@@ -464,38 +467,44 @@ async function queryLineString(
     context.projection.kind === 'epsg4326' ||
     context.projection.kind === 'epsg3857'
   const queryLimits = level.xyLimits ?? context.xyLimits
-  let pieces = supportsWrappedLongitude
-    ? splitLineAtAntimeridian(coords)
-    : [coords]
-  if (pieces.length > 1) {
+  const extentPastAntimeridian =
+    context.projection.kind === 'epsg4326' &&
+    rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
+
+  let pieces: number[][][]
+  if (!supportsWrappedLongitude) {
+    pieces = [coords]
     if (
-      context.projection.kind === 'epsg4326' &&
-      rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
+      coords.some(([lon]) => lon > 180 || lon < -180) &&
+      !context.antimeridianWarnings.has('proj4-crossing')
     ) {
+      context.antimeridianWarnings.add('proj4-crossing')
+      console.warn(
+        'Antimeridian-crossing queries are not supported for proj4 projections; results may be incorrect'
+      )
+    }
+  } else if (extentPastAntimeridian && queryLimits) {
+    if (queryLimits.xMin < queryLimits.xMax) {
+      // The raster's seam sits at its own west edge, so pieces are cut there
+      // and land on its grid wherever it reaches past ±180.
+      pieces = splitLineAtAntimeridian(coords, queryLimits.xMin)
+    } else {
+      pieces = [coords]
       if (!context.antimeridianWarnings.has('raster-extent-crossing')) {
         context.antimeridianWarnings.add('raster-extent-crossing')
         console.warn(
           'Antimeridian-crossing queries are not supported for rasters whose own extent crosses the antimeridian; results may be incorrect'
         )
       }
-      pieces = [coords]
     }
-  } else if (
-    !supportsWrappedLongitude &&
-    coords.some(([lon]) => lon > 180 || lon < -180)
-  ) {
-    if (!context.antimeridianWarnings.has('proj4-crossing')) {
-      context.antimeridianWarnings.add('proj4-crossing')
-      console.warn(
-        'Antimeridian-crossing queries are not supported for proj4 projections; results may be incorrect'
-      )
-    }
+  } else {
+    pieces = splitLineAtAntimeridian(coords)
   }
 
   const cells: TracedCell[] = []
   let distance = 0
   for (const piece of pieces) {
-    const path = lineToPixelPath(
+    const { sections, trailingGap } = lineToPixelPaths(
       piece,
       sourceBounds,
       level.width,
@@ -504,13 +513,17 @@ async function queryLineString(
       context.latIsAscending,
       context.projection.toWGS84 ?? undefined
     )
-    if (path.length === 0) {
-      distance += lineLengthMeters(piece)
-      continue
+    for (const section of sections) {
+      const traced = traceLineCells(
+        section.path,
+        level.width,
+        level.height,
+        distance + section.gapBefore
+      )
+      for (const cell of traced.cells) cells.push(cell)
+      distance = traced.endDistance
     }
-    const traced = traceLineCells(path, level.width, level.height, distance)
-    for (const cell of traced.cells) cells.push(cell)
-    distance = traced.endDistance
+    distance += trailingGap
   }
 
   const runs = groupCellsIntoRuns(cells, QUERY_LINE_RUN_MAX_PX)

@@ -4,6 +4,7 @@ import type { QueryGeometry } from './types'
 import { ZarrStore } from '../zarr-store'
 import { createProjectionContext } from '../projection-utils'
 import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
+import * as zarr from 'zarrita'
 
 /**
  * LineString queries end to end against the in-memory Zarr fixture.
@@ -15,6 +16,11 @@ import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
  * The fetch run size is pinned to 3 pixels so an 8-wide line reads several
  * windows and the runs have to be stitched back in order.
  */
+
+vi.mock('zarrita', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('zarrita')>()
+  return { ...actual, get: vi.fn(actual.get) }
+})
 
 vi.mock('../constants', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../constants')>()),
@@ -100,6 +106,23 @@ describe('queryData LineString', () => {
     expect(result.coordinates.lat).toEqual(Array(8).fill(67.5))
     expect(result.coordinates.lon).toEqual([
       -157.5, -112.5, -67.5, -22.5, 22.5, 67.5, 112.5, 157.5,
+    ])
+  })
+
+  it('reads a long line as several bounded windows', async () => {
+    const context = await makeContext()
+    const get = vi.mocked(zarr.get)
+    get.mockClear()
+    await queryData(context, line([-157.5, 67.5], [157.5, 67.5]), { time: 10 })
+
+    const windows = get.mock.calls
+      .map(([, slices]) => slices as unknown[])
+      .filter((slices) => slices?.length === 3)
+      .map((slices) => slices[2] as { start: number; stop: number })
+    expect(windows.map((w) => [w.start, w.stop])).toEqual([
+      [0, 3],
+      [3, 6],
+      [6, 8],
     ])
   })
 
@@ -334,6 +357,84 @@ describe('queryData LineString', () => {
       { time: 10 }
     )
     expect(result.temp).toEqual([0])
+  })
+
+  it('rejects coordinates that cannot be traced instead of hanging', async () => {
+    const context = await makeContext()
+    for (const bad of [NaN, Infinity, 1e20]) {
+      await expect(
+        queryData(context, line([0, 0], [bad, 0]), { time: 10 })
+      ).rejects.toThrow(RangeError)
+    }
+  })
+
+  it('samples a cell once when the line only touches the antimeridian', async () => {
+    const context = await makeContext()
+    const result = await queryData(
+      context,
+      line([190, 67.5], [180, 67.5], [190, 67.5]),
+      { time: 10 }
+    )
+    expect(result.temp).toEqual([0])
+  })
+
+  it('follows a raster extent that reaches past the antimeridian', async () => {
+    // Cell centers at -180..135 put the edges at -202.5..157.5, so the first
+    // column also covers 157.5..180 on the far side.
+    const base = await makeContext()
+    const xyLimits = { ...WORLD, xMin: -202.5, xMax: 157.5 }
+    const context: QueryContext = {
+      ...base,
+      xyLimits,
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits,
+      }),
+    }
+    const result = await queryData(context, line([150, 67.5], [170, 67.5]), {
+      time: 10,
+    })
+    expect(result.temp).toEqual([7, 0])
+  })
+
+  it('rejects selector keys that are not store dimensions', async () => {
+    const context = await makeContext()
+    await expect(
+      queryData(context, line([-157.5, 67.5], [-67.5, 67.5]), {
+        time: 10,
+        junk: [1],
+      })
+    ).rejects.toThrow(/'junk'.*\[time\]/)
+  })
+
+  it('selects a dimension by its own name, with no time alias', async () => {
+    const context = await makeContext(undefined, {
+      extra: 'forecast_time',
+      lat: 'lat',
+      lon: 'lon',
+    })
+    const geometry = line([-157.5, 67.5], [-67.5, 67.5])
+
+    const named = await queryData(context, geometry, { forecast_time: [20] })
+    expect(named.temp).toEqual({ 20: [32, 33, 34] })
+    expect(named.coordinates.forecast_time).toEqual([20])
+
+    await expect(queryData(context, geometry, { time: [20] })).rejects.toThrow(
+      /'time'.*\[forecast_time\]/
+    )
+  })
+
+  it('collapses repeated selector values into one series', async () => {
+    const context = await makeContext()
+    const result = await queryData(
+      context,
+      line([-157.5, 67.5], [-67.5, 67.5]),
+      { time: [10, 10] }
+    )
+    expect(result.temp).toEqual({ 10: [0, 1, 2] })
+    expect(result.coordinates.time).toEqual([10])
+    expect(result.coordinates.distance).toHaveLength(3)
   })
 
   it('returns an empty result for a line entirely off the raster', async () => {

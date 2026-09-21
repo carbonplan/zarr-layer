@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest'
 import {
   groupCellsIntoRuns,
   haversineMeters,
-  lineToPixelPath,
+  lineToPixelPaths,
   segmentLengthMeters,
   splitLineAtAntimeridian,
   traceLineCells,
+  validateLineCoordinates,
   type TracedCell,
 } from './line-query'
 import type { DensifiedVertex } from './query-utils'
@@ -96,6 +97,38 @@ describe('splitLineAtAntimeridian', () => {
     ).toHaveLength(1)
   })
 
+  it('does not split a line that touches the boundary from the far frame', () => {
+    const pieces = splitLineAtAntimeridian([
+      [190, 0],
+      [180, 0],
+      [190, 0],
+    ])
+    expect(pieces).toHaveLength(1)
+    expect(pieces[0][0]).toEqual([-170, 0])
+    expect(pieces[0][pieces[0].length - 1]).toEqual([-170, 0])
+  })
+
+  it('splits at a raster seam other than the antimeridian', () => {
+    // Frame [-202.5, 157.5]: 170 belongs one turn west, at -190.
+    const pieces = splitLineAtAntimeridian(
+      [
+        [150, 0],
+        [170, 0],
+      ],
+      -202.5
+    )
+    expect(pieces).toEqual([
+      [
+        [150, 0],
+        [157.5, 0],
+      ],
+      [
+        [-202.5, 0],
+        [-190, 0],
+      ],
+    ])
+  })
+
   it('crosses back and forth into alternating pieces', () => {
     const pieces = splitLineAtAntimeridian([
       [170, 0],
@@ -120,6 +153,38 @@ describe('splitLineAtAntimeridian', () => {
   })
 })
 
+describe('validateLineCoordinates', () => {
+  it('rejects coordinates the tracer could not walk in bounded time', () => {
+    for (const bad of [NaN, Infinity, -Infinity, 1e20]) {
+      expect(() =>
+        validateLineCoordinates([
+          [0, 0],
+          [bad, 0],
+        ])
+      ).toThrow(RangeError)
+    }
+    expect(() =>
+      validateLineCoordinates([
+        [0, 0],
+        [0, NaN],
+      ])
+    ).toThrow(RangeError)
+    expect(() => validateLineCoordinates([[0, 0], [] as number[]])).toThrow(
+      RangeError
+    )
+  })
+
+  it('accepts explicitly unwrapped longitudes', () => {
+    expect(() =>
+      validateLineCoordinates([
+        [170, 0],
+        [190, 0],
+        [-200, 95],
+      ])
+    ).not.toThrow()
+  })
+})
+
 describe('traceLineCells', () => {
   it('visits each cell of a horizontal line once, in order', () => {
     const { cells } = traceLineCells(
@@ -139,23 +204,112 @@ describe('traceLineCells', () => {
     ])
   })
 
-  it('walks a diagonal without skipping corners', () => {
-    const { cells } = traceLineCells(
+  it('steps diagonally through exact cell corners, whatever the direction or vertices', () => {
+    const diagonal = [
+      [0, 0],
+      [1, 1],
+      [2, 2],
+    ]
+    const forward = traceLineCells(
       path([
         [0.5, 0.5],
-        [3.5, 3.5],
+        [2.5, 2.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(forward.cells)).toEqual(diagonal)
+
+    const viaCorner = traceLineCells(
+      path([
+        [0.5, 0.5],
+        [1, 1],
+        [2.5, 2.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(viaCorner.cells)).toEqual(diagonal)
+
+    const backward = traceLineCells(
+      path([
+        [2.5, 2.5],
+        [0.5, 0.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(backward.cells)).toEqual([...diagonal].reverse())
+  })
+
+  it('steps through edge-adjacent cells on an off-corner diagonal', () => {
+    const { cells } = traceLineCells(
+      path([
+        [0.5, 0.25],
+        [3.5, 3.25],
       ]),
       10,
       10
     )
-    const set = new Set(cells.map((c) => `${c.x},${c.y}`))
-    for (const c of ['0,0', '1,1', '2,2', '3,3']) expect(set.has(c)).toBe(true)
-    // Every step moves to an edge-adjacent cell.
     for (let i = 1; i < cells.length; i++) {
       const dx = Math.abs(cells[i].x - cells[i - 1].x)
       const dy = Math.abs(cells[i].y - cells[i - 1].y)
       expect(dx + dy).toBe(1)
     }
+    expect(cells).toHaveLength(7)
+  })
+
+  it('ignores a repeated vertex, even one sitting on a cell edge', () => {
+    const plain = traceLineCells(
+      path([
+        [0.5, 0.5],
+        [1, 0.5],
+        [0.5, 0.5],
+      ]),
+      3,
+      3
+    )
+    const repeated = traceLineCells(
+      path([
+        [0.5, 0.5],
+        [1, 0.5],
+        [1, 0.5],
+        [0.5, 0.5],
+      ]),
+      3,
+      3
+    )
+    expect(xy(plain.cells)).toEqual([[0, 0]])
+    expect(xy(repeated.cells)).toEqual([[0, 0]])
+    expect(repeated.endDistance).toBeCloseTo(plain.endDistance)
+  })
+
+  it('keeps every cell when the segment starts absurdly far outside', () => {
+    const { cells } = traceLineCells(
+      [
+        { px: -1e17, py: 0.5, lon: 0, lat: 0 },
+        { px: 1e17, py: 0.5, lon: 1, lat: 0 },
+      ],
+      3,
+      3
+    )
+    expect(xy(cells)).toEqual([
+      [0, 0],
+      [1, 0],
+      [2, 0],
+    ])
+  })
+
+  it('samples nothing for a line lying exactly on the far grid edge', () => {
+    const right = traceLineCells(
+      path([
+        [3, 0.5],
+        [3, 2.5],
+      ]),
+      3,
+      3
+    )
+    expect(right.cells).toEqual([])
   })
 
   it('does not repeat the shared cell at a vertex between segments', () => {
@@ -352,9 +506,9 @@ describe('segmentLengthMeters', () => {
   })
 })
 
-describe('lineToPixelPath', () => {
+describe('lineToPixelPaths', () => {
   it('projects a lon/lat line into the pixel grid and keeps lon/lat', () => {
-    const path = lineToPixelPath(
+    const { sections, trailingGap } = lineToPixelPaths(
       [
         [-180, 90],
         [180, -90],
@@ -365,9 +519,41 @@ describe('lineToPixelPath', () => {
       'EPSG:4326',
       false
     )
+    expect(sections).toHaveLength(1)
+    expect(sections[0].gapBefore).toBe(0)
+    expect(trailingGap).toBe(0)
+    const path = sections[0].path
     expect(path[0]).toMatchObject({ px: 0, py: 0, lon: -180, lat: 90 })
     const last = path[path.length - 1]
     expect(last).toMatchObject({ px: 10, py: 10, lon: 180, lat: -90 })
+  })
+
+  it('breaks the line at a vertex the projection cannot place', () => {
+    // Orthographic centred on 0,0 cannot place the far side of the globe.
+    const ortho = '+proj=ortho +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs'
+    const bounds: Bounds = [-6378137, -6378137, 6378137, 6378137]
+    const { sections, trailingGap } = lineToPixelPaths(
+      [
+        [-10, 0],
+        [180, 0],
+        [10, 0],
+      ],
+      bounds,
+      100,
+      100,
+      ortho,
+      false
+    )
+    expect(sections).toHaveLength(2)
+    expect(sections[0].path).toHaveLength(1)
+    expect(sections[1].path).toHaveLength(1)
+    expect(sections[0].gapBefore).toBe(0)
+    // Both edges touching the lost vertex are skipped, and their length kept.
+    expect(sections[1].gapBefore).toBeCloseTo(
+      segmentLengthMeters(-10, 0, 180, 0) + segmentLengthMeters(180, 0, 10, 0),
+      0
+    )
+    expect(trailingGap).toBe(0)
   })
 })
 
