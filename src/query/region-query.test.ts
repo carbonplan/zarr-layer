@@ -155,6 +155,34 @@ describe('queryRegion — value handling', () => {
     expect(result.coordinates.lat).toHaveLength(2)
   })
 
+  it('treats labels that shadow Object.prototype as ordinary series names', () => {
+    const data = new Float32Array([1, 2, 3, 4]) // 2x1, two series per pixel
+    const result = queryRegion(
+      'v',
+      rect(-180, -90, 180, 90),
+      { band: ['constructor', '__proto__'] },
+      data,
+      2,
+      1,
+      ['band', 'lat', 'lon'],
+      {},
+      WORLD,
+      'EPSG:4326',
+      2,
+      [['constructor'], ['__proto__']],
+      ['band'],
+      false
+    )
+    const values = result.v as Record<string, number[]>
+    expect(Object.keys(values).sort()).toEqual(['__proto__', 'constructor'])
+    expect(
+      Object.getOwnPropertyDescriptor(values, 'constructor')?.value
+    ).toEqual([1, 3])
+    expect(Object.getOwnPropertyDescriptor(values, '__proto__')?.value).toEqual(
+      [2, 4]
+    )
+  })
+
   it('reports spatial dimension names and coordinate arrays', () => {
     const { data } = indexRamp(4, 4)
     const result = queryRegion(

@@ -50,6 +50,40 @@ export function assertSelectorKeysAreDimensions(
 }
 
 /**
+ * The values a selection spreads across channels, or null when it picks a
+ * single index. Rendering needs two or more values to pack channels. Queries
+ * label every non-empty array, with repeats collapsed.
+ */
+function multiValueSelection<T>(
+  selected: T | T[],
+  queryLabelling?: boolean
+): T[] | null {
+  if (!Array.isArray(selected)) return null
+  if (!queryLabelling) return selected.length > 1 ? selected : null
+  const unique = [...new Set(selected)]
+  return unique.length > 0 ? unique : null
+}
+
+/**
+ * The dimensions a query selector spreads across labelled series, and their
+ * labels, under the same rules `buildSliceArgsForSelector` applies to a read.
+ */
+export function findQueryMultiValueDims(
+  selector: NormalizedSelector,
+  dimIndices: DimIndicesProps
+): Array<{ dimName: string; labels: (number | string)[] }> {
+  const result: Array<{ dimName: string; labels: (number | string)[] }> = []
+  for (const dimName of Object.keys(dimIndices)) {
+    if (dimName === 'lat' || dimName === 'lon') continue
+    const spec = selector[dimName]
+    if (spec === undefined) continue
+    const labels = multiValueSelection(spec.selected, true)
+    if (labels) result.push({ dimName, labels })
+  }
+  return result
+}
+
+/**
  * Build slice arguments from a selector for all dimensions.
  * Shared logic used by both display (buildBaseSliceArgs) and queries (fetchDataForSelector).
  */
@@ -62,10 +96,11 @@ export async function buildSliceArgsForSelector(
     /** If true, track multi-value dimensions for channel packing */
     trackMultiValue: boolean
     /**
-     * If true, a one-element array also counts as multi-value, so an array
-     * selector always yields a labelled channel whatever its length.
+     * Query semantics for array selectors: any non-empty array is multi-value,
+     * so it always yields labelled channels whatever its length, and repeated
+     * values collapse to one channel so each label names one series.
      */
-    labelSingleElementArrays?: boolean
+    queryLabelling?: boolean
     /** Spatial bounds for fetch - bbox for region subset */
     spatialBounds?: {
       minX: number
@@ -134,15 +169,14 @@ export async function buildSliceArgsForSelector(
       if (selectionSpec !== undefined) {
         const selectionValue = selectionSpec.selected
         const selectionType = selectionSpec.type
+        const multiValues = options.trackMultiValue
+          ? multiValueSelection(selectionValue, options.queryLabelling)
+          : null
 
-        if (
-          options.trackMultiValue &&
-          Array.isArray(selectionValue) &&
-          selectionValue.length > (options.labelSingleElementArrays ? 0 : 1)
-        ) {
+        if (multiValues) {
           const resolvedIndices: number[] = []
           const labelValues: (number | string)[] = []
-          for (const val of selectionValue) {
+          for (const val of multiValues) {
             const idx = await resolveSelectionIndex(
               context,
               dimName,

@@ -350,7 +350,7 @@ describe('buildSliceArgsForSelector', () => {
     const labelled = await buildSliceArgsForSelector(makeContext(), selector, {
       includeSpatialSlices: false,
       trackMultiValue: true,
-      labelSingleElementArrays: true,
+      queryLabelling: true,
       array,
     })
     expect(labelled.sliceArgs[0]).toBe(3)

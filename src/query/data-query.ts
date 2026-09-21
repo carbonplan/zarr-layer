@@ -14,6 +14,7 @@ import {
   buildChannelCombinations,
   assertSelectorKeysAreDimensions,
   buildSliceArgsForSelector,
+  findQueryMultiValueDims,
   type DimensionValuesCache,
 } from '../selector-resolution'
 import { normalizeSelector } from '../zarr-utils'
@@ -130,7 +131,7 @@ export async function fetchQueryData(
         {
           includeSpatialSlices: false,
           trackMultiValue: true,
-          labelSingleElementArrays: true,
+          queryLabelling: true,
           spatialBounds: spatialQuery,
           array: level.zarrArray,
         }
@@ -224,6 +225,7 @@ export async function queryData(
       normalizedSelector,
       desc.dimensions,
       desc.coordinates,
+      findQueryMultiValueDims(normalizedSelector, desc.dimIndices),
       desc.dimIndices
     )
     if (lineDistanceKey !== null) result.coordinates[lineDistanceKey] = []
@@ -643,7 +645,7 @@ export function mergeNestedValues(
   }
   // Include keys only in b
   for (const key of Object.keys(b)) {
-    if (!(key in result)) result[key] = b[key]
+    if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = b[key]
   }
   return result
 }

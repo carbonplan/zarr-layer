@@ -186,7 +186,7 @@ const result = await layer.queryData(
 )
 ```
 
-An array value, of any length, nests the result by label: `{ time: [3] }` returns `{ 3: number[] }`. A single value returns a flat `number[]`, and so does a dimension left out of the selector, which is read at index 0.
+A non-empty array value nests the result by label, whatever its length: `{ time: [3] }` returns `{ 3: number[] }`. Repeated values collapse into one series. A single value returns a flat `number[]`, and so does an empty array or a dimension left out of the selector, both read at index 0. Selector keys that name no dimension in the store are ignored.
 
 **Type options:**
 

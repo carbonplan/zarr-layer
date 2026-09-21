@@ -23,6 +23,7 @@ import {
 import { createWGS84ToSourceTransformer } from '../projection-utils'
 import { setObjectValues } from './selector-utils'
 import { SPATIAL_DIMENSION_ALIASES } from '../constants'
+import { buildChannelCombinations } from '../selector-resolution'
 
 /**
  * Resolve the store's spatial axis names for query result keys.
@@ -42,15 +43,6 @@ export function findSpatialDimNames(
 function findByAlias(dimensions: string[], axis: 'lat' | 'lon'): string {
   const aliases = SPATIAL_DIMENSION_ALIASES[axis]
   return dimensions.find((d) => aliases.includes(d.toLowerCase())) ?? axis
-}
-
-/** An array selector of any length, which nests the result by label. */
-function isMultiValSelector(value: Selector[string]): boolean {
-  const selected =
-    value && typeof value === 'object' && 'selected' in value
-      ? (value as { selected: unknown }).selected
-      : value
-  return Array.isArray(selected) && selected.length > 0
 }
 
 function checkAborted(signal?: AbortSignal) {
@@ -146,9 +138,10 @@ export function createResultBuilder(
     dimIndices,
   } = params
 
-  // Nesting follows the selector's syntax: an array value nests by label, a
-  // scalar or an unselected dimension (read at index 0) stays flat.
-  const useNestedResults = Object.values(selector).some(isMultiValSelector)
+  // Nesting follows what the read resolved, never the selector's raw shape,
+  // so an alias, an unknown key, or an empty array cannot make them disagree.
+  const multiDims = multiValueDimNames ?? []
+  const useNestedResults = multiDims.length > 0
   const results: QueryDataValues = useNestedResults ? {} : []
 
   const { yDim, xDim } = findSpatialDimNames(dimensions, dimIndices)
@@ -167,10 +160,13 @@ export function createResultBuilder(
       for (const dim of dimensions) {
         if (dim === yDim || dim === xDim) continue
 
+        const multiIndex = multiDims.indexOf(dim)
         const sel = selector[dim]
         let values: (number | string)[] | undefined
 
-        if (Array.isArray(sel)) {
+        if (multiIndex >= 0 && channelLabels) {
+          values = [...new Set(channelLabels.map((l) => l[multiIndex]))]
+        } else if (Array.isArray(sel)) {
           values = sel as (number | string)[]
         } else if (sel && typeof sel === 'object' && 'selected' in sel) {
           const selected = sel.selected
@@ -236,10 +232,9 @@ export function createResultBuilder(
 
     if (includeSpatialCoordinates) emitCoords(x, y)
     for (let c = 0; c < channels; c++) {
-      if (useNestedResults && multiValueDimNames) {
+      if (useNestedResults) {
         const labels = channelLabels?.[c]
-        const keys =
-          labels && labels.length === multiValueDimNames.length ? labels : [c]
+        const keys = labels && labels.length === multiDims.length ? labels : [c]
         setObjectValues(results, keys, values[c])
       } else if (Array.isArray(results)) {
         results.push(values[c])
@@ -261,8 +256,15 @@ export function buildEmptyResult(
   selector: Selector,
   dimensions: string[],
   coordinates: Record<string, (string | number)[]>,
+  multiValueDims: Array<{ dimName: string; labels: (number | string)[] }>,
   dimIndices?: DimIndicesProps
 ): QueryResult {
+  const { labelCombinations } = buildChannelCombinations(
+    multiValueDims.map(({ labels }) => ({
+      values: labels.map((_, i) => i),
+      labels,
+    }))
+  )
   return createResultBuilder({
     variable,
     selector,
@@ -273,6 +275,8 @@ export function buildEmptyResult(
     coordinates,
     sourceBounds: [0, 0, 0, 0],
     channels: 1,
+    channelLabels: labelCombinations,
+    multiValueDimNames: multiValueDims.map((d) => d.dimName),
     includeSpatialCoordinates: false,
     dimIndices,
   }).buildResult()
