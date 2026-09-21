@@ -310,17 +310,6 @@ const result = await layer.queryData({
 // }
 ```
 
-A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order. A cell is sampled once per pass, so a line that doubles back samples it again. Cells with no data are left out, and `distance` shows the gap. A line through an exact cell corner steps diagonally and does not sample the cells it only touches there. Coordinates must be finite, with longitudes within ±720, or the query throws a `RangeError`. Alongside the spatial coordinates it returns `distance`, the distance in meters along the line from its start to where it enters each cell, so a profile can be plotted against real distance rather than sample index. Sampling density follows the level being read, so pass `level: 'finest'` for a profile that doesn't depend on zoom. Values are the stored cell values, not interpolated between cells.
-
-```ts
-// Profile along a line
-const profile = await layer.queryData({
-  type: 'LineString',
-  coordinates: [[lng0, lat0], [lng1, lat1], ...],
-})
-// profile.coordinates.distance[i] is meters along the line for profile[variable][i]
-```
-
 Spatial query results are returned in the dataset's source CRS, under the store's own spatial axis names. An `EPSG:3857` dataset with `y`/`x` axes returns Web Mercator meters under `y`/`x`; an `EPSG:4326` dataset with `latitude`/`longitude` axes returns degrees under `latitude`/`longitude`; a custom-proj4 dataset returns its source-CRS values under whatever the store calls them. Input geometries are still supplied as GeoJSON lon/lat regardless of the source CRS.
 
 You can pass a third `options` argument to control query behavior:
@@ -339,6 +328,37 @@ Every other key in `coordinates` is a dimension name from the store. A `LineStri
 **Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). A cell with no data is left out of the result.
 
 With a multi-value selector such as `{ time: [0, 1, 2] }`, a cell is kept when it has data in at least one series, and the series without data hold `NaN` at that position. Every series therefore has the same length, and index `i` refers to the same cell in all of them and in the coordinate arrays, which are empty when `includeSpatialCoordinates` is `false`. Skip non-finite values when aggregating. `JSON.stringify` writes `NaN` as `null`.
+
+### line profiles
+
+A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order.
+
+```ts
+const profile = await layer.queryData({
+  type: 'LineString',
+  coordinates: [[lng0, lat0], [lng1, lat1], ...],
+})
+
+// Returns the same shape as other queries, plus `distance`:
+// {
+//   [variable]: number[],
+//   dimensions: ['<store-y-axis>', '<store-x-axis>'],
+//   coordinates: {
+//     '<store-y-axis>': number[],
+//     '<store-x-axis>': number[],
+//     distance: number[], // meters along the line, one per sample
+//   }
+// }
+```
+
+- **Distance.** `distance[i]` is the distance in meters along the line, from its start to where it enters the cell of sample `i`. Plot against it for a real distance axis rather than sample index.
+- **Density.** Sampling follows the level being read, so zooming out coarsens the profile. Pass `level: 'finest'` for a profile that doesn't depend on zoom.
+- **Values.** Samples are the stored cell values, not interpolated between cells.
+- **Gaps.** Cells with no data are left out, and the jump in `distance` shows the gap. The same goes for parts of the line that fall outside the raster.
+- **Repeats.** A cell is sampled once per pass, so a line that doubles back samples it again. A line through an exact cell corner steps diagonally and does not sample the cells it only touches there.
+- **Time series along a line.** Pass a multi-value selector such as `{ time: [0, 1, 2] }` to get one aligned profile per step.
+- **Antimeridian.** A line whose longitudes all lie within ±180 is read literally. To cross the antimeridian, continue past it, for example from `170` to `190`.
+- **Input limits.** Coordinates must be finite, with longitudes within ±720, or the query throws a `RangeError`.
 
 ### query resolution
 
