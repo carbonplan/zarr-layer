@@ -24,7 +24,10 @@ export interface MapInstance {
   remove(): void
   getLayer(id: string): unknown
   removeLayer(id: string): void
-  addLayer(layer: ZarrLayer, beforeId?: string): unknown
+  addLayer(
+    layer: ZarrLayer | Record<string, unknown>,
+    beforeId?: string
+  ): unknown
   setProjection(projection: any): unknown
   resize(): void
   getBounds(): {
@@ -33,9 +36,12 @@ export interface MapInstance {
     getEast(): number
   }
   getZoom(): number
+  getCenter(): { lng: number; lat: number }
   easeTo(options: { center: [number, number]; zoom: number }): void
   getStyle(): { layers?: Array<{ id: string; type: string }> }
   addSource(id: string, source: any): void
+  getSource(id: string): unknown
+  removeSource(id: string): void
   setTerrain(terrain: any): void
 }
 
