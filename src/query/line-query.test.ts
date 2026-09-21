@@ -172,6 +172,14 @@ describe('validateLineCoordinates', () => {
     expect(() => validateLineCoordinates([[0, 0], [] as number[]])).toThrow(
       RangeError
     )
+    for (const lat of [90.5, -91, 1e20]) {
+      expect(() =>
+        validateLineCoordinates([
+          [0, 0],
+          [1, lat],
+        ])
+      ).toThrow(RangeError)
+    }
   })
 
   it('accepts explicitly unwrapped longitudes', () => {
@@ -179,7 +187,7 @@ describe('validateLineCoordinates', () => {
       validateLineCoordinates([
         [170, 0],
         [190, 0],
-        [-200, 95],
+        [-200, 90],
       ])
     ).not.toThrow()
   })
@@ -491,6 +499,13 @@ describe('traceLineCells', () => {
 })
 
 describe('segmentLengthMeters', () => {
+  it('stays bounded for a span no real line has', () => {
+    const start = performance.now()
+    const length = segmentLengthMeters(0, 0, 1, 1e20)
+    expect(performance.now() - start).toBeLessThan(200)
+    expect(Number.isNaN(length) || Number.isFinite(length)).toBe(true)
+  })
+
   it('does not depend on how the segment is split', () => {
     const whole = segmentLengthMeters(-100, 60, 40, 60)
     const halves =

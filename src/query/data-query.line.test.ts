@@ -366,6 +366,9 @@ describe('queryData LineString', () => {
         queryData(context, line([0, 0], [bad, 0]), { time: 10 })
       ).rejects.toThrow(RangeError)
     }
+    await expect(
+      queryData(context, line([0, 0], [1, 1e20]), { time: 10 })
+    ).rejects.toThrow(RangeError)
   })
 
   it('samples a cell once when the line only touches the antimeridian', async () => {

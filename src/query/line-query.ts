@@ -36,6 +36,12 @@ export function haversineMeters(
 const MAX_CHORD_DEGREES = 0.25
 
 /**
+ * Most chords one segment is measured in. Validated query input never needs
+ * more, and the cap keeps any other caller's cost bounded.
+ */
+const MAX_CHORDS = 8192
+
+/**
  * Length in meters of the straight lon/lat segment between two positions.
  *
  * Query edges are straight in lon/lat, which is not a great circle, so long
@@ -50,7 +56,10 @@ export function segmentLengthMeters(
 ): number {
   const span = Math.max(Math.abs(lon1 - lon0), Math.abs(lat1 - lat0))
   if (!Number.isFinite(span)) return NaN
-  const steps = Math.max(1, Math.ceil(span / MAX_CHORD_DEGREES))
+  const steps = Math.min(
+    MAX_CHORDS,
+    Math.max(1, Math.ceil(span / MAX_CHORD_DEGREES))
+  )
   if (steps === 1) return haversineMeters(lon0, lat0, lon1, lat1)
 
   let total = 0
@@ -124,8 +133,8 @@ function clipSegmentToGrid(
 
 /**
  * Reject line coordinates the tracer cannot walk in bounded time: anything
- * non-finite, and longitudes far enough out that unwrapping them would mean
- * circling the globe many times over.
+ * non-finite, latitudes off the globe, and longitudes far enough out that
+ * unwrapping them would mean circling it many times over.
  */
 export function validateLineCoordinates(coords: number[][]): void {
   for (const position of coords) {
@@ -139,6 +148,11 @@ export function validateLineCoordinates(coords: number[][]): void {
     if (Math.abs(lon) > MAX_LINE_LONGITUDE) {
       throw new RangeError(
         `[ZarrLayer] LineString longitudes must lie within ±${MAX_LINE_LONGITUDE}`
+      )
+    }
+    if (Math.abs(lat) > 90) {
+      throw new RangeError(
+        '[ZarrLayer] LineString latitudes must lie within ±90'
       )
     }
   }

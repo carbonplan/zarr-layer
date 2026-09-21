@@ -358,7 +358,7 @@ const profile = await layer.queryData({
 - **Repeats.** A cell is sampled once per pass, so a line that doubles back samples it again. A line through an exact cell corner steps diagonally and does not sample the cells it only touches there.
 - **Time series along a line.** Pass a multi-value selector such as `{ time: [0, 1, 2] }` to get one aligned profile per step.
 - **Antimeridian.** A line whose longitudes all lie within ±180 is read literally. To cross the antimeridian, continue past it, for example from `170` to `190`.
-- **Input limits.** Coordinates must be finite, with longitudes within ±720, or the query throws a `RangeError`.
+- **Input limits.** Coordinates must be finite, with latitudes within ±90 and longitudes within ±720, or the query throws a `RangeError`.
 
 ### query resolution
 
