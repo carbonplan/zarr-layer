@@ -5,7 +5,7 @@
  * mercator corrections, and point-in-polygon tests.
  */
 
-import type { XYLimits } from '../map-utils'
+import { wrapLongitudeIntoExtent, type XYLimits } from '../map-utils'
 import type { Bounds, CRS } from '../types'
 import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
 import {
@@ -40,6 +40,37 @@ export function rasterExtentCrossesAntimeridian(
 export type CachedTransformer = ReturnType<
   typeof createWGS84ToSourceTransformer
 >
+
+/**
+ * Move a query geometry onto a raster extent that reaches past ±180 by
+ * shifting every longitude by the same whole turn. A geometry that already
+ * sits inside the extent, or that no single shift fits inside it, comes back
+ * unchanged.
+ */
+export function shiftGeometryIntoExtent(
+  geometry: QueryGeometry,
+  bbox: { west: number; east: number },
+  xMin: number,
+  xMax: number
+): QueryGeometry {
+  const shifted = wrapLongitudeIntoExtent(bbox.west, xMin, xMax)
+  const shift = shifted - bbox.west
+  if (shift === 0 || bbox.east + shift > xMax) return geometry
+
+  const shiftRing = (ring: number[][]) =>
+    ring.map(([lon, lat]) => [lon + shift, lat])
+  if (geometry.type === 'Point') {
+    const [lon, lat] = geometry.coordinates
+    return { ...geometry, coordinates: [lon + shift, lat] }
+  }
+  if (geometry.type === 'Polygon') {
+    return { ...geometry, coordinates: geometry.coordinates.map(shiftRing) }
+  }
+  return {
+    ...geometry,
+    coordinates: geometry.coordinates.map((poly) => poly.map(shiftRing)),
+  }
+}
 
 /**
  * Computes bounding box from GeoJSON geometry.

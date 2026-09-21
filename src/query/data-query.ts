@@ -23,6 +23,7 @@ import {
   preprocessQueryGeometry,
   wrappedBboxToPixelSpans,
   rasterExtentCrossesAntimeridian,
+  shiftGeometryIntoExtent,
   type PixelRect,
 } from './query-utils'
 import type {
@@ -279,7 +280,33 @@ export async function queryData(
     context.projection.kind === 'epsg3857'
   const queryGeometry = supportsWrappedLongitude ? processedGeometry : geometry
 
-  if (!wrappedBbox.crossesAntimeridian) return singleFetch(queryGeometry)
+  const extentPastAntimeridian =
+    context.projection.kind === 'epsg4326' &&
+    rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
+
+  if (!wrappedBbox.crossesAntimeridian) {
+    if (!extentPastAntimeridian || !queryLimits)
+      return singleFetch(queryGeometry)
+    const { xMin, xMax } = queryLimits
+    const shifted = shiftGeometryIntoExtent(
+      queryGeometry,
+      wrappedBbox,
+      xMin,
+      xMax
+    )
+    const fits = (lon: number) => lon >= xMin && lon <= xMax
+    if (
+      shifted === queryGeometry &&
+      !(fits(wrappedBbox.west) && fits(wrappedBbox.east)) &&
+      !context.antimeridianWarnings.has('raster-extent-partial')
+    ) {
+      context.antimeridianWarnings.add('raster-extent-partial')
+      console.warn(
+        'Queries only partly inside the part of a raster extent beyond ±180 read the side inside it; results may be incomplete'
+      )
+    }
+    return singleFetch(shifted)
+  }
 
   if (!supportsWrappedLongitude) {
     if (!context.antimeridianWarnings.has('proj4-crossing')) {
@@ -293,10 +320,7 @@ export async function queryData(
 
   // Crossing: raster extent guard (EPSG:4326 only — 3857 xyLimits are in
   // meters). Checked against the same extent the pixel-span mapping uses.
-  if (
-    context.projection.kind === 'epsg4326' &&
-    rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
-  ) {
+  if (extentPastAntimeridian) {
     if (!context.antimeridianWarnings.has('raster-extent-crossing')) {
       context.antimeridianWarnings.add('raster-extent-crossing')
       console.warn(

@@ -91,6 +91,9 @@ export function getVisibleRegions({
     height,
     xyLimits: limits,
     latIsAscending,
+    wrapLongitude:
+      projection.kind === 'epsg4326' &&
+      (limits.xMin < -180 || limits.xMax > 180),
   })
 
   // Verify candidates via inverse transform to WGS84 for precise overlap.
@@ -157,6 +160,7 @@ export function getCandidateRegions({
   height,
   xyLimits,
   latIsAscending,
+  wrapLongitude = false,
 }: {
   west: number
   south: number
@@ -171,6 +175,8 @@ export function getCandidateRegions({
   height: number
   xyLimits: XYLimits
   latIsAscending: boolean
+  /** Source X is a longitude and the extent reaches past ±180. */
+  wrapLongitude?: boolean
 }): RegionCoordinate[] {
   const { xMin, xMax, yMin, yMax } = xyLimits
   const edgeSamples = 16
@@ -220,6 +226,19 @@ export function getCandidateRegions({
         all.push({ regionX: rx, regionY: ry })
     return all
   }
+  // When the viewport straddles the antimeridian, forward-projecting the
+  // sampled longitudes folds source X back on itself (e.g. proj4 adjust_lon),
+  // so the srcX min/max span no longer bounds the visible columns. Treat
+  // every X region as a candidate; the antimeridian-aware overlap check in
+  // getVisibleRegions then keeps only the columns that are actually visible,
+  // so this widens the search without over-fetching the result (issue #64).
+  // A viewport inside the part of the extent beyond ±180 samples as
+  // longitudes a turn away from it, so the same widening applies.
+  const everyColumn =
+    east < west ||
+    east > 180 ||
+    west < -180 ||
+    (wrapLongitude && (srcXMin < xMin || srcXMax > xMax))
   // Widen margin when some samples failed (projection boundary)
   const margin = validCount < totalCount ? 8 : 2
   const pxXMin = ((srcXMin - xMin) / (xMax - xMin)) * width
@@ -236,13 +255,7 @@ export function getCandidateRegions({
   let rXMax = Math.min(numRegionsX - 1, Math.floor(pxXMax / regionW) + margin)
   rYMin = Math.max(0, rYMin)
   rYMax = Math.min(numRegionsY - 1, rYMax)
-  // When the viewport straddles the antimeridian, forward-projecting the
-  // sampled longitudes folds source X back on itself (e.g. proj4 adjust_lon),
-  // so the srcX min/max span no longer bounds the visible columns. Treat
-  // every X region as a candidate; the antimeridian-aware overlap check in
-  // getVisibleRegions then keeps only the columns that are actually visible,
-  // so this widens the search without over-fetching the result (issue #64).
-  if (east < west || east > 180 || west < -180) {
+  if (everyColumn) {
     rXMin = 0
     rXMax = numRegionsX - 1
   }

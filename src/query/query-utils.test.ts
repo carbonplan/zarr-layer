@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  shiftGeometryIntoExtent,
   buildScanlineTable,
   preprocessQueryGeometry,
   transformGeometryToPixelSpace,
@@ -204,5 +205,58 @@ describe('computePixelBoundsFromGeometry', () => {
     expect(r!.minY).toBe(45)
     expect(r!.maxX).toBeGreaterThanOrEqual(270)
     expect(r!.maxY).toBeGreaterThanOrEqual(135)
+  })
+})
+
+describe('shiftGeometryIntoExtent', () => {
+  it('shifts a polygon in the wrapped strip by a whole turn', () => {
+    const geometry: QueryGeometry = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [179.6, 0],
+          [179.9, 0],
+          [179.9, 1],
+          [179.6, 1],
+          [179.6, 0],
+        ],
+      ],
+    }
+    const shifted = shiftGeometryIntoExtent(
+      geometry,
+      { west: 179.6, east: 179.9 },
+      -180.5,
+      179.5
+    )
+    expect(shifted.type).toBe('Polygon')
+    const ring = (shifted as typeof geometry).coordinates[0]
+    expect(ring[1][0]).toBeCloseTo(-180.1)
+    expect(ring[1][1]).toBe(0)
+  })
+
+  it('leaves a geometry alone when it already fits or only partly fits', () => {
+    const inside: QueryGeometry = { type: 'Point', coordinates: [10, 0] }
+    expect(
+      shiftGeometryIntoExtent(inside, { west: 10, east: 10 }, -180.5, 179.5)
+    ).toBe(inside)
+    const partial: QueryGeometry = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [179, 0],
+          [179.9, 0],
+          [179.9, 1],
+          [179, 0],
+        ],
+      ],
+    }
+    expect(
+      shiftGeometryIntoExtent(
+        partial,
+        { west: 179, east: 179.9 },
+        -180.5,
+        179.5
+      )
+    ).toBe(partial)
   })
 })
