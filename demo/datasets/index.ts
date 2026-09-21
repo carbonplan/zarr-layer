@@ -6,7 +6,6 @@ import icechunkPrecip from './icechunk'
 
 import hurricane from './hurricane'
 import polar from './polar'
-import sentinel2 from './sentinel-2'
 import { createSimpleDataset } from './simple'
 import { createTimeDataset } from './time'
 import type { Dataset } from './types'
@@ -58,7 +57,6 @@ export const DATASETS: Dataset<any>[] = [
     latIsAscending: true,
   }),
   usgsdem,
-  sentinel2,
   polar,
   antarcticEra5,
 ]
