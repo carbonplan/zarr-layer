@@ -311,11 +311,42 @@ describe('ensureRegionGpuResources with band rendering', () => {
     const texture = region.bandTexture
 
     // Fetch wrote new data and cleared the key (selector change refetch).
+    region.bandData.set('red', new Float32Array([9, 9, 9, 9]))
+    region.bandData.set('green', new Float32Array([8, 8, 8, 8]))
     region.bandTextureKey = null
     expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(true)
     expect(gl.texImage3D).toHaveBeenCalledTimes(2)
     expect(gl.createTexture).toHaveBeenCalledTimes(1)
     expect(region.bandTexture).toBe(texture)
+  })
+
+  it('releases the band arrays once the texture holds them', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+
+    ensureRegionGpuResources(gl, region, ['red', 'green'])
+    expect(region.bandData.size).toBe(0)
+    expect(region.bandTextureBytes).toBe(2 * 4 * 4)
+    // Still drawable from the texture on later frames.
+    expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(true)
+    expect(gl.texImage3D).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the band arrays when the upload cannot happen', () => {
+    const gl = fakeGl({ failTextures: true })
+    const region = bandRegion()
+
+    ensureRegionGpuResources(gl, region, ['red', 'green'])
+    expect(region.bandData.size).toBe(2)
+    expect(region.bandTextureBytes).toBe(0)
+  })
+
+  it('needs a refetch to draw different bands after release', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    ensureRegionGpuResources(gl, region, ['red', 'green'])
+
+    expect(ensureRegionGpuResources(gl, region, ['red'])).toBe(false)
   })
 
   it('re-uploads when the band list changes at the same size', () => {
@@ -358,6 +389,7 @@ describe('ensureRegionGpuResources with band rendering', () => {
     expect(gl.deleteTexture).toHaveBeenCalledWith(released)
     expect(region.bandTexture).toBeNull()
     expect(region.bandTextureKey).toBeNull()
+    expect(region.bandTextureBytes).toBe(0)
     expect(region.texture).not.toBeNull()
   })
 

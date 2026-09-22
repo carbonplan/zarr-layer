@@ -146,6 +146,7 @@ function deleteBandTexture(
   if (region.bandTexture) gl.deleteTexture(region.bandTexture)
   region.bandTexture = null
   region.bandTextureKey = null
+  region.bandTextureBytes = 0
 }
 
 const bandTextureLimits = new WeakMap<
@@ -190,6 +191,10 @@ function fitsBandTexture(
  * per layer, in the bands' own storage format. Returns false if a band's data
  * is missing, is not stored as `format`, or the texture cannot be allocated,
  * which makes the region undrawable.
+ *
+ * The band arrays are released once uploaded: the texture is the only copy
+ * the region keeps, and anything that needs different bands refetches (from
+ * the decoded chunk cache, when it still holds the chunk).
  */
 function ensureBandTexture(
   gl: WebGL2RenderingContext,
@@ -247,6 +252,8 @@ function ensureBandTexture(
   )
   if (alignment !== null) gl.pixelStorei(gl.UNPACK_ALIGNMENT, alignment)
   region.bandTextureKey = key
+  region.bandTextureBytes = packed.byteLength
+  region.bandData.clear()
   return true
 }
 

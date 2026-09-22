@@ -44,6 +44,8 @@ export interface RegionState {
   bandTexture: WebGLTexture | null
   // Band list the resident texture holds (see bandTextureKey); null until uploaded
   bandTextureKey: string | null
+  // GPU bytes of the resident band texture. bandData is released on upload.
+  bandTextureBytes: number
   // Level-specific dimensions for region geometry bounds.
   // Set from LevelSnapshot during fetch to avoid races with level switching.
   levelMeta: LevelMeta | null

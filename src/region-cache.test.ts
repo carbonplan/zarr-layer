@@ -4,6 +4,7 @@ import {
   RegionCache,
   createRegionState,
   disposeRegion,
+  hasRegionData,
   isRegionCpuReady,
   isRegionGpuReady,
   makeRegionKey,
@@ -156,6 +157,18 @@ describe('isRegionGpuReady', () => {
   })
 })
 
+describe('hasRegionData', () => {
+  it('treats a resident band texture as the region data', () => {
+    const r = region(0, 0, 0)
+    expect(hasRegionData(r)).toBe(false)
+
+    // Upload released the band arrays; refetching would be wasted work.
+    r.bandTexture = {} as WebGLTexture
+    r.bandTextureKey = bandTextureKey(['a'])
+    expect(hasRegionData(r)).toBe(true)
+  })
+})
+
 describe('disposeRegion', () => {
   it('deletes the texture, geometry buffers, and band texture', () => {
     const gl = fakeGl()
@@ -215,6 +228,14 @@ describe('RegionCache.evict', () => {
     expect(cache.size).toBe(4)
     for (const key of keys.slice(0, 6)) expect(cache.get(key)).toBeUndefined()
     for (const key of keys.slice(6)) expect(cache.get(key)).toBeDefined()
+  })
+
+  it('counts band textures once their arrays are released', () => {
+    const cache = new RegionCache()
+    const keys = fill(cache, 10)
+    for (const key of keys) cache.get(key)!.bandTextureBytes = 1024
+    cache.evict(fakeGl(), 4 * 1024)
+    expect(cache.size).toBe(4)
   })
 
   it('keeps visible regions even when they alone exceed the byte budget', () => {

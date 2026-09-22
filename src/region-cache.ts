@@ -6,16 +6,18 @@ import type { BandFormat } from './band-format'
 export const MAX_CACHED_REGIONS = 128
 
 /**
- * Maximum decoded bytes held across cached regions. Region cost varies with
+ * Maximum pixel bytes held across cached regions. Region cost varies with
  * band count: one 256x256 float32 band is 256 KB, but 64 bands of it are
- * 16 MB, so the count cap alone would let the cache grow to gigabytes. The
- * GPU holds a copy of the same size.
+ * 16 MB, so the count cap alone would let the cache grow to gigabytes.
  */
 export const MAX_CACHED_REGION_BYTES = 512 * 1024 * 1024
 
-/** CPU bytes a region's pixel data occupies. */
+/**
+ * Bytes a region's pixel data occupies. Band data lives on the CPU until it
+ * is uploaded and on the GPU after, so it is counted wherever it is.
+ */
 export function regionByteLength(region: RegionState): number {
-  let bytes = region.data?.byteLength ?? 0
+  let bytes = (region.data?.byteLength ?? 0) + region.bandTextureBytes
   for (const band of region.bandData.values()) bytes += band.byteLength
   return bytes
 }
@@ -64,17 +66,21 @@ export function createRegionState(
     bandTransform: null,
     bandTexture: null,
     bandTextureKey: null,
+    bandTextureBytes: 0,
     levelMeta: null, // Set from snapshot in fetchRegion
   }
 }
 
 /**
  * The region's pixels have arrived, in whichever form the active shader
- * reads them. Band-sampling regions carry no interleaved copy, so `data`
- * alone is not the test for whether a region still needs fetching.
+ * reads them. Band-sampling regions carry no interleaved copy, and release
+ * their band arrays once the texture holds them, so `data` alone is not the
+ * test for whether a region still needs fetching.
  */
 export function hasRegionData(region: RegionState): boolean {
-  return !!region.data || region.bandData.size > 0
+  return (
+    !!region.data || region.bandData.size > 0 || region.bandTextureKey !== null
+  )
 }
 
 /**
