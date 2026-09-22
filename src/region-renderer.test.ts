@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from 'vitest'
 import { RegionRenderer } from './region-renderer'
 import { createRegionState, type RegionCache } from './region-cache'
 import { ZarrStore } from './zarr-store'
-import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
+import {
+  buildMemoryZarrStore,
+  type ArraySpec,
+} from './__fixtures__/memory-zarr'
 import type { MapLike, NormalizedSelector } from './types'
 import type { RegionRenderState } from './renderer-types'
 import { bandTextureKey } from './render-helpers'
@@ -43,8 +46,9 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
     TEXTURE_2D_ARRAY: 0x8c1a,
     MAX_ARRAY_TEXTURE_LAYERS: 0x88ff,
     MAX_TEXTURE_SIZE: 0x0d33,
+    // Array limits, then UNPACK_ALIGNMENT for everything else.
     getParameter: vi.fn((pname: number) =>
-      pname === 0x88ff ? 256 : pname === 0x0d33 ? 4096 : null
+      pname === 0x88ff ? 256 : pname === 0x0d33 ? 4096 : 4
     ),
     createTexture: vi.fn(() => (failTextures ? null : { tex: ++textures })),
     createBuffer: vi.fn(() => ({ buf: ++buffers })),
@@ -57,8 +61,10 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
     texImage3D: vi.fn(),
     texParameteri: vi.fn(),
     activeTexture: vi.fn(),
+    pixelStorei: vi.fn(),
   } as unknown as WebGL2RenderingContext & {
     createTexture: ReturnType<typeof vi.fn>
+    texImage3D: ReturnType<typeof vi.fn>
     deleteTexture: ReturnType<typeof vi.fn>
     texImage2D: ReturnType<typeof vi.fn>
     bufferData: ReturnType<typeof vi.fn>
@@ -170,7 +176,10 @@ async function settle(renderer: RegionRenderer): Promise<void> {
   } while (fetching())
 }
 
-async function makeRenderer(selector: NormalizedSelector = {}) {
+async function makeRenderer(
+  selector: NormalizedSelector = {},
+  dtype?: ArraySpec['dtype']
+) {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -178,6 +187,7 @@ async function makeRenderer(selector: NormalizedSelector = {}) {
         shape: [2, HEIGHT, WIDTH],
         chunkShape: [2, 2, 4],
         dimensionNames: ['time', 'lat', 'lon'],
+        dtype,
         chunks: {
           '0/0/0': chunk(0, 0),
           '0/0/1': chunk(0, 1),
@@ -529,6 +539,25 @@ describe('RegionRenderer', () => {
     )
     // One band array per region across the 2x2 grid, no main textures.
     expect(gl.createTexture).toHaveBeenCalledTimes(4)
+  })
+
+  it('draws integer datasets from integer band textures', async () => {
+    const { renderer, gl, map } = await makeRenderer({}, 'int16')
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    // Readiness is judged against the level's format, so a mismatch here
+    // would leave every region undrawable.
+    const states = seam(renderer).getRegionStates(gl)
+    expect(states).toHaveLength(4)
+    for (const state of states) {
+      expect(state.bandTextureKey).toBe(bandTextureKey(['temperature'], 'int'))
+      expect(state.bandTransform).toEqual({ scale: 1, offset: 0, fill: null })
+    }
+    expect(gl.texImage3D.mock.calls[0][9]).toBeInstanceOf(Int16Array)
   })
 
   it('latches an unresolvable selector and recovers on setSelector', async () => {

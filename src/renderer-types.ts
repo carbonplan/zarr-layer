@@ -1,3 +1,4 @@
+import type { BandFormat, BandTransform } from './band-format'
 import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 
@@ -14,6 +15,8 @@ export interface CustomShaderConfig {
   bands: string[]
   customFrag?: string
   customUniforms?: Record<string, number>
+  /** Storage format of the band texture; decides the sampler type. */
+  bandFormat?: BandFormat
 }
 
 export interface MapboxParams {
@@ -80,6 +83,7 @@ export interface RegionRenderState {
   /** Band texture array for multi-band custom shaders */
   bandTexture: WebGLTexture | null
   bandTextureKey: string | null
+  bandTransform: BandTransform | null
   /** Index buffer for the adaptive mesh */
   indexBuffer: WebGLBuffer
   /** Number of indices to draw */

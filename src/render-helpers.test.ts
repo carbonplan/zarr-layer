@@ -19,6 +19,12 @@ import type { RegionState } from './region-state'
 const TEXTURE0 = 0x84c0
 const TEXTURE_2D_ARRAY = 0x8c1a
 const R32F = 0x822e
+const R8I = 0x8231
+const R16UI = 0x8234
+const RED_INTEGER = 0x8d94
+const BYTE = 0x1400
+const UNSIGNED_SHORT = 0x1403
+const UNPACK_ALIGNMENT = 0x0cf5
 
 const MAX_ARRAY_TEXTURE_LAYERS = 0x88ff
 const MAX_TEXTURE_SIZE = 0x0d33
@@ -36,6 +42,16 @@ function fakeGl({
     R32F,
     RED: 0x1903,
     FLOAT: 0x1406,
+    R8I,
+    R8UI: 0x8232,
+    R16I: 0x8233,
+    R16UI,
+    RED_INTEGER,
+    BYTE,
+    UNSIGNED_BYTE: 0x1401,
+    SHORT: 0x1402,
+    UNSIGNED_SHORT,
+    UNPACK_ALIGNMENT,
     MAX_ARRAY_TEXTURE_LAYERS,
     MAX_TEXTURE_SIZE,
     getParameter: vi.fn((pname: number) =>
@@ -43,8 +59,11 @@ function fakeGl({
         ? maxLayers
         : pname === MAX_TEXTURE_SIZE
         ? 4096
+        : pname === UNPACK_ALIGNMENT
+        ? 4
         : null
     ),
+    pixelStorei: vi.fn(),
     createTexture: vi.fn(() => (failTextures ? null : { tex: ++textureCount })),
     createBuffer: vi.fn(() => ({ buf: ++bufferCount })),
     deleteTexture: vi.fn(),
@@ -62,6 +81,7 @@ function fakeGl({
     bufferData: ReturnType<typeof vi.fn>
     texImage2D: ReturnType<typeof vi.fn>
     texImage3D: ReturnType<typeof vi.fn>
+    pixelStorei: ReturnType<typeof vi.fn>
     bindTexture: ReturnType<typeof vi.fn>
     texParameteri: ReturnType<typeof vi.fn>
     activeTexture: ReturnType<typeof vi.fn>
@@ -353,6 +373,84 @@ describe('ensureRegionGpuResources with band rendering', () => {
   })
 })
 
+describe('ensureRegionGpuResources with integer bands', () => {
+  function int8Region(): RegionState {
+    const region = fetchedRegion()
+    region.bandData.set('a', new Int8Array([-128, -1, 0, 127]))
+    region.bandData.set('b', new Int8Array([1, 2, 3, 4]))
+    return region
+  }
+
+  it('uploads raw integers to an integer texture array', () => {
+    const gl = fakeGl()
+    const region = int8Region()
+
+    expect(ensureRegionGpuResources(gl, region, ['a', 'b'], 'int')).toBe(true)
+    const [, , internalFormat, , , depth, , format, type, data] =
+      gl.texImage3D.mock.calls[0]
+    expect([internalFormat, format, type]).toEqual([R8I, RED_INTEGER, BYTE])
+    expect(depth).toBe(2)
+    expect(data).toBeInstanceOf(Int8Array)
+    expect([...data]).toEqual([-128, -1, 0, 127, 1, 2, 3, 4])
+    expect(region.bandTextureKey).toBe(bandTextureKey(['a', 'b'], 'int'))
+  })
+
+  it('picks the texture format from the array type', () => {
+    const gl = fakeGl()
+    const region = fetchedRegion()
+    region.bandData.set('a', new Uint16Array([0, 1, 2, 65535]))
+
+    expect(ensureRegionGpuResources(gl, region, ['a'], 'uint')).toBe(true)
+    const [, , internalFormat, , , , , format, type] =
+      gl.texImage3D.mock.calls[0]
+    expect([internalFormat, format, type]).toEqual([
+      R16UI,
+      RED_INTEGER,
+      UNSIGNED_SHORT,
+    ])
+  })
+
+  it('unpacks unaligned rows and restores the alignment', () => {
+    const gl = fakeGl()
+    ensureRegionGpuResources(gl, int8Region(), ['a', 'b'], 'int')
+
+    expect(gl.pixelStorei.mock.calls).toEqual([
+      [UNPACK_ALIGNMENT, 1],
+      [UNPACK_ALIGNMENT, 4],
+    ])
+  })
+
+  it('leaves unpack state alone for float bands', () => {
+    const gl = fakeGl()
+    const region = fetchedRegion()
+    region.bandData.set('a', new Float32Array(4))
+    ensureRegionGpuResources(gl, region, ['a'])
+    expect(gl.pixelStorei).not.toHaveBeenCalled()
+  })
+
+  it('reports a region stored in another format as undrawable', () => {
+    const gl = fakeGl()
+    const region = int8Region()
+
+    // A fallback from a float level must not be sampled as integers, nor
+    // integers as floats.
+    expect(ensureRegionGpuResources(gl, region, ['a', 'b'], 'float')).toBe(
+      false
+    )
+    expect(ensureRegionGpuResources(gl, region, ['a', 'b'], 'uint')).toBe(false)
+    expect(gl.texImage3D).not.toHaveBeenCalled()
+  })
+
+  it('refuses to mix array types within one texture', () => {
+    const gl = fakeGl()
+    const region = int8Region()
+    region.bandData.set('b', new Int16Array([1, 2, 3, 4]))
+
+    expect(ensureRegionGpuResources(gl, region, ['a', 'b'], 'int')).toBe(false)
+    expect(gl.texImage3D).not.toHaveBeenCalled()
+  })
+})
+
 describe('bindBandTexture', () => {
   const texture = { tex: 1 } as unknown as WebGLTexture
 
@@ -377,6 +475,17 @@ describe('bindBandTexture', () => {
 
     expect(bindBandTexture(gl, region, ['red', 'green'])).toBe(false)
     expect(gl.bindTexture).not.toHaveBeenCalled()
+  })
+
+  it('refuses a texture stored in another format', () => {
+    const gl = fakeGl()
+    const region = {
+      bandTexture: texture,
+      bandTextureKey: bandTextureKey(['red'], 'int'),
+    }
+
+    expect(bindBandTexture(gl, region, ['red'])).toBe(false)
+    expect(bindBandTexture(gl, region, ['red'], 'int')).toBe(true)
   })
 
   it('refuses a region whose bands are not uploaded', () => {

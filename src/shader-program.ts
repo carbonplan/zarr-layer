@@ -53,6 +53,10 @@ export interface ShaderProgram {
   projectionMode: ProjectionMode
   useCustomShader: boolean
   bandTexLoc: WebGLUniformLocation | null
+  // Per-region transform for raw integer bands; null for float bands
+  bandScaleLoc: WebGLUniformLocation | null
+  bandOffsetLoc: WebGLUniformLocation | null
+  bandFillLoc: WebGLUniformLocation | null
   customUniformLocs: Map<string, WebGLUniformLocation>
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
@@ -96,7 +100,12 @@ export function makeShaderVariantKey(options: {
 
   const baseVariant =
     useCustomShader && customShaderConfig
-      ? ['custom', customShaderConfig.bands.join('_'), shaderVariant].join('_')
+      ? [
+          'custom',
+          customShaderConfig.bandFormat ?? 'float',
+          customShaderConfig.bands.join('_'),
+          shaderVariant,
+        ].join('_')
       : shaderVariant
   return [baseVariant, projectionMode].join('_')
 }
@@ -171,6 +180,7 @@ export function createShaderProgram(
             ? Object.keys(config.customUniforms)
             : [],
           customFrag: config.customFrag,
+          bandFormat: config.bandFormat,
         })
       : fragmentShaderSource
 
@@ -266,6 +276,9 @@ export function createShaderProgram(
     bandTexLoc: useCustomShader
       ? gl.getUniformLocation(program, BAND_SAMPLER)
       : null,
+    bandScaleLoc: gl.getUniformLocation(program, 'u_bandScale'),
+    bandOffsetLoc: gl.getUniformLocation(program, 'u_bandOffset'),
+    bandFillLoc: gl.getUniformLocation(program, 'u_bandFill'),
     customUniformLocs,
     globeToMercMatrixLoc: mapboxUniform('u_globe_to_merc'),
     globeTransitionLoc: mapboxUniform('u_globe_transition'),

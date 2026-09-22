@@ -132,6 +132,33 @@ describe('createFragmentShaderSource — structure', () => {
     )
   })
 
+  it('samples integer bands through an integer sampler', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'int' })
+    expect(src).toContain('precision highp isampler2DArray;')
+    expect(src).toContain('uniform isampler2DArray u_zl_bands;')
+    expect(src).toContain('float a_tex = zl_readBand(sample_coord, 0.0);')
+    // Scale/offset are per region for raw integers.
+    expect(src).toContain('float a_val = a_raw * u_bandScale + u_bandOffset;')
+  })
+
+  it('samples unsigned bands through an unsigned sampler', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'uint' })
+    expect(src).toContain('uniform usampler2DArray u_zl_bands;')
+  })
+
+  it('turns the integer fill value into NaN for customFrag', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'int' })
+    expect(src).toContain(
+      'return raw == u_bandFill ? uintBitsToFloat(0x7fc00000u) : raw;'
+    )
+  })
+
+  it('omits the integer read helper for float bands', () => {
+    const src = createFragmentShaderSource({ bands: ['a'] })
+    expect(src).not.toContain('zl_readBand')
+    expect(src).not.toContain('u_bandScale')
+  })
+
   it('declares a precision for the band array sampler', () => {
     // GLSL ES 3.00 gives sampler2DArray no default precision; omitting it
     // is a compile error.

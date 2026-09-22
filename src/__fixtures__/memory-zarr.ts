@@ -19,7 +19,7 @@ export interface ArraySpec {
   shape: number[]
   chunkShape: number[]
   /** Defaults to 'float32'. */
-  dtype?: 'float32' | 'float64'
+  dtype?: 'float32' | 'float64' | 'int8' | 'uint8' | 'int16' | 'uint16'
   fillValue?: number | null
   dimensionNames?: string[]
   /** Array-level attributes (e.g. scale_factor, add_offset). */
@@ -42,6 +42,10 @@ const CHUNK_ENCODERS: Record<string, (data: ArrayLike<number>) => Uint8Array> =
   {
     float32: (data) => new Uint8Array(Float32Array.from(data).buffer),
     float64: (data) => new Uint8Array(Float64Array.from(data).buffer),
+    int8: (data) => new Uint8Array(Int8Array.from(data).buffer),
+    uint8: (data) => Uint8Array.from(data),
+    int16: (data) => new Uint8Array(Int16Array.from(data).buffer),
+    uint16: (data) => new Uint8Array(Uint16Array.from(data).buffer),
   }
 
 /** Minimal Readable shape; matches zarrita's `Readable` structurally. */

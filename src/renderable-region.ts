@@ -9,6 +9,7 @@
 import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
+import type { BandTransform } from './band-format'
 import { bindBandTexture, bindGeometryBuffers } from './render-helpers'
 
 /**
@@ -41,6 +42,8 @@ export interface RenderableRegion {
   // Band texture array (for custom shaders), pre-uploaded like the main texture
   bandTexture: WebGLTexture | null
   bandTextureKey: string | null
+  // Scale/offset/fill for raw integer bands; null when bands are float
+  bandTransform: BandTransform | null
 }
 
 /**
@@ -147,7 +150,22 @@ export function renderRegion(
 
   // Bind textures. Both must already be uploaded.
   if (shaderProgram.useCustomShader && customShaderConfig) {
-    if (!bindBandTexture(gl, region, customShaderConfig.bands)) return false
+    if (
+      !bindBandTexture(
+        gl,
+        region,
+        customShaderConfig.bands,
+        customShaderConfig.bandFormat
+      )
+    ) {
+      return false
+    }
+    const transform = region.bandTransform
+    if (transform) {
+      gl.uniform1f(shaderProgram.bandScaleLoc, transform.scale)
+      gl.uniform1f(shaderProgram.bandOffsetLoc, transform.offset)
+      gl.uniform1f(shaderProgram.bandFillLoc, transform.fill ?? NaN)
+    }
   } else {
     if (!region.texture) return false
     gl.activeTexture(gl.TEXTURE0)

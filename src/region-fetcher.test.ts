@@ -4,7 +4,10 @@ import { RegionCache, makeRegionKey } from './region-cache'
 import { createProjectionContext } from './projection-utils'
 import { createRequestCanceller, cancelAllRequests } from './region-utils'
 import { ZarrStore } from './zarr-store'
-import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
+import {
+  buildMemoryZarrStore,
+  type ArraySpec,
+} from './__fixtures__/memory-zarr'
 import type { LevelRuntime } from './region-state'
 
 /**
@@ -29,7 +32,11 @@ function chunkData(chunkY: number, chunkX: number): number[] {
   return out
 }
 
-function makeMemoryStore(attributes: Record<string, unknown> = {}) {
+function makeMemoryStore(
+  attributes: Record<string, unknown> = {},
+  dtype?: ArraySpec['dtype'],
+  fillValue?: number
+) {
   return buildMemoryZarrStore({
     arrays: [
       {
@@ -38,6 +45,8 @@ function makeMemoryStore(attributes: Record<string, unknown> = {}) {
         chunkShape: REGION,
         dimensionNames: ['lat', 'lon'],
         attributes,
+        dtype,
+        fillValue,
         chunks: {
           '0/0': chunkData(0, 0),
           '0/1': chunkData(0, 1),
@@ -53,9 +62,12 @@ async function makeHarness(
   opts: {
     attributes?: Record<string, unknown>
     gateReads?: boolean
+    dtype?: ArraySpec['dtype']
+    fillValue?: number
+    bandTextures?: boolean
   } = {}
 ) {
-  const memory = makeMemoryStore(opts.attributes)
+  const memory = makeMemoryStore(opts.attributes, opts.dtype, opts.fillValue)
   let releaseReads = () => {}
   const readsReleased = new Promise<void>((res) => {
     releaseReads = res
@@ -125,7 +137,7 @@ async function makeHarness(
     getActiveLevel: () => level,
     getSelectorVersion: () => selectorVersion,
     getBandNames: () => ['temperature'],
-    usesBandTextures: () => false,
+    usesBandTextures: () => opts.bandTextures ?? false,
     isRemoved: () => false,
     getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
     computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
@@ -193,6 +205,33 @@ describe('RegionFetcher', () => {
     expect(region.bandData.get('temperature')).toBeDefined()
     expect(region.bandTexture).toBeNull()
     expect(region.bandTextureKey).toBeNull()
+  })
+
+  it('keeps small integer bands raw for band-sampling shaders', async () => {
+    const { fetcher, cache } = await makeHarness({
+      dtype: 'int8',
+      fillValue: -128,
+      attributes: { scale_factor: 2, add_offset: 10 },
+      bandTextures: true,
+    })
+    await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+
+    const region = cache.get(makeRegionKey(0, 1, 0))!
+    const band = region.bandData.get('temperature')!
+    // Stored as the dtype, unscaled: the shader applies the transform.
+    expect(band).toBeInstanceOf(Int8Array)
+    expect(Array.from(band)).toEqual(chunkData(0, 1))
+    expect(region.bandTransform).toEqual({ scale: 2, offset: 10, fill: -128 })
+    expect(region.data).toBeNull()
+  })
+
+  it('converts integer bands to float for the main texture', async () => {
+    const { fetcher, cache } = await makeHarness({ dtype: 'int8' })
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    expect(region.bandData.get('temperature')).toBeInstanceOf(Float32Array)
+    expect(region.bandTransform).toBeNull()
   })
 
   it('applies scale/offset to raw values', async () => {

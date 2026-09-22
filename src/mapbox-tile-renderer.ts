@@ -106,6 +106,7 @@ export function renderMapboxTile({
       texture: region.texture,
       bandTexture: region.bandTexture,
       bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
       indexBuffer: region.indexBuffer,
       meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,

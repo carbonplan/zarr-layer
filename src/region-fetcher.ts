@@ -10,6 +10,11 @@ import type {
 } from './region-state'
 import type { ZarrStore } from './zarr-store'
 import { buildChannelCombinations } from './selector-resolution'
+import {
+  bandFormatForDtype,
+  isNativeBandArray,
+  type BandArray,
+} from './band-format'
 import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
 import {
   type ChunkLoadingDebouncer,
@@ -233,8 +238,18 @@ export class RegionFetcher {
       )
       const numChannels = channelCombinations.length || 1
 
+      // Band-sampling shaders read small integer dtypes straight from
+      // integer textures; everything else is converted to float32 here.
+      const native =
+        this.context.usesBandTextures() &&
+        bandFormatForDtype(snapshot.zarrArray.dtype) !== 'float'
+      const toBand = (data: ArrayLike<number>): BandArray =>
+        native && isNativeBandArray(data)
+          ? data
+          : new Float32Array(data as ArrayLike<number>)
+
       // Fetch data for all channels
-      const bandArrays: Float32Array[] = []
+      const bandArrays: BandArray[] = []
 
       const isStale = () =>
         controller.signal.aborted ||
@@ -251,8 +266,7 @@ export class RegionFetcher {
 
         if (isStale()) return
 
-        const rawData = new Float32Array(result.data as ArrayLike<number>)
-        bandArrays.push(rawData)
+        bandArrays.push(toBand(result.data))
       } else {
         // Multi-channel - fetch all channels in parallel
         if (isStale()) return
@@ -284,8 +298,7 @@ export class RegionFetcher {
         // Process results in order
         for (let c = 0; c < numChannels; c++) {
           const result = results[c] as { data: ArrayLike<number> }
-          const bandData = new Float32Array(result.data as ArrayLike<number>)
-          bandArrays.push(bandData)
+          bandArrays.push(toBand(result.data))
         }
       }
 
@@ -325,14 +338,27 @@ export class RegionFetcher {
       const scaleFactor = currentLevel?.scaleFactor ?? desc.scaleFactor
       const addOffset = currentLevel?.addOffset ?? desc.addOffset
 
-      // Normalize bands (single pass) and collect for interleaving
       region.bandData.clear()
       region.bandTextureKey = null
+      region.bandTransform = null
       const normalizedBands: Float32Array[] = []
 
       for (let c = 0; c < bandArrays.length; c++) {
         const bandName = snapshot.bandNames[c] || `band_${c}`
-        let bandData = bandArrays[c]
+        const band = bandArrays[c]
+
+        // Raw integers are transformed in the shader, per region.
+        if (!(band instanceof Float32Array)) {
+          region.bandData.set(bandName, band)
+          region.bandTransform = {
+            scale: scaleFactor,
+            offset: addOffset,
+            fill: fillValue,
+          }
+          continue
+        }
+
+        let bandData = band
 
         // Apply scale/offset if needed (converts raw to physical values)
         if (scaleFactor !== 1 || addOffset !== 0) {

@@ -5,6 +5,8 @@
  * Consolidated vertex shaders built from reusable components.
  */
 
+import type { BandFormat } from './band-format'
+
 export interface ShaderData {
   vertexShaderPrelude: string
   define: string
@@ -486,6 +488,7 @@ interface FragmentShaderOptions {
   bands: string[]
   customUniforms?: string[]
   customFrag?: string
+  bandFormat?: BandFormat
 }
 
 // Compiled once at module load to avoid recompilation on every shader creation
@@ -498,10 +501,39 @@ const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*;/g
  */
 export const BAND_SAMPLER = 'u_zl_bands'
 
+const BAND_SAMPLER_TYPES: Record<BandFormat, string> = {
+  float: 'sampler2DArray',
+  int: 'isampler2DArray',
+  uint: 'usampler2DArray',
+}
+
+/**
+ * Integer bands arrive raw: the fill value becomes NaN, as it does for float
+ * bands on upload, and scale/offset come from per-region uniforms since each
+ * pyramid level may declare its own.
+ */
+const NATIVE_BAND_READ = `
+uniform float u_bandScale;
+uniform float u_bandOffset;
+uniform float u_bandFill;
+
+float zl_readBand(vec2 uv, float layer) {
+  float raw = float(texture(${BAND_SAMPLER}, vec3(uv, layer)).r);
+  return raw == u_bandFill ? uintBitsToFloat(0x7fc00000u) : raw;
+}
+`
+
 export function createFragmentShaderSource(
   options: FragmentShaderOptions
 ): string {
-  const { bands, customUniforms = [], customFrag } = options
+  const {
+    bands,
+    customUniforms = [],
+    customFrag,
+    bandFormat = 'float',
+  } = options
+  const native = bandFormat !== 'float'
+  const samplerType = BAND_SAMPLER_TYPES[bandFormat]
 
   const customUniformDecls = customUniforms
     .map((name) => `uniform float ${name};`)
@@ -524,9 +556,10 @@ export function createFragmentShaderSource(
   const extraUniformsDecl = extractedUniforms.join('\n')
 
   const bandReads = bands
-    .map(
-      (name, layer) =>
-        `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+    .map((name, layer) =>
+      native
+        ? `  float ${name}_tex = zl_readBand(sample_coord, ${layer}.0);\n  float ${name}_raw = ${name}_tex;\n  float ${name}_val = ${name}_raw * u_bandScale + u_bandOffset;`
+        : `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
     )
     .join('\n')
 
@@ -540,7 +573,7 @@ export function createFragmentShaderSource(
 
   return `#version 300 es
 precision highp float;
-precision highp sampler2DArray;
+precision highp ${samplerType};
 
 uniform float opacity;
 uniform vec2 clim;
@@ -558,7 +591,7 @@ uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D colormap;
 
-uniform sampler2DArray ${BAND_SAMPLER};
+uniform ${samplerType} ${BAND_SAMPLER};
 ${customUniformDecls}
 ${extraUniformsDecl}
 
@@ -569,7 +602,7 @@ out vec4 fragColor;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
-
+${native ? NATIVE_BAND_READ : ''}
 void main() {
 ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}

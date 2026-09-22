@@ -9,16 +9,26 @@
 import type { ShaderProgram } from './shader-program'
 import type { RegionState } from './region-state'
 import { configureDataTexture, getTextureFormats } from './webgl-utils'
+import {
+  allocateLike,
+  bandFormatOf,
+  bandTextureFormats,
+  type BandFormat,
+} from './band-format'
 
 /** Texture unit for the band array (0 = main texture, 1 = colormap). */
 const BAND_TEXTURE_UNIT = 2
 
 /**
- * Identifies which bands, in which order, a band texture holds. A texture is
- * only drawable by a shader whose band list produces the same key.
+ * Identifies which bands, in which order and storage format, a band texture
+ * holds. A texture is only drawable by a shader whose band list and sampler
+ * type produce the same key.
  */
-export function bandTextureKey(bands: readonly string[]): string {
-  return bands.join(',')
+export function bandTextureKey(
+  bands: readonly string[],
+  format: BandFormat = 'float'
+): string {
+  return `${format}:${bands.join(',')}`
 }
 
 /**
@@ -43,10 +53,11 @@ export function bindBandTexture(
     bandTexture: WebGLTexture | null
     bandTextureKey: string | null
   },
-  bands: readonly string[]
+  bands: readonly string[],
+  format: BandFormat = 'float'
 ): boolean {
   if (!region.bandTexture) return false
-  if (region.bandTextureKey !== bandTextureKey(bands)) return false
+  if (region.bandTextureKey !== bandTextureKey(bands, format)) return false
   gl.activeTexture(gl.TEXTURE0 + BAND_TEXTURE_UNIT)
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, region.bandTexture)
   return true
@@ -176,15 +187,17 @@ function fitsBandTexture(
 
 /**
  * Upload every band a custom shader samples into one texture array, one band
- * per layer. Returns false if a band's data is missing or the texture cannot
- * be allocated, which makes the region undrawable.
+ * per layer, in the bands' own storage format. Returns false if a band's data
+ * is missing, is not stored as `format`, or the texture cannot be allocated,
+ * which makes the region undrawable.
  */
 function ensureBandTexture(
   gl: WebGL2RenderingContext,
   region: RegionState,
-  bands: readonly string[]
+  bands: readonly string[],
+  format: BandFormat
 ): boolean {
-  const key = bandTextureKey(bands)
+  const key = bandTextureKey(bands, format)
   if (region.bandTexture && region.bandTextureKey === key) return true
 
   // Checked before allocating: a region missing a band is retried every
@@ -194,32 +207,45 @@ function ensureBandTexture(
     return false
   }
 
+  const first = region.bandData.get(bands[0])
+  if (!first || bandFormatOf(first) !== format) return false
+
   const layerSize = region.width * region.height
-  const packed = new Float32Array(layerSize * bands.length)
+  const packed = allocateLike(first, layerSize * bands.length)
   for (let layer = 0; layer < bands.length; layer++) {
     const data = region.bandData.get(bands[layer])
-    if (!data) return false
+    if (!data || data.constructor !== first.constructor) return false
     packed.set(data, layer * layerSize)
   }
 
   if (!region.bandTexture) region.bandTexture = gl.createTexture()
   if (!region.bandTexture) return false
 
+  const {
+    internalFormat,
+    format: glFormat,
+    type,
+  } = bandTextureFormats(gl, first)
   gl.activeTexture(gl.TEXTURE0)
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, region.bandTexture)
   configureDataTexture(gl, gl.TEXTURE_2D_ARRAY)
+  // Rows of 1- and 2-byte texels need not be 4-byte aligned.
+  const alignment =
+    format === 'float' ? null : gl.getParameter(gl.UNPACK_ALIGNMENT)
+  if (alignment !== null) gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
   gl.texImage3D(
     gl.TEXTURE_2D_ARRAY,
     0,
-    gl.R32F,
+    internalFormat,
     region.width,
     region.height,
     bands.length,
     0,
-    gl.RED,
-    gl.FLOAT,
+    glFormat,
+    type,
     packed
   )
+  if (alignment !== null) gl.pixelStorei(gl.UNPACK_ALIGNMENT, alignment)
   region.bandTextureKey = key
   return true
 }
@@ -235,11 +261,16 @@ function ensureBandTexture(
  * whether the level is considered covered, and a level that displaces its
  * fallbacks and then fails to bind a band leaves the viewport blank. The main
  * texture is not created in that mode, since nothing samples it.
+ *
+ * `bandFormat` is the storage format the shader's band sampler reads. A
+ * region stored in another format (a fallback from a level with a different
+ * dtype) is reported undrawable rather than drawn through the wrong sampler.
  */
 export function ensureRegionGpuResources(
   gl: WebGL2RenderingContext,
   region: RegionState,
-  requiredBands?: readonly string[]
+  requiredBands?: readonly string[],
+  bandFormat: BandFormat = 'float'
 ): boolean {
   if (!region.vertexArr || !region.pixCoordArr || !region.indexArr) return false
 
@@ -253,7 +284,7 @@ export function ensureRegionGpuResources(
       region.texture = null
       region.textureUploaded = false
     }
-    texturesReady = ensureBandTexture(gl, region, requiredBands)
+    texturesReady = ensureBandTexture(gl, region, requiredBands, bandFormat)
   } else {
     deleteBandTexture(gl, region)
     // A region fetched for a band-sampling shader has no interleaved copy, so

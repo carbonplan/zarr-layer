@@ -1,5 +1,6 @@
 import type { RegionState } from './region-state'
 import { bandTextureKey } from './render-helpers'
+import type { BandFormat } from './band-format'
 
 /** Maximum number of regions to keep in cache (LRU eviction) */
 export const MAX_CACHED_REGIONS = 128
@@ -60,6 +61,7 @@ export function createRegionState(
     latIsAscending,
     selectorVersion,
     bandData: new Map(),
+    bandTransform: null,
     bandTexture: null,
     bandTextureKey: null,
     levelMeta: null, // Set from snapshot in fetchRegion
@@ -101,14 +103,16 @@ export function isRegionCpuReady(region: RegionState): boolean {
  * `requiredBands` names the textures a custom shader samples. Pass the same
  * list the draw call uses, or a region whose main texture is resident but
  * whose bands are not would count towards coverage and then fail to draw.
+ * Likewise `bandFormat` must be the format the shader's band sampler reads.
  */
 export function isRegionGpuReady(
   region: RegionState,
-  requiredBands?: readonly string[]
+  requiredBands?: readonly string[],
+  bandFormat: BandFormat = 'float'
 ): boolean {
   if (!isRegionCpuReady(region) || !region.geometryUploaded) return false
   if (requiredBands && requiredBands.length > 0) {
-    return region.bandTextureKey === bandTextureKey(requiredBands)
+    return region.bandTextureKey === bandTextureKey(requiredBands, bandFormat)
   }
   return region.textureUploaded
 }

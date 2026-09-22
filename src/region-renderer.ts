@@ -67,6 +67,7 @@ import {
   isRegionGpuReady,
   makeRegionKey,
 } from './region-cache'
+import { bandFormatForDtype, type BandFormat } from './band-format'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader, type LevelLoadOutcome } from './level-loader'
 import { wrapError } from './errors'
@@ -471,7 +472,10 @@ export class RegionRenderer {
     for (const { regionX, regionY } of this.lastVisibleRegions) {
       const key = this.makeRegionKey(levelIndex, regionX, regionY)
       const region = this.regionCache.get(key)
-      if (!region || !isRegionGpuReady(region, this.requiredBands())) {
+      if (
+        !region ||
+        !isRegionGpuReady(region, this.requiredBands(), this.bandFormat())
+      ) {
         return false
       }
     }
@@ -484,6 +488,21 @@ export class RegionRenderer {
    */
   private requiredBands(): string[] | undefined {
     return this.rendersFromBandTextures ? this.bandNames : undefined
+  }
+
+  /** Storage format the band sampler reads, set by the active level's dtype. */
+  private bandFormat(): BandFormat {
+    return bandFormatForDtype(this.activeLevel?.zarrArray.dtype)
+  }
+
+  /** The layer's shader config, told which band sampler type to declare. */
+  private shaderConfigForLevel(
+    config: CustomShaderConfig | undefined
+  ): CustomShaderConfig | undefined {
+    if (!config) return config
+    const bandFormat = this.bandFormat()
+    if (config.bandFormat === bandFormat) return config
+    return { ...config, bandFormat }
   }
 
   /**
@@ -514,10 +533,12 @@ export class RegionRenderer {
     const currentLevelRegions: RegionState[] = []
 
     const requiredBands = this.requiredBands()
+    const bandFormat = this.bandFormat()
     for (const region of this.regionCache.values()) {
       if (region.levelIndex !== currentLevel) continue
       if (!isRegionCpuReady(region)) continue
-      if (!ensureRegionGpuResources(gl, region, requiredBands)) continue
+      if (!ensureRegionGpuResources(gl, region, requiredBands, bandFormat))
+        continue
       currentLevelRegions.push(region)
     }
 
@@ -527,7 +548,8 @@ export class RegionRenderer {
 
     // Render order: fallbacks first (beneath), current level on top
     const fallbackRegions = this.getProtectedFallbackRegions().filter(
-      (region) => ensureRegionGpuResources(gl, region, requiredBands)
+      (region) =>
+        ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
     )
     return [...fallbackRegions, ...currentLevelRegions]
   }
@@ -929,6 +951,10 @@ export class RegionRenderer {
   }
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
+    context = {
+      ...context,
+      customShaderConfig: this.shaderConfigForLevel(context.customShaderConfig),
+    }
     const useMapbox = !!context.mapbox
     // Use the source-projected mesh path when the CRS is resolved via proj4.
     const useWgs84 = !!this.projection.def && !!this.projection.to4326
@@ -1027,6 +1053,7 @@ export class RegionRenderer {
       texture: region.texture,
       bandTexture: region.bandTexture,
       bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
     }
   }
 
@@ -1073,6 +1100,9 @@ export class RegionRenderer {
       context: {
         ...context,
         uniforms: this.getUniformsForRender(context.uniforms),
+        customShaderConfig: this.shaderConfigForLevel(
+          context.customShaderConfig
+        ),
       },
       regions: this.getRegionStates(renderer.gl),
     })
@@ -1101,6 +1131,7 @@ export class RegionRenderer {
       height: region.height,
       bandTexture: region.bandTexture,
       bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
       indexBuffer: region.indexBuffer!,
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,
