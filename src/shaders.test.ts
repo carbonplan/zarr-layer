@@ -114,16 +114,29 @@ describe('createVertexShader — structure', () => {
 describe('createFragmentShaderSource — structure', () => {
   it('builds a single-band colormap shader', () => {
     const src = createFragmentShaderSource({ bands: ['temp'] })
-    expect(src).toContain('uniform sampler2D temp;')
+    expect(src).toContain('uniform sampler2DArray u_zl_bands;')
     expect(src).toContain('texture(colormap, vec2(rescaled, 0.5))')
     expect(src).toContain('isnan(temp_tex)')
     expect(src).toContain('out vec4 fragColor;')
   })
 
-  it('declares samplers for every band', () => {
+  it('reads every band from one sampler, one layer per band', () => {
     const src = createFragmentShaderSource({ bands: ['a', 'b'] })
-    expect(src).toContain('uniform sampler2D a;')
-    expect(src).toContain('uniform sampler2D b;')
+    expect(src.match(/uniform\s+sampler2DArray/g)).toHaveLength(1)
+    expect(src).not.toMatch(/uniform\s+sampler2D\s+[ab];/)
+    expect(src).toContain(
+      'float a_tex = texture(u_zl_bands, vec3(sample_coord, 0.0)).r;'
+    )
+    expect(src).toContain(
+      'float b_tex = texture(u_zl_bands, vec3(sample_coord, 1.0)).r;'
+    )
+  })
+
+  it('declares a precision for the band array sampler', () => {
+    // GLSL ES 3.00 gives sampler2DArray no default precision; omitting it
+    // is a compile error.
+    const src = createFragmentShaderSource({ bands: ['a'] })
+    expect(src).toContain('precision highp sampler2DArray;')
   })
 
   it('hoists uniforms out of customFrag and rewrites gl_FragColor', () => {

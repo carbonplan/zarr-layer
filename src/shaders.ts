@@ -491,14 +491,17 @@ interface FragmentShaderOptions {
 // Compiled once at module load to avoid recompilation on every shader creation
 const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*;/g
 
+/**
+ * Sampler for the texture array holding every band a custom shader reads,
+ * one band per layer. Any band count costs a single texture unit, where a
+ * sampler per band would run out at WebGL's guaranteed minimum of 16.
+ */
+export const BAND_SAMPLER = 'u_zl_bands'
+
 export function createFragmentShaderSource(
   options: FragmentShaderOptions
 ): string {
   const { bands, customUniforms = [], customFrag } = options
-
-  const bandSamplers = bands
-    .map((name) => `uniform sampler2D ${name};`)
-    .join('\n')
 
   const customUniformDecls = customUniforms
     .map((name) => `uniform float ${name};`)
@@ -522,8 +525,8 @@ export function createFragmentShaderSource(
 
   const bandReads = bands
     .map(
-      (name) =>
-        `  float ${name}_tex = texture(${name}, sample_coord).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+      (name, layer) =>
+        `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
     )
     .join('\n')
 
@@ -537,6 +540,7 @@ export function createFragmentShaderSource(
 
   return `#version 300 es
 precision highp float;
+precision highp sampler2DArray;
 
 uniform float opacity;
 uniform vec2 clim;
@@ -554,7 +558,7 @@ uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D colormap;
 
-${bandSamplers}
+uniform sampler2DArray ${BAND_SAMPLER};
 ${customUniformDecls}
 ${extraUniformsDecl}
 

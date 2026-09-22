@@ -77,11 +77,9 @@ export interface RegionRenderState {
   height: number
   /** Data orientation: true = row 0 is south */
   latIsAscending: boolean
-  /** Band textures for multi-band custom shaders */
-  bandData?: Map<string, Float32Array>
-  bandTextures?: Map<string, WebGLTexture>
-  bandTexturesUploaded?: Set<string>
-  bandTexturesConfigured?: Set<string>
+  /** Band texture array for multi-band custom shaders */
+  bandTexture: WebGLTexture | null
+  bandTextureKey: string | null
   /** Index buffer for the adaptive mesh */
   indexBuffer: WebGLBuffer
   /** Number of indices to draw */

@@ -9,7 +9,7 @@
 import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
-import { bindBandTextures, bindGeometryBuffers } from './render-helpers'
+import { bindBandTexture, bindGeometryBuffers } from './render-helpers'
 
 /**
  * A region ready for rendering.
@@ -38,16 +38,9 @@ export interface RenderableRegion {
   // Main texture (pre-uploaded). Null when band textures are sampled instead.
   texture: WebGLTexture | null
 
-  // Band textures (for custom shaders)
-  bandData: Map<string, Float32Array>
-  bandTextures: Map<string, WebGLTexture>
-  bandTexturesUploaded: Set<string>
-  bandTexturesConfigured: Set<string>
-  width: number
-  height: number
-
-  // Callbacks for lazy resource creation
-  ensureBandTexture?: (bandName: string) => WebGLTexture | null
+  // Band texture array (for custom shaders), pre-uploaded like the main texture
+  bandTexture: WebGLTexture | null
+  bandTextureKey: string | null
 }
 
 /**
@@ -152,22 +145,9 @@ export function renderRegion(
   if (!region.indexBuffer) return false
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, region.indexBuffer)
 
-  // Bind textures. The main texture must already be uploaded; bindBandTextures
-  // uploads any band whose contents are not resident yet.
+  // Bind textures. Both must already be uploaded.
   if (shaderProgram.useCustomShader && customShaderConfig) {
-    const bandsBound = bindBandTextures(gl, {
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
-      customShaderConfig,
-      width: region.width,
-      height: region.height,
-      ensureTexture: region.ensureBandTexture,
-    })
-    if (!bandsBound) {
-      return false
-    }
+    if (!bindBandTexture(gl, region, customShaderConfig.bands)) return false
   } else {
     if (!region.texture) return false
     gl.activeTexture(gl.TEXTURE0)

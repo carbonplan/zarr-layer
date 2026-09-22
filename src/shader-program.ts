@@ -6,6 +6,7 @@ import {
 import {
   createVertexShader,
   createFragmentShaderSource,
+  BAND_SAMPLER,
   type ProjectionData,
   type ShaderData,
   type VertexShaderInputSpace,
@@ -51,7 +52,7 @@ export interface ShaderProgram {
   pixCoordLoc: number
   projectionMode: ProjectionMode
   useCustomShader: boolean
-  bandTexLocs: Map<string, WebGLUniformLocation>
+  bandTexLoc: WebGLUniformLocation | null
   customUniformLocs: Map<string, WebGLUniformLocation>
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
@@ -184,16 +185,9 @@ export function createShaderProgram(
     throw new Error(`Failed to create program for variant: ${variantName}`)
   }
 
-  const bandTexLocs = new Map<string, WebGLUniformLocation>()
   const customUniformLocs = new Map<string, WebGLUniformLocation>()
 
   if (useCustomShader && config) {
-    for (const bandName of config.bands) {
-      const loc = gl.getUniformLocation(program, bandName)
-      if (loc) {
-        bandTexLocs.set(bandName, loc)
-      }
-    }
     if (config.customUniforms) {
       for (const uniformName of Object.keys(config.customUniforms)) {
         const loc = gl.getUniformLocation(program, uniformName)
@@ -269,7 +263,9 @@ export function createShaderProgram(
 
     projectionMode,
     useCustomShader: !!useCustomShader,
-    bandTexLocs,
+    bandTexLoc: useCustomShader
+      ? gl.getUniformLocation(program, BAND_SAMPLER)
+      : null,
     customUniformLocs,
     globeToMercMatrixLoc: mapboxUniform('u_globe_to_merc'),
     globeTransitionLoc: mapboxUniform('u_globe_transition'),

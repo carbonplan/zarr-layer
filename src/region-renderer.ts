@@ -1023,12 +1023,8 @@ export class RegionRenderer {
       meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
       texture: region.texture,
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
-      width: region.width,
-      height: region.height,
+      bandTexture: region.bandTexture,
+      bandTextureKey: region.bandTextureKey,
     }
   }
 
@@ -1047,7 +1043,7 @@ export class RegionRenderer {
     const gl = renderer.gl
 
     // Set up band texture uniforms once per frame
-    setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
+    setupBandTextureUniforms(gl, shaderProgram)
 
     // Render each loaded region using unified path
     for (const region of this.getLoadedRegions(gl)) {
@@ -1101,10 +1097,8 @@ export class RegionRenderer {
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
+      bandTexture: region.bandTexture,
+      bandTextureKey: region.bandTextureKey,
       indexBuffer: region.indexBuffer!,
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,

@@ -37,9 +37,10 @@ export interface RegionState {
   selectorVersion: number
   // Multi-band support
   bandData: Map<string, Float32Array>
-  bandTextures: Map<string, WebGLTexture>
-  bandTexturesUploaded: Set<string>
-  bandTexturesConfigured: Set<string>
+  // Every band packed into one RGBA texture array, four bands per layer
+  bandTexture: WebGLTexture | null
+  // Band list the resident texture holds (see bandTextureKey); null until uploaded
+  bandTextureKey: string | null
   // Level-specific dimensions for region geometry bounds.
   // Set from LevelSnapshot during fetch to avoid races with level switching.
   levelMeta: LevelMeta | null

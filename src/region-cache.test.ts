@@ -9,6 +9,7 @@ import {
   makeRegionKey,
 } from './region-cache'
 import type { RegionState } from './region-state'
+import { bandTextureKey } from './render-helpers'
 
 /**
  * Contract tests for the region cache: FIFO eviction under a hard cap,
@@ -125,17 +126,19 @@ describe('isRegionGpuReady', () => {
     // textures that do not exist yet, so the region is not drawable.
     expect(isRegionGpuReady(r, ['red', 'green'])).toBe(false)
 
-    r.bandTexturesUploaded.add('red')
+    r.bandTexture = {} as WebGLTexture
+    r.bandTextureKey = bandTextureKey(['red'])
     expect(isRegionGpuReady(r, ['red', 'green'])).toBe(false)
 
-    r.bandTexturesUploaded.add('green')
+    r.bandTextureKey = bandTextureKey(['red', 'green'])
     expect(isRegionGpuReady(r, ['red', 'green'])).toBe(true)
   })
 
   it('ignores the main texture when bands are required', () => {
     const r = cpuReadyRegion()
     r.geometryUploaded = true
-    r.bandTexturesUploaded.add('red')
+    r.bandTexture = {} as WebGLTexture
+    r.bandTextureKey = bandTextureKey(['red'])
     // Band rendering never creates a main texture.
     expect(r.textureUploaded).toBe(false)
     expect(isRegionGpuReady(r, ['red'])).toBe(true)
@@ -154,18 +157,17 @@ describe('isRegionGpuReady', () => {
 })
 
 describe('disposeRegion', () => {
-  it('deletes the texture, geometry buffers, and band textures', () => {
+  it('deletes the texture, geometry buffers, and band texture', () => {
     const gl = fakeGl()
     const r = region(0, 0, 0)
     r.texture = {} as WebGLTexture
     r.vertexBuffer = {} as WebGLBuffer
     r.pixCoordBuffer = {} as WebGLBuffer
     r.indexBuffer = {} as WebGLBuffer
-    r.bandTextures.set('a', {} as WebGLTexture)
-    r.bandTextures.set('b', {} as WebGLTexture)
+    r.bandTexture = {} as WebGLTexture
 
     disposeRegion(gl, r)
-    expect(gl.deleteTexture).toHaveBeenCalledTimes(3) // main + 2 bands
+    expect(gl.deleteTexture).toHaveBeenCalledTimes(2) // main + band array
     expect(gl.deleteBuffer).toHaveBeenCalledTimes(3)
   })
 })
@@ -199,6 +201,31 @@ describe('RegionCache.evict', () => {
     cache.rebuildProtection(keys, { retainKeysNotMatching: '' })
     cache.evict(fakeGl())
     expect(cache.size).toBe(MAX_CACHED_REGIONS + 20)
+  })
+
+  it('prunes oldest-first down to the byte budget', () => {
+    const cache = new RegionCache()
+    const keys = fill(cache, 10)
+    for (const key of keys) {
+      cache.get(key)!.bandData.set('a', new Float32Array(256))
+    }
+    // 10 regions of 1 KB each against a 4 KB budget.
+    cache.evict(fakeGl(), 4 * 1024)
+
+    expect(cache.size).toBe(4)
+    for (const key of keys.slice(0, 6)) expect(cache.get(key)).toBeUndefined()
+    for (const key of keys.slice(6)) expect(cache.get(key)).toBeDefined()
+  })
+
+  it('keeps visible regions even when they alone exceed the byte budget', () => {
+    const cache = new RegionCache()
+    const keys = fill(cache, 4)
+    for (const key of keys) {
+      cache.get(key)!.bandData.set('a', new Float32Array(256))
+    }
+    cache.rebuildProtection(keys, { retainKeysNotMatching: '' })
+    cache.evict(fakeGl(), 1024)
+    expect(cache.size).toBe(4)
   })
 
   it('disposes GL resources on eviction', () => {

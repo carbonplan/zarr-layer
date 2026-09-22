@@ -327,7 +327,7 @@ export class RegionFetcher {
 
       // Normalize bands (single pass) and collect for interleaving
       region.bandData.clear()
-      region.bandTexturesUploaded.clear()
+      region.bandTextureKey = null
       const normalizedBands: Float32Array[] = []
 
       for (let c = 0; c < bandArrays.length; c++) {

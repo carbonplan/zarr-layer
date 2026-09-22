@@ -191,7 +191,8 @@ describe('RegionFetcher', () => {
     expect(region.texture).toBeNull()
     expect(region.textureUploaded).toBe(false)
     expect(region.bandData.get('temperature')).toBeDefined()
-    expect(region.bandTexturesUploaded.size).toBe(0)
+    expect(region.bandTexture).toBeNull()
+    expect(region.bandTextureKey).toBeNull()
   })
 
   it('applies scale/offset to raw values', async () => {

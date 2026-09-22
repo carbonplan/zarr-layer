@@ -1,7 +1,23 @@
 import type { RegionState } from './region-state'
+import { bandTextureKey } from './render-helpers'
 
 /** Maximum number of regions to keep in cache (LRU eviction) */
 export const MAX_CACHED_REGIONS = 128
+
+/**
+ * Maximum decoded bytes held across cached regions. Region cost varies with
+ * band count: one 256x256 float32 band is 256 KB, but 64 bands of it are
+ * 16 MB, so the count cap alone would let the cache grow to gigabytes. The
+ * GPU holds a copy of the same size.
+ */
+export const MAX_CACHED_REGION_BYTES = 512 * 1024 * 1024
+
+/** CPU bytes a region's pixel data occupies. */
+export function regionByteLength(region: RegionState): number {
+  let bytes = region.data?.byteLength ?? 0
+  for (const band of region.bandData.values()) bytes += band.byteLength
+  return bytes
+}
 
 export function makeRegionKey(
   levelIndex: number,
@@ -44,9 +60,8 @@ export function createRegionState(
     latIsAscending,
     selectorVersion,
     bandData: new Map(),
-    bandTextures: new Map(),
-    bandTexturesUploaded: new Set(),
-    bandTexturesConfigured: new Set(),
+    bandTexture: null,
+    bandTextureKey: null,
     levelMeta: null, // Set from snapshot in fetchRegion
   }
 }
@@ -93,7 +108,7 @@ export function isRegionGpuReady(
 ): boolean {
   if (!isRegionCpuReady(region) || !region.geometryUploaded) return false
   if (requiredBands && requiredBands.length > 0) {
-    return requiredBands.every((band) => region.bandTexturesUploaded.has(band))
+    return region.bandTextureKey === bandTextureKey(requiredBands)
   }
   return region.textureUploaded
 }
@@ -106,7 +121,7 @@ export function disposeRegion(
   if (region.vertexBuffer) gl.deleteBuffer(region.vertexBuffer)
   if (region.pixCoordBuffer) gl.deleteBuffer(region.pixCoordBuffer)
   if (region.indexBuffer) gl.deleteBuffer(region.indexBuffer)
-  for (const tex of region.bandTextures.values()) gl.deleteTexture(tex)
+  if (region.bandTexture) gl.deleteTexture(region.bandTexture)
 }
 
 export class RegionCache {
@@ -149,9 +164,16 @@ export class RegionCache {
     this.protectedKeys = nextProtected
   }
 
-  evict(gl: WebGL2RenderingContext): void {
+  evict(
+    gl: WebGL2RenderingContext,
+    maxBytes: number = MAX_CACHED_REGION_BYTES
+  ): void {
     // Uses Map iteration order (oldest first). Never evicts currently visible regions.
-    while (this.regions.size > MAX_CACHED_REGIONS) {
+    let totalBytes = 0
+    for (const region of this.regions.values()) {
+      totalBytes += regionByteLength(region)
+    }
+    while (this.regions.size > MAX_CACHED_REGIONS || totalBytes > maxBytes) {
       let evictedKey: string | null = null
       for (const key of this.regions.keys()) {
         if (!this.protectedKeys.has(key)) {
@@ -161,7 +183,10 @@ export class RegionCache {
       }
       if (!evictedKey) break // All regions are visible, stop
       const region = this.regions.get(evictedKey)
-      if (region) disposeRegion(gl, region)
+      if (region) {
+        totalBytes -= regionByteLength(region)
+        disposeRegion(gl, region)
+      }
       this.regions.delete(evictedKey)
     }
   }

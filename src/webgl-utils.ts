@@ -128,13 +128,16 @@ export function getTextureFormats(
 
 /**
  * Configures a data texture with NEAREST filtering and CLAMP_TO_EDGE wrapping.
- * Call after binding the texture with gl.bindTexture(gl.TEXTURE_2D, texture).
+ * Call after binding the texture to `target`.
  */
-export function configureDataTexture(gl: WebGL2RenderingContext) {
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+export function configureDataTexture(
+  gl: WebGL2RenderingContext,
+  target: GLenum = gl.TEXTURE_2D
+) {
+  gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+  gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+  gl.texParameteri(target, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(target, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 }
 
 /**
