@@ -186,6 +186,8 @@ const result = await layer.queryData(
 )
 ```
 
+A non-empty array value nests the result by label, whatever its length: `{ time: [3] }` returns `{ 3: number[] }`. Repeated values collapse into one series. A single value returns a flat `number[]`, and so does an empty array or a dimension left out of the selector, both read at index 0.
+
 **Type options:**
 
 | Type                | Behavior                                                      |
@@ -284,7 +286,7 @@ A store declaring `proj:wkt2` or `proj:projjson` carries its own definition and 
 
 ## queries
 
-Supports `Point`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass in a custom `selector` to override the visualization `selector`.
+Supports `Point`, `LineString`, `Polygon`, and `MultiPolygon` geometries in geojson format. You can optionally pass a `selector`, which overrides the layer's `selector` key by key. A dimension the query leaves out stays on the slice the layer is showing, so `{ time: [0, 1, 2] }` on a layer showing one band returns that band's time series.
 
 ```ts
 // Point query
@@ -317,16 +319,52 @@ const result = await layer.queryData(geometry, selector, {
   signal: abortController.signal, // cancel in-flight query
   includeSpatialCoordinates: false, // omit per-pixel coordinates for slimmer results
   level: 'finest', // read the highest-resolution level instead of the drawn one
+  distanceKey: 'along', // LineString only: result key for distance, default 'distance'
 })
 ```
 
-**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered).
+Every other key in `coordinates` is a dimension name from the store. A `LineString` query on a store that has a dimension named `distance` throws, so that dimension's values are never overwritten. Pass a different `distanceKey` to query it.
+
+**Note:** Query results match rendered values (`scale_factor`/`add_offset` applied, `fillValue`/NaN filtered). A cell with no data is left out of the result.
+
+With a multi-value selector such as `{ time: [0, 1, 2] }`, a cell is kept when it has data in at least one series, and the series without data hold `NaN` at that position. Every series therefore has the same length, and index `i` refers to the same cell in all of them and in the coordinate arrays, which are empty when `includeSpatialCoordinates` is `false`. Skip non-finite values when aggregating. `JSON.stringify` writes `NaN` as `null`.
+
+### line profiles
+
+A `LineString` query returns a profile: one sample per grid cell the line passes through, in path order.
+
+```ts
+const profile = await layer.queryData({
+  type: 'LineString',
+  coordinates: [[lng0, lat0], [lng1, lat1], ...],
+})
+
+// Returns the same shape as other queries, plus `distance`:
+// {
+//   [variable]: number[],
+//   dimensions: ['<store-y-axis>', '<store-x-axis>'],
+//   coordinates: {
+//     '<store-y-axis>': number[],
+//     '<store-x-axis>': number[],
+//     distance: number[], // meters along the line, one per sample
+//   }
+// }
+```
+
+- **Distance.** `distance[i]` is the distance in meters along the line, from its start to where it enters the cell of sample `i`. Plot against it for a real distance axis rather than sample index.
+- **Density.** Sampling follows the level being read, so zooming out coarsens the profile. Pass `level: 'finest'` for a profile that doesn't depend on zoom.
+- **Values.** Samples are the stored cell values, not interpolated between cells.
+- **Gaps.** Cells with no data are left out, and the jump in `distance` shows the gap. The same goes for parts of the line that fall outside the raster.
+- **Repeats.** A cell is sampled once per pass, so a line that doubles back samples it again. A line through an exact cell corner steps diagonally and does not sample the cells it only touches there.
+- **Time series along a line.** Pass a multi-value selector such as `{ time: [0, 1, 2] }` to get one aligned profile per step.
+- **Antimeridian.** A line whose longitudes all lie within ±180 is read literally. To cross the antimeridian, continue past it, for example from `170` to `190`.
+- **Input limits.** Coordinates must be finite, with latitudes within ±90 and longitudes within ±720, or the query throws a `RangeError`.
 
 ### query resolution
 
 By default a query reads the level the map is currently drawing, so results agree with what the user sees and zooming out coarsens them. Pass `level: 'finest'` to always read the highest-resolution level in the store, which is what you want when the answer shouldn't depend on the camera — sampling point features, for instance.
 
-`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
+`'finest'` reads a level the renderer may not hold, so it fetches cold instead of reusing chunks the render path already cached. A point costs about one chunk either way; a line reads a chain of small windows along its path, so its cost grows with its length in pixels; a polygon covers quadratically more pixels at a finer level, so on a deep pyramid at low zoom it can read many more. It doesn't disturb rendering: the query reads its own level and leaves the drawn one alone. No effect on single-level stores.
 
 ### query readiness
 

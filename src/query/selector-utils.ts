@@ -23,22 +23,34 @@ export function setObjectValues(
     return obj
   }
 
-  let ref = obj as Record<string | number, QueryDataValues>
+  // Labels come from user selectors, so they are only ever read and written
+  // as own properties: `constructor` or `__proto__` is a label like any other.
+  const own = (target: object, key: string | number) =>
+    Object.prototype.hasOwnProperty.call(target, key)
+      ? (target as Record<string | number, QueryDataValues>)[key]
+      : undefined
+  const define = (
+    target: object,
+    key: string | number,
+    value: QueryDataValues
+  ) => {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+    return value
+  }
+
+  let ref: object = obj
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]
     if (i === keys.length - 1) {
-      if (!ref[key]) {
-        ref[key] = []
-      }
-      const arr = ref[key]
-      if (Array.isArray(arr)) {
-        arr.push(value)
-      }
+      const leaf = own(ref, key) ?? define(ref, key, [])
+      if (Array.isArray(leaf)) leaf.push(value)
     } else {
-      if (!ref[key]) {
-        ref[key] = {}
-      }
-      ref = ref[key] as Record<string | number, QueryDataValues>
+      ref = own(ref, key) ?? define(ref, key, {})
     }
   }
 

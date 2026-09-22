@@ -7,7 +7,11 @@
 
 import { wrapLongitudeIntoExtent, type XYLimits } from '../map-utils'
 import type { Bounds, CRS } from '../types'
-import type { BoundingBox, QueryGeometry, GeoJSONMultiPolygon } from './types'
+import type {
+  BoundingBox,
+  AreaQueryGeometry,
+  GeoJSONMultiPolygon,
+} from './types'
 import {
   clampLatLonToProj4def,
   createWGS84ToSourceTransformer,
@@ -48,11 +52,11 @@ export type CachedTransformer = ReturnType<
  * unchanged.
  */
 export function shiftGeometryIntoExtent(
-  geometry: QueryGeometry,
+  geometry: AreaQueryGeometry,
   bbox: { west: number; east: number },
   xMin: number,
   xMax: number
-): QueryGeometry {
+): AreaQueryGeometry {
   const shifted = wrapLongitudeIntoExtent(bbox.west, xMin, xMax)
   const shift = shifted - bbox.west
   if (shift === 0 || bbox.east + shift > xMax) return geometry
@@ -75,7 +79,7 @@ export function shiftGeometryIntoExtent(
 /**
  * Computes bounding box from GeoJSON geometry.
  */
-function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
+function computeBoundingBox(geometry: AreaQueryGeometry): BoundingBox {
   let west = Infinity
   let east = -Infinity
   let south = Infinity
@@ -111,7 +115,7 @@ function computeBoundingBox(geometry: QueryGeometry): BoundingBox {
  * the mapping is linear in the raster's own coordinate space regardless of CRS.
  */
 export function computePixelBoundsFromGeometry(
-  geometry: QueryGeometry,
+  geometry: AreaQueryGeometry,
   sourceBounds: Bounds,
   width: number,
   height: number,
@@ -217,21 +221,55 @@ import { DEFAULT_QUERY_DENSIFY_MAX_ERROR } from '../constants'
 /** Max recursion depth for adaptive subdivision */
 const DENSIFY_MAX_DEPTH = 10
 
+/** A path vertex in pixel space that remembers the lon/lat it came from. */
+export interface DensifiedVertex {
+  px: number
+  py: number
+  lon: number
+  lat: number
+}
+
 /**
- * Densify a ring by adaptively subdividing edges until the pixel-space error
- * is below DEFAULT_QUERY_DENSIFY_MAX_ERROR. For each edge, the midpoint is interpolated in
- * source coordinates (lon/lat), transformed to pixel space, and compared to
- * the straight-line midpoint in pixel space. If the deviation exceeds the
- * threshold, the edge is recursively split.
+ * Densify a lon/lat path by adaptively subdividing edges until the pixel-space
+ * error is below DEFAULT_QUERY_DENSIFY_MAX_ERROR. For each edge, the midpoint
+ * and quarter points are interpolated in lon/lat, transformed to pixel space,
+ * and compared to the same fractions along the straight pixel-space chord. If
+ * any deviates by more than the threshold, the edge is recursively split.
  *
  * This matches the adaptive mesh reprojection precision (0.125px) so query
- * polygon boundaries align with rendered pixel boundaries.
+ * geometry edges align with rendered pixel boundaries. Vertices that do not
+ * project to finite pixel coordinates are dropped.
  */
-function densifyAndTransformRing(
-  ring: number[][],
+export function densifyAndTransformPath(
+  path: number[][],
   transformVertex: (lon: number, lat: number) => [number, number]
-): number[][] {
-  const result: number[][] = []
+): DensifiedVertex[] {
+  const result: DensifiedVertex[] = []
+  const isValid = (px: [number, number]) => isFinite(px[0]) && isFinite(px[1])
+
+  const maxErrorSq =
+    DEFAULT_QUERY_DENSIFY_MAX_ERROR * DEFAULT_QUERY_DENSIFY_MAX_ERROR
+
+  // Squared distance from the true projection of the point a fraction `t`
+  // along the edge to the same fraction along the straight pixel-space chord.
+  const chordErrorSq = (
+    lon0: number,
+    lat0: number,
+    px0: [number, number],
+    lon1: number,
+    lat1: number,
+    px1: [number, number],
+    t: number
+  ): number => {
+    const px = transformVertex(
+      lon0 + t * (lon1 - lon0),
+      lat0 + t * (lat1 - lat0)
+    )
+    if (!isValid(px)) return 0
+    const dx = px[0] - (px0[0] + t * (px1[0] - px0[0]))
+    const dy = px[1] - (px0[1] + t * (px1[1] - px0[1]))
+    return dx * dx + dy * dy
+  }
 
   function subdivide(
     lon0: number,
@@ -244,53 +282,74 @@ function densifyAndTransformRing(
   ) {
     if (depth >= DENSIFY_MAX_DEPTH) return
 
-    // Midpoint in source space
     const lonM = (lon0 + lon1) * 0.5
     const latM = (lat0 + lat1) * 0.5
     const pxM = transformVertex(lonM, latM)
-    if (!isFinite(pxM[0]) || !isFinite(pxM[1])) return
+    if (!isValid(pxM)) return
 
-    // Straight-line midpoint in pixel space
     const expectedX = (px0[0] + px1[0]) * 0.5
     const expectedY = (px0[1] + px1[1]) * 0.5
-
-    // Error: distance from true projected midpoint to straight-line midpoint
     const dx = pxM[0] - expectedX
     const dy = pxM[1] - expectedY
-    const error = dx * dx + dy * dy // compare squared to avoid sqrt
 
-    if (
-      error >
-      DEFAULT_QUERY_DENSIFY_MAX_ERROR * DEFAULT_QUERY_DENSIFY_MAX_ERROR
-    ) {
+    // The midpoint alone misses an edge that bends one way and then the
+    // other, such as a Mercator edge centred on the equator, where the two
+    // halves cancel there. The quarter points catch it.
+    const bends =
+      dx * dx + dy * dy > maxErrorSq ||
+      chordErrorSq(lon0, lat0, px0, lon1, lat1, px1, 0.25) > maxErrorSq ||
+      chordErrorSq(lon0, lat0, px0, lon1, lat1, px1, 0.75) > maxErrorSq
+
+    if (bends) {
       subdivide(lon0, lat0, px0, lonM, latM, pxM, depth + 1)
-      result.push(pxM as number[])
+      result.push({ px: pxM[0], py: pxM[1], lon: lonM, lat: latM })
       subdivide(lonM, latM, pxM, lon1, lat1, px1, depth + 1)
     }
   }
 
-  for (let i = 0; i < ring.length - 1; i++) {
-    const [lon0, lat0] = ring[i]
-    const [lon1, lat1] = ring[i + 1]
+  for (let i = 0; i < path.length; i++) {
+    const [lon0, lat0] = path[i]
     const px0 = transformVertex(lon0, lat0)
-    const px1 = transformVertex(lon1, lat1)
-
-    if (isFinite(px0[0]) && isFinite(px0[1])) {
-      result.push(px0 as number[])
+    if (isValid(px0)) {
+      result.push({ px: px0[0], py: px0[1], lon: lon0, lat: lat0 })
     }
-    if (
-      isFinite(px0[0]) &&
-      isFinite(px0[1]) &&
-      isFinite(px1[0]) &&
-      isFinite(px1[1])
-    ) {
+    if (i === path.length - 1) break
+    const [lon1, lat1] = path[i + 1]
+    const px1 = transformVertex(lon1, lat1)
+    if (isValid(px0) && isValid(px1)) {
       subdivide(lon0, lat0, px0, lon1, lat1, px1, 0)
     }
   }
 
-  // Close ring (only if first vertex was valid)
-  if (result.length > 0 && isFinite(result[0][0]) && isFinite(result[0][1])) {
-    result.push([result[0][0], result[0][1]])
+  return result
+}
+
+/**
+ * Densify and transform a ring into pixel space. The ring is treated as a
+ * loop whether or not its last vertex repeats the first, and the output is
+ * always closed.
+ */
+function densifyAndTransformRing(
+  ring: number[][],
+  transformVertex: (lon: number, lat: number) => [number, number]
+): number[][] {
+  if (ring.length === 0) return []
+  const first = ring[0]
+  const last = ring[ring.length - 1]
+  const isClosed =
+    ring.length > 1 && first[0] === last[0] && first[1] === last[1]
+  const loop = isClosed ? ring : [...ring, first]
+  const result = densifyAndTransformPath(loop, transformVertex).map((v) => [
+    v.px,
+    v.py,
+  ])
+  // An unprojectable first vertex drops out at both ends of the loop.
+  if (result.length > 0) {
+    const head = result[0]
+    const tail = result[result.length - 1]
+    if (head[0] !== tail[0] || head[1] !== tail[1]) {
+      result.push([head[0], head[1]])
+    }
   }
   return result
 }
@@ -305,14 +364,14 @@ function densifyAndTransformRing(
  * suitable for use with scanline rasterization.
  */
 export function transformGeometryToPixelSpace(
-  geometry: QueryGeometry,
+  geometry: AreaQueryGeometry,
   sourceBounds: Bounds,
   width: number,
   height: number,
   proj4def: string,
   latIsAscending?: boolean,
   cachedTransformer?: CachedTransformer
-): QueryGeometry | null {
+): AreaQueryGeometry | null {
   const transformer =
     cachedTransformer ?? createWGS84ToSourceTransformer(proj4def)
 
@@ -367,7 +426,7 @@ export function transformGeometryToPixelSpace(
 /**
  * Convert a single WGS84 lon/lat to source-CRS pixel coordinates.
  */
-function lonLatToPixel(
+export function lonLatToPixel(
   lon: number,
   lat: number,
   sourceBounds: Bounds,
@@ -483,7 +542,7 @@ function unionScanlineIntervals(a: number[], b: number[]): number[] {
  * Complexity: O(H*E + H*E*logE) vs O(W*H*V) for per-pixel point-in-polygon.
  */
 export function buildScanlineTable(
-  geometry: QueryGeometry,
+  geometry: AreaQueryGeometry,
   yStart: number,
   yEnd: number
 ): Map<number, number[]> {
@@ -914,8 +973,8 @@ function alignMultiPolygonMembers(members: number[][][][]): number[][][][] {
  * longitude semantics (EPSG:3857, EPSG:4326). Generic proj4 callers may still
  * use the returned bbox to detect unsupported crossings.
  */
-export function preprocessQueryGeometry(geometry: QueryGeometry): {
-  geometry: QueryGeometry
+export function preprocessQueryGeometry(geometry: AreaQueryGeometry): {
+  geometry: AreaQueryGeometry
   bbox: WrappedBoundingBox
 } {
   if (geometry.type === 'Point') {

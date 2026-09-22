@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   queryData,
+  concatQueryResults,
   mergeQueryResults,
   mergeNestedValues,
   type QueryContext,
@@ -9,6 +10,7 @@ import type { NestedValues, QueryGeometry, QueryResult } from './types'
 import { ZarrStore } from '../zarr-store'
 import { createProjectionContext } from '../projection-utils'
 import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
+import { normalizeSelector } from '../zarr-utils'
 import { SelectorResolutionError } from '../selector-resolution'
 
 /**
@@ -119,6 +121,7 @@ describe('queryData', () => {
       point(-157.5, 67.5)
     )
     expect(result.temp).toEqual([])
+    expect(result.dimensions).toEqual(['lat', 'lon'])
     expect(result.coordinates).toEqual({ lat: [], lon: [] })
   })
 
@@ -131,6 +134,19 @@ describe('queryData', () => {
     await expect(
       queryData({ ...context, level: null }, offRaster, { typo: 5 })
     ).rejects.toBeInstanceOf(SelectorResolutionError)
+  })
+
+  it('shapes an empty result like a populated one for the same selector', async () => {
+    const { context } = await makeQueryHarness()
+    const offRaster = point(0, 95)
+    const flat = await queryData(context, offRaster, { time: 10 })
+    expect(flat.temp).toEqual([])
+    expect(flat.dimensions).toEqual(['lat', 'lon'])
+
+    const nested = await queryData(context, offRaster, { time: [10, 20] })
+    expect(nested.temp).toEqual({})
+    expect(nested.dimensions).toEqual(['time', 'lat', 'lon'])
+    expect(nested.coordinates).toEqual({ lat: [], lon: [], time: [10, 20] })
   })
 
   it('resolves point queries to the correct pixel', async () => {
@@ -194,6 +210,37 @@ describe('queryData', () => {
     // time=20 is coordinate VALUE 20 (index 1): plane offset 32.
     const result = await queryData(context, point(-157.5, 67.5), { time: 20 })
     expect(result.temp).toEqual([32])
+  })
+
+  it('reads an unselected dimension at index 0 and returns a flat result', async () => {
+    const { context } = await makeQueryHarness()
+    const result = await queryData(context, point(157.5, -67.5))
+    expect(result.temp).toEqual([31])
+    expect(result.dimensions).toEqual(['lat', 'lon'])
+
+    const region = await queryData(context, {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [-180, 45],
+          [-90, 45],
+          [-90, 90],
+          [-180, 90],
+          [-180, 45],
+        ],
+      ],
+    })
+    expect(region.temp).toEqual([0, 1])
+  })
+
+  it('nests a one-element array selector by label, like any other array', async () => {
+    const { context } = await makeQueryHarness()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      time: [20],
+    })
+    expect(result.temp).toEqual({ 20: [32] })
+    expect(result.dimensions).toEqual(['time', 'lat', 'lon'])
+    expect(result.coordinates.time).toEqual([20])
   })
 
   it('packs multi-value selectors into label-keyed channels', async () => {
@@ -431,5 +478,176 @@ describe('mergeNestedValues', () => {
       a: [1],
       b: [2],
     })
+  })
+})
+
+describe('concatQueryResults', () => {
+  const keys = ['lat', 'lon', 'distance']
+
+  it('joins flat windows in order, per-pixel coordinates included', () => {
+    const windows: QueryResult[] = [
+      {
+        temp: [1, 2],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [10, 10], lon: [0, 1], distance: [0, 5] },
+      },
+      {
+        temp: [],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [], lon: [], distance: [] },
+      },
+      {
+        temp: [3],
+        dimensions: ['lat', 'lon'],
+        coordinates: { lat: [10], lon: [2], distance: [9] },
+      },
+    ]
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(joined.temp).toEqual([1, 2, 3])
+    expect(joined.coordinates).toEqual({
+      lat: [10, 10, 10],
+      lon: [0, 1, 2],
+      distance: [0, 5, 9],
+    })
+  })
+
+  it('joins nested series leaf by leaf and keeps selection coordinates once', () => {
+    const windows: QueryResult[] = [
+      {
+        temp: { 10: [1, NaN], 20: [5, 6] },
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: {
+          lat: [0, 0],
+          lon: [0, 1],
+          distance: [0, 1],
+          time: [10, 20],
+        },
+      },
+      {
+        // A window that emitted no samples has no series keys at all.
+        temp: {},
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: { lat: [], lon: [], distance: [], time: [10, 20] },
+      },
+      {
+        temp: { 10: [3], 20: [7] },
+        dimensions: ['time', 'lat', 'lon'],
+        coordinates: { lat: [0], lon: [2], distance: [2], time: [10, 20] },
+      },
+    ]
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(joined.temp).toEqual({ 10: [1, NaN, 3], 20: [5, 6, 7] })
+    expect(joined.coordinates.time).toEqual([10, 20])
+    expect(joined.coordinates.distance).toEqual([0, 1, 2])
+  })
+
+  it('stays linear over many windows', () => {
+    const windows: QueryResult[] = Array.from({ length: 5000 }, (_, w) => ({
+      temp: { 10: new Array(200).fill(w), 20: new Array(200).fill(w) },
+      dimensions: ['time', 'lat', 'lon'],
+      coordinates: {
+        lat: new Array(200).fill(0),
+        lon: new Array(200).fill(w),
+        distance: new Array(200).fill(w),
+        time: [10, 20],
+      },
+    }))
+    const start = performance.now()
+    const joined = concatQueryResults(windows, 'temp', keys)
+    expect(performance.now() - start).toBeLessThan(1500)
+    expect((joined.temp as NestedValues)[10]).toHaveLength(1_000_000)
+    expect(joined.coordinates.distance).toHaveLength(1_000_000)
+  })
+})
+
+/**
+ * A query selector layered over the layer's own selector, on a store with
+ * two non-spatial dimensions: value = b*64 + t*32 + y*8 + x.
+ */
+describe('queryData — query selector over the layer selector', () => {
+  async function makeBandedContext(): Promise<QueryContext> {
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temp',
+          shape: [2, 2, 4, 8],
+          chunkShape: [2, 2, 4, 8],
+          dimensionNames: ['band', 'time', 'lat', 'lon'],
+          chunks: { '0/0/0/0': ramp(2 * 2 * 4 * 8) },
+        },
+        {
+          name: 'band',
+          shape: [2],
+          chunkShape: [2],
+          dimensionNames: ['band'],
+          chunks: { '0': [100, 200] },
+        },
+        {
+          name: 'time',
+          shape: [2],
+          chunkShape: [2],
+          dimensionNames: ['time'],
+          chunks: { '0': [10, 20] },
+        },
+      ],
+    })
+    const store = new ZarrStore({
+      customStore: memory,
+      variable: 'temp',
+      version: 3,
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+    })
+    await store.initialized
+    const zarrArray = await store.getArray()
+    return {
+      zarrStore: store,
+      variable: 'temp',
+      selector: normalizeSelector({ band: 200, time: 10 }),
+      xyLimits: WORLD,
+      mercatorBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },
+      latIsAscending: false,
+      levels: [],
+      level: { index: 0, zarrArray, width: 8, height: 4 },
+      projection: createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: null,
+        xyLimits: WORLD,
+      }),
+      antimeridianWarnings: new Set(),
+      dimensionValues: {},
+      isMultiscale: false,
+      coordLevelIndex: 0,
+      warnedDimensions: new Set(),
+    }
+  }
+
+  it('reads the layer selector when the query passes none', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5))
+    expect(result.temp).toEqual([64])
+  })
+
+  it('keeps the band the layer shows when the query selects only time', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      time: [10, 20],
+    })
+    expect(result.temp).toEqual({ 10: [64], 20: [96] })
+  })
+
+  it('lets the query override a dimension the layer has set', async () => {
+    const context = await makeBandedContext()
+    const result = await queryData(context, point(-157.5, 67.5), {
+      band: 100,
+    })
+    expect(result.temp).toEqual([0])
+  })
+
+  it('rejects an unknown key even when the query selects nothing on the raster', async () => {
+    const context = await makeBandedContext()
+    await expect(
+      queryData(context, point(0, 95), { month: 1 })
+    ).rejects.toBeInstanceOf(SelectorResolutionError)
   })
 })

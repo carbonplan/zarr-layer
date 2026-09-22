@@ -9,7 +9,7 @@ export const SELECTOR_SECTIONS: SelectorSection[] = [
     label: 'Multiscale',
     description:
       'Multiscale Zarr stores. Uses the zarr-conventions/multiscales format. See @carbonplan/topozarr for creation.',
-    datasetIds: ['usgs_dem', 'sentinel_2_eopf', 'burn_probability_conus'],
+    datasetIds: ['usgs_dem', 'burn_probability_conus'],
   },
   {
     label: 'Single Resolution',

@@ -221,6 +221,96 @@ const getRegionMean = (
   return sum / numbers.length
 }
 
+interface LineProfile {
+  values: number[]
+  distance: number[]
+  line: number[][]
+  /** Mean over the sampled cells, each cell counting once. */
+  mean: number
+}
+
+const TRANSECT_LAYER_ID = 'transect-line'
+
+const leafArrays = (values: QueryDataValues): number[][] =>
+  Array.isArray(values)
+    ? [values]
+    : Object.values(values).flatMap((entry) =>
+        leafArrays(entry as QueryDataValues)
+      )
+
+// A multi-value selector returns one aligned series per label, with NaN where
+// a series has no data. The profile shows their mean at each sample.
+const getLineProfile = (
+  result: QueryResult,
+  variable: string,
+  line: number[][]
+): LineProfile | null => {
+  const distance = result.coordinates?.distance as number[] | undefined
+  const data = result[variable] as QueryDataValues | undefined
+  if (!distance || !data) return null
+
+  const series = leafArrays(data)
+  const values = distance.map((_, i) => {
+    const samples = series.map((s) => s[i]).filter(Number.isFinite)
+    return samples.length > 0
+      ? samples.reduce((acc, v) => acc + v, 0) / samples.length
+      : NaN
+  })
+  const finite = values.filter(Number.isFinite)
+  if (finite.length === 0) return null
+  const mean = finite.reduce((acc, v) => acc + v, 0) / finite.length
+  return { values, distance, line, mean }
+}
+
+const SPARKLINE_WIDTH = 200
+const SPARKLINE_HEIGHT = 40
+
+const ProfileSparkline = ({ profile }: { profile: LineProfile }) => {
+  const finite = profile.values.filter(Number.isFinite)
+  const min = Math.min(...finite)
+  const max = Math.max(...finite)
+  const length = profile.distance[profile.distance.length - 1] || 1
+  const points = profile.values
+    .map((value, i) =>
+      Number.isFinite(value)
+        ? `${(profile.distance[i] / length) * SPARKLINE_WIDTH},${
+            SPARKLINE_HEIGHT -
+            ((value - min) / (max - min || 1)) * SPARKLINE_HEIGHT
+          }`
+        : null
+    )
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <Box sx={{ mt: 2, color: 'secondary', fontSize: 1 }}>
+      <Box
+        as='svg'
+        // @ts-expect-error theme-ui Box does not type svg attributes
+        viewBox={`0 0 ${SPARKLINE_WIDTH} ${SPARKLINE_HEIGHT}`}
+        preserveAspectRatio='none'
+        sx={{ width: '100%', height: SPARKLINE_HEIGHT, overflow: 'visible' }}
+      >
+        <polyline
+          points={points}
+          fill='none'
+          stroke='currentColor'
+          strokeWidth={1.5}
+          vectorEffect='non-scaling-stroke'
+        />
+      </Box>
+      <Flex sx={{ justifyContent: 'space-between', mt: 1 }}>
+        <Box>
+          {min.toFixed(2)} to {max.toFixed(2)}
+        </Box>
+        <Box>
+          {profile.values.length} samples over {(length / 1000).toFixed(0)} km
+        </Box>
+      </Flex>
+    </Box>
+  )
+}
+
 const Controls = () => {
   const datasetId = useAppStore((state) => state.datasetId)
   const datasetModule = useAppStore((state) => state.getDatasetModule())
@@ -288,6 +378,9 @@ const Controls = () => {
   const themedColormap = useThemedColormap(colormap)
   const [queryInFlight, setQueryInFlight] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const [lineProfile, setLineProfile] = useState<LineProfile | null>(null)
+  const [lineInFlight, setLineInFlight] = useState(false)
+  const lineAbortRef = useRef<AbortController | null>(null)
 
   const layerConfig = useMemo(
     () => datasetModule.buildLayerProps(datasetState),
@@ -305,8 +398,10 @@ const Controls = () => {
   useEffect(() => {
     // Abort in-flight query and clear results when switching dataset or selector
     abortRef.current?.abort()
+    lineAbortRef.current?.abort()
     setPointResult(null)
     setRegionResult(null)
+    setLineProfile(null)
   }, [datasetId, datasetState, setPointResult, setRegionResult])
 
   const currentVariable = useMemo(() => {
@@ -316,25 +411,26 @@ const Controls = () => {
 
   const pointDisplayValue = useMemo(() => {
     if (!pointResult) return null
-    const values = collectNumbers(
-      pointResult[currentVariable] as QueryDataValues,
-      fillValue
-    )
-    if (values.length === 0) return null
+    const data = pointResult[currentVariable] as QueryDataValues | undefined
+    if (!data) return null
 
     // Range bands render with month=[1..12] so queryData caches-hit, but the
-    // displayed average must only cover the user-selected month range.
-    const coordMonths = pointResult.coordinates?.month as number[] | undefined
+    // displayed average must only cover the user-selected month range. The
+    // result is keyed by month, so each month is read by its label and a
+    // month with no data here is skipped without shifting the others.
+    const months: number[] = []
+    if (isRangeBand && monthStart !== null && monthEnd !== null) {
+      for (let m = monthStart; m <= monthEnd; m++) months.push(m)
+    }
     const filtered =
-      isRangeBand &&
-      coordMonths &&
-      coordMonths.length === values.length &&
-      monthStart !== null &&
-      monthEnd !== null
-        ? values.filter(
-            (_, i) => coordMonths[i] >= monthStart && coordMonths[i] <= monthEnd
+      months.length > 0 && !Array.isArray(data)
+        ? months.flatMap((m) =>
+            collectNumbers(
+              (data as Record<number, QueryDataValues>)[m] ?? [],
+              fillValue
+            )
           )
-        : values
+        : collectNumbers(data, fillValue)
 
     if (filtered.length === 0) return null
     const mean = filtered.reduce((acc, v) => acc + v, 0) / filtered.length
@@ -404,6 +500,112 @@ const Controls = () => {
     setClim([lo, hi])
   }
 
+  // In range mode, query only the selected month range
+  const viewportSelector = () => {
+    if (!isRangeBand || monthStart === null || monthEnd === null) {
+      return layerConfig.selector
+    }
+    const monthRange: number[] = []
+    for (let m = monthStart; m <= monthEnd; m++) {
+      monthRange.push(m)
+    }
+    // Get the base band (tavg or prec) from current selection
+    const baseBand = currentBand === 'tavg_range' ? 'tavg' : 'prec'
+    return { band: baseBand, month: monthRange }
+  }
+
+  // Draw the sampled transect on the map for as long as its profile is shown.
+  useEffect(() => {
+    if (!mapInstance || !lineProfile) return
+    const remove = () => {
+      try {
+        if (mapInstance.getLayer(TRANSECT_LAYER_ID)) {
+          mapInstance.removeLayer(TRANSECT_LAYER_ID)
+        }
+        if (mapInstance.getSource(TRANSECT_LAYER_ID)) {
+          mapInstance.removeSource(TRANSECT_LAYER_ID)
+        }
+      } catch (e) {}
+    }
+    remove()
+    try {
+      mapInstance.addSource(TRANSECT_LAYER_ID, {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'LineString', coordinates: lineProfile.line },
+        },
+      })
+      mapInstance.addLayer({
+        id: TRANSECT_LAYER_ID,
+        type: 'line',
+        source: TRANSECT_LAYER_ID,
+        layout: { 'line-cap': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': 2,
+          'line-dasharray': [2, 2],
+        },
+      })
+    } catch (error) {
+      console.warn('Could not draw the transect line', error)
+    }
+    return remove
+  }, [mapInstance, lineProfile])
+
+  // A profile belongs to the map it was drawn on.
+  useEffect(() => {
+    setLineProfile(null)
+  }, [mapInstance])
+
+  const handleTransectQuery = async () => {
+    if (lineInFlight) return
+    if (!mapInstance || !zarrLayer || !mapInstance.getBounds) return
+
+    lineAbortRef.current?.abort()
+    const controller = new AbortController()
+    lineAbortRef.current = controller
+
+    setLineInFlight(true)
+    try {
+      const bounds = mapInstance.getBounds()
+      const center = mapInstance.getCenter()
+      if (!bounds || !center) {
+        throw new Error('Transect query is not available')
+      }
+      // Bounds come back unwrapped, so a view across the antimeridian gives
+      // an east past 180 and the query reads it as a crossing.
+      let west = bounds.getWest()
+      let east = bounds.getEast()
+      if (east - west >= 360) {
+        west = -180
+        east = 180
+      }
+      const lat = clampLat(center.lat)
+      const geometry: QueryGeometry = {
+        type: 'LineString',
+        coordinates: [
+          [west, lat],
+          [east, lat],
+        ],
+      }
+      const result = (await zarrLayer.queryData(geometry, viewportSelector(), {
+        signal: controller.signal,
+        includeSpatialCoordinates: true,
+      })) as QueryResult
+      setLineProfile(
+        getLineProfile(result, currentVariable, geometry.coordinates)
+      )
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      console.error('Transect query failed', error)
+      setLineProfile(null)
+    } finally {
+      setLineInFlight(false)
+    }
+  }
+
   const handleViewportQuery = async () => {
     if (viewportQueryDisabled || queryInFlight) return
     if (!mapInstance || !zarrLayer || !mapInstance.getBounds) return
@@ -420,19 +622,7 @@ const Controls = () => {
         throw new Error('Viewport query is not available')
       }
       const geometry = boundsToGeometry(bounds)
-      // If in range mode, query only the selected month range
-      let querySelector = layerConfig.selector
-      if (isRangeBand && monthStart !== null && monthEnd !== null) {
-        const monthRange: number[] = []
-        for (let m = monthStart; m <= monthEnd; m++) {
-          monthRange.push(m)
-        }
-        // Get the base band (tavg or prec) from current selection
-        const baseBand = currentBand === 'tavg_range' ? 'tavg' : 'prec'
-        querySelector = { band: baseBand, month: monthRange }
-      }
-
-      const result = (await zarrLayer.queryData(geometry, querySelector, {
+      const result = (await zarrLayer.queryData(geometry, viewportSelector(), {
         signal: controller.signal,
         includeSpatialCoordinates: false,
       })) as QueryResult
@@ -546,6 +736,44 @@ const Controls = () => {
               </Button>
             )}
           </Flex>
+        </Column>
+      </Row>
+
+      <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
+        <Column start={1} width={1}>
+          <Box sx={subheadingSx}>Line</Box>
+        </Column>
+        <Column start={2} width={3}>
+          <Flex sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <Flex sx={{ alignItems: 'center', gap: 2, color: 'secondary' }}>
+              <Badge>{lineProfile ? lineProfile.mean.toFixed(2) : '---'}</Badge>
+              {lineProfile && (
+                <Box
+                  as='span'
+                  onClick={() => setLineProfile(null)}
+                  sx={{
+                    cursor: 'pointer',
+                    fontSize: 0,
+                    color: 'secondary',
+                    '&:hover': { color: 'primary' },
+                  }}
+                >
+                  ✕
+                </Box>
+              )}
+            </Flex>
+            <Button
+              onClick={handleTransectQuery}
+              suffix={<RotatingArrow />}
+              size='xs'
+              title='Profile west to east through the map center'
+              disabled={lineInFlight || !mapInstance || !zarrLayer}
+              sx={{ fontSize: 2 }}
+            >
+              {lineInFlight ? 'Querying...' : 'Query viewport transect'}
+            </Button>
+          </Flex>
+          {lineProfile && <ProfileSparkline profile={lineProfile} />}
         </Column>
       </Row>
 

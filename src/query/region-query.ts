@@ -9,7 +9,7 @@
 import type { Bounds, DimIndicesProps, Selector } from '../types'
 import { pixelToSourceCRS } from '../projection-utils'
 import type {
-  QueryGeometry,
+  AreaQueryGeometry,
   QueryOptions,
   QueryResult,
   QueryDataValues,
@@ -23,6 +23,7 @@ import {
 import { createWGS84ToSourceTransformer } from '../projection-utils'
 import { setObjectValues } from './selector-utils'
 import { SPATIAL_DIMENSION_ALIASES } from '../constants'
+import { buildChannelCombinations } from '../selector-resolution'
 
 /**
  * Resolve the store's spatial axis names for query result keys.
@@ -42,14 +43,6 @@ export function findSpatialDimNames(
 function findByAlias(dimensions: string[], axis: 'lat' | 'lon'): string {
   const aliases = SPATIAL_DIMENSION_ALIASES[axis]
   return dimensions.find((d) => aliases.includes(d.toLowerCase())) ?? axis
-}
-
-function isMultiValSelector(value: Selector[string]): boolean {
-  if (Array.isArray(value)) return true
-  if (value && typeof value === 'object' && 'selected' in value) {
-    return Array.isArray((value as any).selected)
-  }
-  return false
 }
 
 function checkAborted(signal?: AbortSignal) {
@@ -80,44 +73,76 @@ function transformValue(
     result += transforms.addOffset
   }
 
-  return result
+  return Number.isFinite(result) ? result : null
+}
+
+export interface ResultBuilderParams {
+  variable: string
+  selector: Selector
+  data: Float32Array
+  width: number
+  height: number
+  dimensions: string[]
+  coordinates: Record<string, (string | number)[]>
+  sourceBounds: Bounds
+  channels: number
+  channelLabels?: (string | number)[][]
+  multiValueDimNames?: string[]
+  latIsAscending?: boolean
+  transforms?: QueryTransformOptions
+  includeSpatialCoordinates: boolean
+  dimIndices?: DimIndicesProps
+}
+
+export interface ResultBuilder {
+  /**
+   * Read the pixel at (x, y) of the fetched window into the result.
+   * Returns false when every series was fill or non-finite and nothing was
+   * emitted. A cell with a value in at least one series is emitted to all of
+   * them, with NaN standing in where a series has none.
+   */
+  processPixel: (x: number, y: number) => boolean
+  /** Assemble the result from everything processed so far. */
+  buildResult: () => QueryResult
+  /** Names the result uses for its spatial axes. */
+  yDim: string
+  xDim: string
 }
 
 /**
- * Query a raster region.
- * Returns structure matching carbonplan/maps: { [variable]: values, dimensions, coordinates }
+ * Accumulate per-pixel samples from one fetched window into the
+ * carbonplan/maps result shape: { [variable]: values, dimensions, coordinates }.
+ *
+ * Values are scale/offset transformed and fill filtered. Results nest by
+ * channel label when the selector holds more than one value along any
+ * non-spatial dimension.
  */
-export function queryRegion(
-  variable: string,
-  geometry: QueryGeometry,
-  selector: Selector,
-  data: Float32Array | null,
-  width: number,
-  height: number,
-  dimensions: string[],
-  coordinates: Record<string, (string | number)[]>,
-  sourceBounds: Bounds,
-  proj4def: string,
-  channels: number = 1,
-  channelLabels?: (string | number)[][],
-  multiValueDimNames?: string[],
-  latIsAscending?: boolean,
-  transforms?: QueryTransformOptions,
-  options?: QueryOptions,
-  dimIndices?: DimIndicesProps,
-  cachedTransformer?: CachedTransformer
-): QueryResult {
-  const { signal, includeSpatialCoordinates = true } = options ?? {}
+export function createResultBuilder(
+  params: ResultBuilderParams
+): ResultBuilder {
+  const {
+    variable,
+    selector,
+    data,
+    width,
+    height,
+    dimensions,
+    coordinates,
+    sourceBounds,
+    channels,
+    channelLabels,
+    multiValueDimNames,
+    latIsAscending,
+    transforms,
+    includeSpatialCoordinates,
+    dimIndices,
+  } = params
 
-  // Calculate result dimension
-  const singleValuedDims = Object.keys(selector).filter(
-    (k) => !isMultiValSelector(selector[k])
-  ).length
-  const resultDim = dimensions.length - singleValuedDims
-
-  // Determine if results should be nested
-  const useNestedResults = resultDim > 2
-  let results: QueryDataValues = useNestedResults ? {} : []
+  // Nesting follows what the read resolved, never the selector's raw shape,
+  // so an alias, an unknown key, or an empty array cannot make them disagree.
+  const multiDims = multiValueDimNames ?? []
+  const useNestedResults = multiDims.length > 0
+  const results: QueryDataValues = useNestedResults ? {} : []
 
   const { yDim, xDim } = findSpatialDimNames(dimensions, dimIndices)
   const yCoords: number[] = []
@@ -135,10 +160,13 @@ export function queryRegion(
       for (const dim of dimensions) {
         if (dim === yDim || dim === xDim) continue
 
+        const multiIndex = multiDims.indexOf(dim)
         const sel = selector[dim]
         let values: (number | string)[] | undefined
 
-        if (Array.isArray(sel)) {
+        if (multiIndex >= 0 && channelLabels) {
+          values = [...new Set(channelLabels.map((l) => l[multiIndex]))]
+        } else if (Array.isArray(sel)) {
           values = sel as (number | string)[]
         } else if (sel && typeof sel === 'object' && 'selected' in sel) {
           const selected = sel.selected
@@ -165,6 +193,139 @@ export function queryRegion(
       coordinates: buildResultCoordinates(),
     } as QueryResult)
 
+  // Emit pixel-center coordinates in the source CRS.
+  const emitCoords = (x: number, y: number) => {
+    const [srcX, srcY] = pixelToSourceCRS(
+      x + 0.5,
+      y + 0.5,
+      sourceBounds,
+      width,
+      height,
+      latIsAscending
+    )
+    yCoords.push(srcY)
+    xCoords.push(srcX)
+  }
+
+  const processPixel = (x: number, y: number): boolean => {
+    const baseIndex = (y * width + x) * channels
+
+    if (channels === 1 && !useNestedResults) {
+      const transformed = transformValue(data[baseIndex], transforms)
+      if (transformed === null) return false
+
+      if (includeSpatialCoordinates) emitCoords(x, y)
+      ;(results as number[]).push(transformed)
+      return true
+    }
+
+    // Every series gets an entry for every emitted cell, NaN where that
+    // series has no value, so each stays index-aligned with the coordinates.
+    const values: number[] = new Array(channels)
+    let hasValid = false
+    for (let c = 0; c < channels; c++) {
+      const transformed = transformValue(data[baseIndex + c], transforms)
+      values[c] = transformed ?? NaN
+      if (transformed !== null) hasValid = true
+    }
+    if (!hasValid) return false
+
+    if (includeSpatialCoordinates) emitCoords(x, y)
+    for (let c = 0; c < channels; c++) {
+      if (useNestedResults) {
+        const labels = channelLabels?.[c]
+        const keys = labels && labels.length === multiDims.length ? labels : [c]
+        setObjectValues(results, keys, values[c])
+      } else if (Array.isArray(results)) {
+        results.push(values[c])
+      }
+    }
+    return true
+  }
+
+  return { processPixel, buildResult, yDim, xDim }
+}
+
+/**
+ * Result for a query that selected nothing, shaped like any other result for
+ * the same selector: the same dimensions, selector coordinates, and flat or
+ * nested values.
+ */
+export function buildEmptyResult(
+  variable: string,
+  selector: Selector,
+  dimensions: string[],
+  coordinates: Record<string, (string | number)[]>,
+  multiValueDims: Array<{ dimName: string; labels: (number | string)[] }>,
+  dimIndices?: DimIndicesProps
+): QueryResult {
+  const { labelCombinations } = buildChannelCombinations(
+    multiValueDims.map(({ labels }) => ({
+      values: labels.map((_, i) => i),
+      labels,
+    }))
+  )
+  return createResultBuilder({
+    variable,
+    selector,
+    data: new Float32Array(0),
+    width: 0,
+    height: 0,
+    dimensions,
+    coordinates,
+    sourceBounds: [0, 0, 0, 0],
+    channels: 1,
+    channelLabels: labelCombinations,
+    multiValueDimNames: multiValueDims.map((d) => d.dimName),
+    includeSpatialCoordinates: false,
+    dimIndices,
+  }).buildResult()
+}
+
+/**
+ * Query a raster region.
+ * Returns structure matching carbonplan/maps: { [variable]: values, dimensions, coordinates }
+ */
+export function queryRegion(
+  variable: string,
+  geometry: AreaQueryGeometry,
+  selector: Selector,
+  data: Float32Array | null,
+  width: number,
+  height: number,
+  dimensions: string[],
+  coordinates: Record<string, (string | number)[]>,
+  sourceBounds: Bounds,
+  proj4def: string,
+  channels: number = 1,
+  channelLabels?: (string | number)[][],
+  multiValueDimNames?: string[],
+  latIsAscending?: boolean,
+  transforms?: QueryTransformOptions,
+  options?: QueryOptions,
+  dimIndices?: DimIndicesProps,
+  cachedTransformer?: CachedTransformer
+): QueryResult {
+  const { signal, includeSpatialCoordinates = true } = options ?? {}
+
+  const { processPixel, buildResult } = createResultBuilder({
+    variable,
+    selector,
+    data: data ?? new Float32Array(0),
+    width,
+    height,
+    dimensions,
+    coordinates,
+    sourceBounds,
+    channels,
+    channelLabels,
+    multiValueDimNames,
+    latIsAscending,
+    transforms,
+    includeSpatialCoordinates,
+    dimIndices,
+  })
+
   if (!data) return buildResult()
 
   checkAborted(signal)
@@ -185,58 +346,6 @@ export function queryRegion(
     transformer
   )
   if (!pixelGeometry) return buildResult()
-
-  // Emit pixel-center coordinates in the source CRS.
-  const emitCoords = (x: number, y: number) => {
-    const [srcX, srcY] = pixelToSourceCRS(
-      x + 0.5,
-      y + 0.5,
-      sourceBounds,
-      width,
-      height,
-      latIsAscending
-    )
-    yCoords.push(srcY)
-    xCoords.push(srcX)
-  }
-
-  // Helper to process a single pixel
-  const processPixel = (x: number, y: number) => {
-    const baseIndex = (y * width + x) * channels
-
-    // Single-channel fast path
-    if (channels === 1 && !useNestedResults) {
-      const rawValue = data![baseIndex]
-      const transformed = transformValue(rawValue, transforms)
-      if (transformed === null) return
-
-      if (includeSpatialCoordinates) emitCoords(x, y)
-      ;(results as number[]).push(transformed)
-      return
-    }
-
-    // Multi-channel path
-    let hasValid = false
-    for (let c = 0; c < channels; c++) {
-      const rawValue = data![baseIndex + c]
-      const transformed = transformValue(rawValue, transforms)
-      if (transformed === null) continue
-
-      if (!hasValid) {
-        if (includeSpatialCoordinates) emitCoords(x, y)
-        hasValid = true
-      }
-
-      if (useNestedResults && multiValueDimNames) {
-        const labels = channelLabels?.[c]
-        const keys =
-          labels && labels.length === multiValueDimNames.length ? labels : [c]
-        setObjectValues(results, keys, transformed)
-      } else if (Array.isArray(results)) {
-        results.push(transformed)
-      }
-    }
-  }
 
   // Point geometry: process the single pixel directly
   if (pixelGeometry.type === 'Point') {

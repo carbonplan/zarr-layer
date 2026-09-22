@@ -14,11 +14,17 @@ import {
   buildChannelCombinations,
   assertSelectorKeysAreDimensions,
   buildSliceArgsForSelector,
+  findQueryMultiValueDims,
   type DimensionValuesCache,
 } from '../selector-resolution'
 import { normalizeSelector } from '../zarr-utils'
 import { wrapError } from '../errors'
-import { queryRegion, findSpatialDimNames } from './region-query'
+import {
+  queryRegion,
+  findSpatialDimNames,
+  createResultBuilder,
+  buildEmptyResult,
+} from './region-query'
 import {
   computePixelBoundsFromGeometry,
   preprocessQueryGeometry,
@@ -27,13 +33,46 @@ import {
   shiftGeometryIntoExtent,
   type PixelRect,
 } from './query-utils'
+import {
+  groupCellsIntoRuns,
+  lineToPixelPaths,
+  splitLineAtAntimeridian,
+  traceLineCells,
+  validateLineCoordinates,
+  type TracedCell,
+} from './line-query'
+import { QUERY_LINE_RUN_MAX_PX } from '../constants'
 import type {
+  AreaQueryGeometry,
   NestedValues,
   QueryDataValues,
   QueryGeometry,
   QueryOptions,
   QueryResult,
+  QueryTransformOptions,
 } from './types'
+
+const DEFAULT_LINE_DISTANCE_KEY = 'distance'
+
+/**
+ * Key that a LineString result reports distance under. Every other key in
+ * `coordinates` is a store dimension name, so a clash would overwrite that
+ * dimension's values and is rejected.
+ */
+function resolveLineDistanceKey(
+  dimensions: string[],
+  dimIndices: Parameters<typeof findSpatialDimNames>[1],
+  options?: QueryOptions
+): string {
+  const key = options?.distanceKey ?? DEFAULT_LINE_DISTANCE_KEY
+  const { yDim, xDim } = findSpatialDimNames(dimensions, dimIndices)
+  if (key === yDim || key === xDim || dimensions.includes(key)) {
+    throw new Error(
+      `[ZarrLayer] LineString queries report distance under the result coordinate \`${key}\`, which this store already uses as a dimension name. Pass a different \`distanceKey\` in the query options.`
+    )
+  }
+  return key
+}
 
 export type QueryContext = {
   zarrStore: ZarrStore
@@ -92,6 +131,7 @@ export async function fetchQueryData(
         {
           includeSpatialSlices: false,
           trackMultiValue: true,
+          queryLabelling: true,
           spatialBounds: spatialQuery,
           array: level.zarrArray,
         }
@@ -171,20 +211,31 @@ export async function queryData(
   const sourceBounds: Bounds | null = queryLimits
     ? [queryLimits.xMin, queryLimits.yMin, queryLimits.xMax, queryLimits.yMax]
     : null
-  const { yDim: emptyYDim, xDim: emptyXDim } = findSpatialDimNames(
-    desc.dimensions,
-    desc.dimIndices
-  )
-  const emptyResult = (): QueryResult => ({
-    [context.variable]: [],
-    dimensions: [],
-    coordinates: { [emptyYDim]: [], [emptyXDim]: [] },
-  })
-
+  // A query selector overrides the layer's selector key by key, so a
+  // dimension it leaves out stays on the slice the layer is showing.
   const normalizedSelector = selector
-    ? normalizeSelector(selector)
+    ? { ...context.selector, ...normalizeSelector(selector) }
     : context.selector
   assertSelectorKeysAreDimensions(normalizedSelector, desc.dimIndices)
+  if (geometry.type === 'LineString') {
+    validateLineCoordinates(geometry.coordinates)
+  }
+  const lineDistanceKey =
+    geometry.type === 'LineString'
+      ? resolveLineDistanceKey(desc.dimensions, desc.dimIndices, options)
+      : null
+  const emptyResult = (): QueryResult => {
+    const result = buildEmptyResult(
+      context.variable,
+      normalizedSelector,
+      desc.dimensions,
+      desc.coordinates,
+      findQueryMultiValueDims(normalizedSelector, desc.dimIndices),
+      desc.dimIndices
+    )
+    if (lineDistanceKey !== null) result.coordinates[lineDistanceKey] = []
+    return result
+  }
 
   const level = context.level
   if (!context.mercatorBounds || !level || !sourceBounds) {
@@ -200,11 +251,26 @@ export async function queryData(
     fillValue: currentLevel?.fillValue ?? desc.fill_value,
   }
 
+  if (geometry.type === 'LineString') {
+    return queryLineString(
+      context,
+      geometry.coordinates,
+      level,
+      sourceBounds,
+      projectionDef,
+      normalizedSelector,
+      transforms,
+      emptyResult,
+      lineDistanceKey!,
+      options
+    )
+  }
+
   // Closure for running a single pixel-bounds strip query.
   // Captures request-scoped locals (not instance state) to avoid races
   // when queryData is called concurrently on the same instance.
   const runStrip = async (
-    geom: QueryGeometry,
+    geom: AreaQueryGeometry,
     pixelBounds: PixelRect,
     opts?: QueryOptions
   ): Promise<QueryResult> => {
@@ -215,30 +281,13 @@ export async function queryData(
       pixelBounds,
       opts?.signal
     )
-
-    const { minX, minY, maxX, maxY } = pixelBounds
-    const [xMin0, yMin0] = pixelToSourceCRS(
-      minX,
-      minY,
+    const subsetSourceBounds = pixelRectToSourceBounds(
+      pixelBounds,
       sourceBounds,
       level.width,
       level.height,
       context.latIsAscending
     )
-    const [xMax0, yMax0] = pixelToSourceCRS(
-      maxX,
-      maxY,
-      sourceBounds,
-      level.width,
-      level.height,
-      context.latIsAscending
-    )
-    const subsetSourceBounds: Bounds = [
-      Math.min(xMin0, xMax0),
-      Math.min(yMin0, yMax0),
-      Math.max(xMin0, xMax0),
-      Math.max(yMin0, yMax0),
-    ]
 
     return queryRegion(
       context.variable,
@@ -262,7 +311,7 @@ export async function queryData(
     )
   }
 
-  const singleFetch = async (geom: QueryGeometry): Promise<QueryResult> => {
+  const singleFetch = async (geom: AreaQueryGeometry): Promise<QueryResult> => {
     const pixelBounds = computePixelBoundsFromGeometry(
       geom,
       sourceBounds,
@@ -359,6 +408,261 @@ export async function queryData(
   return mergeQueryResults(westResult, eastResult, context.variable, yDim, xDim)
 }
 
+/** Source-CRS extent of a pixel rectangle within a level. */
+function pixelRectToSourceBounds(
+  rect: PixelRect,
+  sourceBounds: Bounds,
+  width: number,
+  height: number,
+  latIsAscending: boolean
+): Bounds {
+  const [x0, y0] = pixelToSourceCRS(
+    rect.minX,
+    rect.minY,
+    sourceBounds,
+    width,
+    height,
+    latIsAscending
+  )
+  const [x1, y1] = pixelToSourceCRS(
+    rect.maxX,
+    rect.maxY,
+    sourceBounds,
+    width,
+    height,
+    latIsAscending
+  )
+  return [
+    Math.min(x0, x1),
+    Math.min(y0, y1),
+    Math.max(x0, x1),
+    Math.max(y0, y1),
+  ]
+}
+
+/**
+ * Sample every cell a line passes through, in path order.
+ *
+ * The line is traced once through the level's full pixel grid, and the
+ * traced cells are read in runs of bounded extent so a long line costs a
+ * chain of small windows rather than the rectangle it spans. Each sample
+ * carries the distance along the line from its start in `distance`.
+ */
+async function queryLineString(
+  context: QueryContext,
+  coords: number[][],
+  level: QueryLevelSnapshot,
+  sourceBounds: Bounds,
+  projectionDef: string,
+  selector: NormalizedSelector,
+  transforms: QueryTransformOptions,
+  emptyResult: () => QueryResult,
+  distanceKey: string,
+  options?: QueryOptions
+): Promise<QueryResult> {
+  const desc = context.zarrStore.describe()
+  const { yDim, xDim } = findSpatialDimNames(desc.dimensions, desc.dimIndices)
+  const includeSpatialCoordinates = options?.includeSpatialCoordinates ?? true
+  const signal = options?.signal
+
+  const supportsWrappedLongitude =
+    context.projection.kind === 'epsg4326' ||
+    context.projection.kind === 'epsg3857'
+  const queryLimits = level.xyLimits ?? context.xyLimits
+  const extentPastAntimeridian =
+    context.projection.kind === 'epsg4326' &&
+    rasterExtentCrossesAntimeridian('EPSG:4326', queryLimits)
+
+  let pieces: number[][][]
+  if (!supportsWrappedLongitude) {
+    pieces = [coords]
+    if (
+      coords.some(([lon]) => lon > 180 || lon < -180) &&
+      !context.antimeridianWarnings.has('proj4-crossing')
+    ) {
+      context.antimeridianWarnings.add('proj4-crossing')
+      console.warn(
+        'Antimeridian-crossing queries are not supported for proj4 projections; results may be incorrect'
+      )
+    }
+  } else if (extentPastAntimeridian && queryLimits) {
+    if (queryLimits.xMin < queryLimits.xMax) {
+      // The raster's seam sits at its own west edge, so pieces are cut there
+      // and land on its grid wherever it reaches past ±180.
+      pieces = splitLineAtAntimeridian(coords, queryLimits.xMin)
+    } else {
+      pieces = [coords]
+      if (!context.antimeridianWarnings.has('raster-extent-crossing')) {
+        context.antimeridianWarnings.add('raster-extent-crossing')
+        console.warn(
+          'Antimeridian-crossing queries are not supported for rasters whose own extent crosses the antimeridian; results may be incorrect'
+        )
+      }
+    }
+  } else {
+    pieces = splitLineAtAntimeridian(coords)
+  }
+
+  const cells: TracedCell[] = []
+  let distance = 0
+  for (const piece of pieces) {
+    const { sections, trailingGap } = lineToPixelPaths(
+      piece,
+      sourceBounds,
+      level.width,
+      level.height,
+      projectionDef,
+      context.latIsAscending,
+      context.projection.toWGS84 ?? undefined
+    )
+    for (const section of sections) {
+      const traced = traceLineCells(
+        section.path,
+        level.width,
+        level.height,
+        distance + section.gapBefore
+      )
+      for (const cell of traced.cells) cells.push(cell)
+      distance = traced.endDistance
+    }
+    distance += trailingGap
+  }
+
+  const runs = groupCellsIntoRuns(cells, QUERY_LINE_RUN_MAX_PX)
+  if (runs.length === 0) return emptyResult()
+
+  const runResults: QueryResult[] = []
+  for (const run of runs) {
+    if (signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+    const fetched = await fetchQueryData(
+      context,
+      level,
+      selector,
+      run.rect,
+      signal
+    )
+    const builder = createResultBuilder({
+      variable: context.variable,
+      selector,
+      data: fetched.data,
+      width: fetched.width,
+      height: fetched.height,
+      dimensions: desc.dimensions,
+      coordinates: desc.coordinates,
+      sourceBounds: pixelRectToSourceBounds(
+        run.rect,
+        sourceBounds,
+        level.width,
+        level.height,
+        context.latIsAscending
+      ),
+      channels: fetched.channels,
+      channelLabels: fetched.channelLabels,
+      multiValueDimNames: fetched.multiValueDimNames,
+      latIsAscending: context.latIsAscending,
+      transforms,
+      includeSpatialCoordinates,
+      dimIndices: desc.dimIndices,
+    })
+
+    const distances: number[] = []
+    for (const cell of run.cells) {
+      const emitted = builder.processPixel(
+        cell.x - run.rect.minX,
+        cell.y - run.rect.minY
+      )
+      if (emitted && includeSpatialCoordinates) distances.push(cell.distance)
+    }
+    const result = builder.buildResult()
+    result.coordinates[distanceKey] = distances
+
+    runResults.push(result)
+  }
+
+  return concatQueryResults(runResults, context.variable, [
+    yDim,
+    xDim,
+    distanceKey,
+  ])
+}
+
+/**
+ * Join per-window results, in order, into one. Each per-pixel array is built
+ * once at its final length, so the cost is linear in the samples however
+ * many windows a long line was read in.
+ *
+ * `perPixelKeys` names the coordinate arrays that hold one entry per sample.
+ * Other coordinates describe the selection and are taken from the first
+ * result.
+ */
+export function concatQueryResults(
+  results: QueryResult[],
+  variable: string,
+  perPixelKeys: string[]
+): QueryResult {
+  const [first] = results
+  if (results.length === 1) return first
+
+  const coordinates: Record<string, (number | string)[]> = {}
+  for (const key of Object.keys(first.coordinates)) {
+    coordinates[key] = perPixelKeys.includes(key)
+      ? concatArrays(results.map((r) => r.coordinates[key] ?? []))
+      : first.coordinates[key]
+  }
+
+  return {
+    [variable]: concatValues(
+      results.map((r) => r[variable] as QueryDataValues)
+    ),
+    dimensions: first.dimensions,
+    coordinates,
+  }
+}
+
+function concatArrays<T>(parts: T[][]): T[] {
+  let total = 0
+  for (const part of parts) total += part.length
+  const out = new Array<T>(total)
+  let offset = 0
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) out[offset + i] = part[i]
+    offset += part.length
+  }
+  return out
+}
+
+/**
+ * Concatenate flat value arrays, or nested series leaf by leaf. A window that
+ * emitted no samples has no series keys and adds nothing to any leaf.
+ */
+function concatValues(parts: QueryDataValues[]): QueryDataValues {
+  if (parts.every((part) => Array.isArray(part))) {
+    return concatArrays(parts as number[][])
+  }
+  const nested = parts.filter(
+    (part): part is NestedValues => !Array.isArray(part)
+  )
+  const result: NestedValues = {}
+  const has = (target: object, key: string) =>
+    Object.prototype.hasOwnProperty.call(target, key)
+  for (const part of nested) {
+    for (const key of Object.keys(part)) {
+      if (has(result, key)) continue
+      Object.defineProperty(result, key, {
+        value: concatValues(
+          nested.filter((p) => has(p, key)).map((p) => p[key])
+        ),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+  }
+  return result
+}
+
 /**
  * Merge two QueryResult objects from west and east strips.
  *
@@ -429,7 +733,7 @@ export function mergeNestedValues(
   }
   // Include keys only in b
   for (const key of Object.keys(b)) {
-    if (!(key in result)) result[key] = b[key]
+    if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = b[key]
   }
   return result
 }

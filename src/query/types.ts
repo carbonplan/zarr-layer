@@ -11,6 +11,9 @@ export interface NestedValues {
  *
  * Flat: `number[]` when selector = `{ month: 1 }`
  * Nested: `{ 1: number[], 2: number[] }` when selector = `{ month: [1, 2] }`
+ *
+ * Nested series share one set of per-sample coordinates, so they all have the
+ * same length. A cell with data in only some series holds `NaN` in the rest.
  */
 export type QueryDataValues = number[] | NestedValues
 
@@ -22,6 +25,9 @@ export type QueryDataValues = number[] | NestedValues
  * `lat`/`lon`, `latitude`/`longitude`) and the coordinate arrays carry
  * source-CRS values: Web Mercator meters for EPSG:3857, degrees for
  * EPSG:4326, source units for custom-proj4 datasets.
+ *
+ * LineString queries add a `distance` coordinate array, parallel to the
+ * spatial ones, in meters along the line.
  */
 export interface QueryResult {
   /** Variable name mapped to its values (flat array or nested based on selector) */
@@ -31,7 +37,10 @@ export interface QueryResult {
     | { [key: string]: (number | string)[] }
   /** Dimension names in order, using the same spatial keys as coordinates */
   dimensions: string[]
-  /** Coordinate arrays for each dimension */
+  /**
+   * Coordinate arrays. Spatial keys, and `distance` for LineString queries,
+   * hold one entry per sample. Other dimensions hold their selected values.
+   */
   coordinates: {
     [key: string]: (number | string)[]
   }
@@ -72,9 +81,29 @@ export interface GeoJSONMultiPolygon {
 }
 
 /**
- * Supported GeoJSON geometry types for queries.
+ * GeoJSON LineString geometry.
  */
-export type QueryGeometry = GeoJSONPoint | GeoJSONPolygon | GeoJSONMultiPolygon
+export interface GeoJSONLineString {
+  type: 'LineString'
+  coordinates: number[][]
+}
+
+/**
+ * Geometries that select a set of cells with no inherent order.
+ */
+export type AreaQueryGeometry =
+  | GeoJSONPoint
+  | GeoJSONPolygon
+  | GeoJSONMultiPolygon
+
+/**
+ * Supported GeoJSON geometry types for queries.
+ *
+ * A LineString returns one sample per grid cell the line crosses, in path
+ * order, with a `distance` coordinate giving the distance in meters along
+ * the line from its start to where it enters each cell.
+ */
+export type QueryGeometry = AreaQueryGeometry | GeoJSONLineString
 
 /**
  * Transform options for query results to match rendered values.
@@ -113,4 +142,10 @@ export interface QueryOptions {
   includeSpatialCoordinates?: boolean
   /** Resolution level to read from. Defaults to `'current'`. */
   level?: QueryLevel
+  /**
+   * Result coordinate key that LineString queries report distance under.
+   * Defaults to `'distance'`. Set it when the store has a dimension of that
+   * name, which the query rejects rather than overwrite.
+   */
+  distanceKey?: string
 }
