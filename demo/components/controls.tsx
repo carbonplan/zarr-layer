@@ -225,6 +225,8 @@ interface LineProfile {
   values: number[]
   distance: number[]
   line: number[][]
+  /** Mean over the sampled cells, each cell counting once. */
+  mean: number
 }
 
 const TRANSECT_LAYER_ID = 'transect-line'
@@ -254,7 +256,10 @@ const getLineProfile = (
       ? samples.reduce((acc, v) => acc + v, 0) / samples.length
       : NaN
   })
-  return values.some(Number.isFinite) ? { values, distance, line } : null
+  const finite = values.filter(Number.isFinite)
+  if (finite.length === 0) return null
+  const mean = finite.reduce((acc, v) => acc + v, 0) / finite.length
+  return { values, distance, line, mean }
 }
 
 const SPARKLINE_WIDTH = 200
@@ -741,7 +746,7 @@ const Controls = () => {
         <Column start={2} width={3}>
           <Flex sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <Flex sx={{ alignItems: 'center', gap: 2, color: 'secondary' }}>
-              <Badge>{lineProfile ? lineProfile.values.length : '---'}</Badge>
+              <Badge>{lineProfile ? lineProfile.mean.toFixed(2) : '---'}</Badge>
               {lineProfile && (
                 <Box
                   as='span'
