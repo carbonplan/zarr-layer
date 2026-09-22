@@ -860,14 +860,14 @@ export class RegionRenderer {
     await fetcher.fetchRegions(regions)
   }
 
-  update(map: MapLike, gl: WebGL2RenderingContext): void {
-    // Cache gl context for use in setSelector
+  /**
+   * Track the map without fetching: pick the level the zoom asks for, which
+   * queries and `ready` load, and keep the gl context. `update` does this
+   * too; a layer outside its zoom range calls only this.
+   */
+  followZoom(map: MapLike, gl: WebGL2RenderingContext): void {
     this.cachedGl = gl
-
-    // Don't proceed if metadata is still loading
-    if (this.loadingManager.metadataLoading) {
-      return
-    }
+    if (this.loadingManager.metadataLoading) return
 
     // Pick target: zoom-selected for multiscale, single level otherwise.
     if (this.isMultiscale && this.levels.length > 0) {
@@ -875,6 +875,15 @@ export class RegionRenderer {
       this.desiredLevelIndex = this.selectLevelForZoom(mapZoom)
     } else {
       this.desiredLevelIndex = 0
+    }
+  }
+
+  update(map: MapLike, gl: WebGL2RenderingContext): void {
+    this.followZoom(map, gl)
+
+    // Don't proceed if metadata is still loading
+    if (this.loadingManager.metadataLoading) {
+      return
     }
 
     // Kick off a load only when the committed level doesn't match the
@@ -1154,12 +1163,6 @@ export class RegionRenderer {
     // Retry levels latched by the previous selector.
     this.levelLoader.clearSelectorFailures()
 
-    if (!this.cachedGl) {
-      // No gl context yet — selector is stored, update() will handle loading.
-      this.invalidate()
-      return
-    }
-
     // Abort in-flight region fetches still running with the old selector.
     // Their catch/finally handles state cleanup and re-invalidation.
     for (const [, region] of this.regionCache) {
@@ -1177,8 +1180,11 @@ export class RegionRenderer {
       const outcome = await this.loadLevel(this.activeLevel.index, {
         reuseArray: true,
       })
-      // Cached regions also belong to the previous selector.
-      if (outcome === 'failed') this.clearRegionCache(this.cachedGl)
+      // Cached regions also belong to the previous selector. Without a gl
+      // context no update has run yet, so there are none to clear.
+      if (outcome === 'failed' && this.cachedGl) {
+        this.clearRegionCache(this.cachedGl)
+      }
     } else if (this.loadingLevelIndex !== null) {
       // A level load is already in flight; let it pick up the new
       // selector via its pre-commit `this.selector !== selectorSnapshot`

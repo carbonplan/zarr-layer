@@ -617,7 +617,8 @@ export class ZarrLayer {
       this.lastIsGlobe = isGlobe
       this.regionRenderer?.onProjectionChange(isGlobe)
 
-      this.regionRenderer?.update(this.map, this.gl!)
+      if (this.isZoomInRange()) this.regionRenderer?.update(this.map, this.gl!)
+      else this.regionRenderer?.followZoom(this.map, this.gl!)
     } catch (err) {
       this.initError = err instanceof Error ? err : new Error(String(err))
       console.error(
@@ -661,8 +662,12 @@ export class ZarrLayer {
     this.regionRenderer.setLoadingCallback(this.handleChunkLoadingChange)
     await this.regionRenderer.initialize()
 
+    // The map may have zoomed out of range while this was loading; the
+    // per-frame update picks up again once it zooms back in. Until then the
+    // level still follows the zoom, for queries and `ready`.
     if (this.map && this.gl) {
-      this.regionRenderer.update(this.map, this.gl)
+      if (this.isZoomInRange()) this.regionRenderer.update(this.map, this.gl)
+      else this.regionRenderer.followZoom(this.map, this.gl)
     }
   }
 
