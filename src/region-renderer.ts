@@ -789,12 +789,14 @@ export class RegionRenderer {
     const viewportChanged = viewportHash !== this.lastViewportHash
     this.lastViewportHash = viewportHash
 
-    // Skip if nothing to fetch
+    // Skip if nothing to fetch. Still evict: fetches started on an earlier
+    // update have since landed, and their bytes count towards the budget.
     if (
       newRegions.length === 0 &&
       staleRegions.length === 0 &&
       !viewportChanged
     ) {
+      this.evictOldRegions(gl)
       return
     }
 

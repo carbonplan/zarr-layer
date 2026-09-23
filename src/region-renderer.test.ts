@@ -473,6 +473,20 @@ describe('RegionRenderer', () => {
     expect(cache.isProtected(fallback.key)).toBe(false)
   })
 
+  it('evicts on a settled viewport once fetched bytes have landed', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle(renderer)
+    seam(renderer).getRegionStates(gl)
+    const cache = seam(renderer).regionCache
+    const evict = vi.spyOn(cache, 'evict')
+
+    // Nothing left to fetch, but the bytes that arrived after the last
+    // eviction may have pushed the cache over its budget.
+    renderer.update(map, gl)
+    expect(evict).toHaveBeenCalled()
+  })
+
   it('drops the interleaved copy once the shader samples band textures', async () => {
     const { renderer, gl, map } = await makeRenderer()
     // setSelector rebuilds the level only once a gl context has been cached,
