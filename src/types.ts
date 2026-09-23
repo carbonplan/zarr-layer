@@ -1,5 +1,6 @@
 import * as zarr from 'zarrita'
 import type { XYLimits } from './map-utils'
+import type { UniformValue } from './renderer-types'
 
 /** Bounds tuple: [xMin, yMin, xMax, yMax] */
 export type Bounds = [number, number, number, number]
@@ -123,7 +124,7 @@ export interface ZarrLayerOptions {
   latIsAscending?: boolean | null
   fillValue?: number
   customFrag?: string
-  uniforms?: Record<string, number>
+  uniforms?: Record<string, UniformValue>
   renderingMode?: '2d' | '3d'
   onLoadingStateChange?: LoadingStateCallback
   /**

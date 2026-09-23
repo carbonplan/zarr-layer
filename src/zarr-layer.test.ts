@@ -77,3 +77,27 @@ describe('ZarrLayer map lifecycle', () => {
     expect(unsubscribed('remove')).toEqual(subscribed('remove'))
   })
 })
+
+describe('ZarrLayer uniforms', () => {
+  const withUniforms = (uniforms: Record<string, number | number[]>) =>
+    new ZarrLayer({
+      id: 'zarr-layer',
+      source: 'https://example.invalid/missing.zarr',
+      variable: 'foo',
+      colormap: [
+        [0, 0, 0],
+        [255, 255, 255],
+      ],
+      clim: [0, 1],
+      customFrag: 'fragColor = vec4(foo * w[0]);',
+      uniforms,
+    })
+
+  it('rejects an empty uniform array, which GLSL cannot declare', () => {
+    expect(() => withUniforms({ w: [] })).toThrow("Uniform array 'w' is empty")
+    const layer = withUniforms({ w: [1] })
+    expect(() => layer.setUniforms({ w: [] })).toThrow(
+      "Uniform array 'w' is empty"
+    )
+  })
+})

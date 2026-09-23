@@ -144,8 +144,11 @@ export class ZarrRenderer {
         customShaderConfig.customUniforms
       )) {
         const loc = shaderProgram.customUniformLocs.get(name)
-        if (loc) {
+        if (!loc) continue
+        if (typeof value === 'number') {
           gl.uniform1f(loc, value)
+        } else {
+          gl.uniform1fv(loc, value)
         }
       }
     }

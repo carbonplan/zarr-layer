@@ -11,10 +11,13 @@ export interface RendererUniforms {
   fixedDataScale: number
 }
 
+/** A custom-shader uniform: a float, or a float array declared at its length. */
+export type UniformValue = number | number[] | Float32Array
+
 export interface CustomShaderConfig {
   bands: string[]
   customFrag?: string
-  customUniforms?: Record<string, number>
+  customUniforms?: Record<string, UniformValue>
   /** Storage format of the band texture; decides the sampler type. */
   bandFormat?: BandFormat
 }

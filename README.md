@@ -118,7 +118,7 @@ map.on('load', () => {
 | latIsAscending | boolean | auto | Latitude orientation |
 | renderingMode | `'2d'` \| `'3d'` | `'3d'` | Custom layer rendering mode |
 | customFrag | string | - | Custom fragment shader |
-| uniforms | object | - | Shader uniform values (requires `customFrag`) |
+| uniforms | object | - | Shader uniform values, numbers or number arrays (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
 | onAuthError | function | - | Called with the HTTP status when a signed request fails with expired credentials (see [authentication](#authentication)) |
@@ -221,6 +221,25 @@ new ZarrLayer({
   uniforms: { u_weight: 1.0 },
 })
 ```
+
+A uniform can also be an array of numbers (or a `Float32Array`), which the shader receives as a `float` array of the same length. This suits values that come as a vector, such as a query to compare against embedding bands:
+
+```ts
+const layer = new ZarrLayer({
+  // ...
+  selector: { band: ['A00', 'A01', 'A02'] },
+  customFrag: `
+    float similarity = A00 * u_query[0] + A01 * u_query[1] + A02 * u_query[2];
+    vec4 c = texture(colormap, vec2(clamp(similarity, 0.0, 1.0), 0.5));
+    fragColor = vec4(c.rgb * opacity, opacity);
+  `,
+  uniforms: { u_query: [0.2, 0.5, 0.3] },
+})
+
+layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
+```
+
+Updating an array's values is cheap, but changing its length recompiles the shader. Each array element takes one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), and the layer throws if the arrays need more than the device has.
 
 ### NDVI example
 

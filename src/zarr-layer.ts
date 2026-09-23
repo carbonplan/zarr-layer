@@ -17,7 +17,7 @@ import { ZarrStore } from './zarr-store'
 import { maplibreFragmentShaderSource } from './shaders'
 import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
-import type { CustomShaderConfig } from './renderer-types'
+import type { CustomShaderConfig, UniformValue } from './renderer-types'
 import type {
   Bounds,
   ColormapArray,
@@ -115,6 +115,18 @@ function mapboxGlobeToMercatorTransition(zoom: number): number {
   return smoothstep(5, 6, zoom)
 }
 
+/** GLSL has no zero-length arrays, so an empty one could never compile. */
+function checkUniforms(
+  uniforms: Record<string, UniformValue>
+): Record<string, UniformValue> {
+  for (const [name, value] of Object.entries(uniforms)) {
+    if (typeof value !== 'number' && value.length === 0) {
+      throw new Error(`[ZarrLayer] Uniform array '${name}' is empty.`)
+    }
+  }
+  return uniforms
+}
+
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
   readonly renderingMode: '2d' | '3d'
@@ -194,7 +206,7 @@ export class ZarrLayer {
   private readyPromise: Promise<void> | null = null
   private fragmentShaderSource: string = maplibreFragmentShaderSource
   private customFrag: string | undefined
-  private customUniforms: Record<string, number> = {}
+  private customUniforms: Record<string, UniformValue> = {}
   private bandNames: string[] = []
   private customShaderConfig: CustomShaderConfig | null = null
   private onLoadingStateChange: LoadingStateCallback | undefined
@@ -372,7 +384,7 @@ export class ZarrLayer {
     this.maxZoom = maxzoom
 
     this.customFrag = customFrag
-    this.customUniforms = uniforms || {}
+    this.customUniforms = checkUniforms(uniforms || {})
 
     this.refreshCustomShaderConfig()
 
@@ -456,7 +468,7 @@ export class ZarrLayer {
     this.invalidate()
   }
 
-  setUniforms(uniforms: Record<string, number>) {
+  setUniforms(uniforms: Record<string, UniformValue>) {
     if (!this.customShaderConfig) {
       console.warn(
         '[ZarrLayer] setUniforms() called but layer was not created with customFrag. ' +
@@ -464,7 +476,7 @@ export class ZarrLayer {
       )
       return
     }
-    this.customUniforms = { ...this.customUniforms, ...uniforms }
+    this.customUniforms = { ...this.customUniforms, ...checkUniforms(uniforms) }
     this.customShaderConfig.customUniforms = this.customUniforms
     this.invalidate()
   }

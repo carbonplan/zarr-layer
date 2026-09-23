@@ -16,6 +16,7 @@ import type {
   CustomShaderConfig,
   MapboxParams,
   ProjectionMode,
+  UniformValue,
 } from './renderer-types'
 
 export interface ShaderProgram {
@@ -105,10 +106,42 @@ export function makeShaderVariantKey(options: {
           'custom',
           customShaderConfig.bandFormat ?? 'float',
           customShaderConfig.bands.join('_'),
+          uniformSignature(customShaderConfig.customUniforms),
           shaderVariant,
         ].join('_')
       : shaderVariant
   return [baseVariant, projectionMode].join('_')
+}
+
+/** Array lengths are compiled into the declarations, so they key the program. */
+function uniformSignature(uniforms: Record<string, UniformValue> = {}): string {
+  return Object.entries(uniforms)
+    .map(([name, value]) =>
+      typeof value === 'number' ? name : `${name}[${value.length}]`
+    )
+    .join(',')
+}
+
+/**
+ * GLSL ES gives each float array element its own vec4 register, so an array
+ * of N floats needs N of the device's fragment uniform vectors.
+ */
+function assertUniformArraysFit(
+  gl: WebGL2RenderingContext,
+  uniforms: Record<string, UniformValue> = {}
+): void {
+  let vectors = 0
+  for (const value of Object.values(uniforms)) {
+    if (typeof value !== 'number') vectors += value.length
+  }
+  if (vectors === 0) return
+  const max = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) as number
+  if (vectors > max) {
+    throw new Error(
+      `[ZarrLayer] Uniform arrays need ${vectors} fragment uniform vectors, ` +
+        `but this device supports ${max}.`
+    )
+  }
 }
 
 const toFloat32Array = (
@@ -177,13 +210,15 @@ export function createShaderProgram(
     useCustomShader && config
       ? createFragmentShaderSource({
           bands: config.bands,
-          customUniforms: config.customUniforms
-            ? Object.keys(config.customUniforms)
-            : [],
+          customUniforms: config.customUniforms,
           customFrag: config.customFrag,
           bandFormat: config.bandFormat,
         })
       : fragmentShaderSource
+
+  if (useCustomShader && config) {
+    assertUniformArraysFit(gl, config.customUniforms)
+  }
 
   const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource)
   const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource)

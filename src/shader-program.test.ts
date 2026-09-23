@@ -103,6 +103,18 @@ describe('makeShaderVariantKey', () => {
     expect(banded).not.toBe(base)
     expect(banded).toContain('red_nir')
   })
+
+  it('keys custom shaders by uniform array length', () => {
+    const key = (customUniforms: Record<string, number | number[]>) =>
+      makeShaderVariantKey({
+        projectionMode: 'mapbox',
+        customShaderConfig: { bands: ['a'], customUniforms },
+      })
+    // Lengths are compiled into the declarations; values are not.
+    expect(key({ w: [1, 2] })).toBe(key({ w: [3, 4] }))
+    expect(key({ w: [1, 2] })).not.toBe(key({ w: [1, 2, 3] }))
+    expect(key({ w: 1 })).not.toBe(key({ w: [1] }))
+  })
 })
 
 describe('projection mode -> compiled vertex shader', () => {

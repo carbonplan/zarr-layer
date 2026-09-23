@@ -6,6 +6,7 @@
  */
 
 import type { BandFormat } from './band-format'
+import type { UniformValue } from './renderer-types'
 
 export interface ShaderData {
   vertexShaderPrelude: string
@@ -486,13 +487,19 @@ ${FRAGMENT_SHADER_REPROJECT}
 
 interface FragmentShaderOptions {
   bands: string[]
-  customUniforms?: string[]
+  customUniforms?: Record<string, UniformValue>
   customFrag?: string
   bandFormat?: BandFormat
 }
 
 // Compiled once at module load to avoid recompilation on every shader creation
-const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*;/g
+const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*(?:\[\s*\w+\s*\])?\s*;/g
+
+function declareUniform(name: string, value: UniformValue): string {
+  return typeof value === 'number'
+    ? `uniform float ${name};`
+    : `uniform float ${name}[${value.length}];`
+}
 
 /**
  * Sampler for the texture array holding every band a custom shader reads,
@@ -530,17 +537,18 @@ export function createFragmentShaderSource(
 ): string {
   const {
     bands,
-    customUniforms = [],
+    customUniforms = {},
     customFrag,
     bandFormat = 'float',
   } = options
   const native = bandFormat !== 'float'
   const samplerType = BAND_SAMPLER_TYPES[bandFormat]
 
-  const customUniformDecls = customUniforms
-    .map((name) => `uniform float ${name};`)
+  const customUniformDecls = Object.entries(customUniforms)
+    .map(([name, value]) => declareUniform(name, value))
     .join('\n')
 
+  const declaredUniforms = new Set(Object.keys(customUniforms))
   let processedFragBody = customFrag || ''
   // Reset lastIndex since we reuse the regex
   UNIFORM_REGEX.lastIndex = 0
@@ -548,7 +556,7 @@ export function createFragmentShaderSource(
   const extractedUniforms: string[] = []
 
   while ((match = UNIFORM_REGEX.exec(processedFragBody)) !== null) {
-    if (!customUniforms.includes(match[1])) {
+    if (!declaredUniforms.has(match[1])) {
       extractedUniforms.push(match[0])
     }
   }

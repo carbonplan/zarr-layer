@@ -178,11 +178,40 @@ describe('createFragmentShaderSource — structure', () => {
   it('declares explicitly-listed customUniforms', () => {
     const src = createFragmentShaderSource({
       bands: ['temp'],
-      customUniforms: ['gain'],
+      customUniforms: { gain: 1 },
       customFrag: 'gl_FragColor = vec4(temp * gain, 0.0, 0.0, 1.0);',
     })
     expect(src).toContain('uniform float gain;')
     expect(src).not.toContain('gl_FragColor')
+  })
+
+  it('declares array uniforms at the length of their value', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customUniforms: { weights: [1, 2, 3], query: new Float32Array(64) },
+      customFrag: 'fragColor = vec4(temp * weights[0] * query[63]);',
+    })
+    expect(src).toContain('uniform float weights[3];')
+    expect(src).toContain('uniform float query[64];')
+  })
+
+  it('hoists array uniforms declared in customFrag out of main', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: 'uniform float w[4];\nfragColor = vec4(temp * w[0]);',
+    })
+    const main = src.slice(src.indexOf('void main()'))
+    expect(src).toContain('uniform float w[4];')
+    expect(main).not.toContain('uniform')
+  })
+
+  it('drops a customFrag declaration of a uniform the layer declares', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customUniforms: { w: [1, 2, 3, 4] },
+      customFrag: 'uniform float w[4];\nfragColor = vec4(temp * w[0]);',
+    })
+    expect(src.match(/uniform float w\[4\];/g)).toHaveLength(1)
   })
 })
 
