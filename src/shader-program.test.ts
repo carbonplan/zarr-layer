@@ -348,6 +348,24 @@ describe('driver-eliminated uniforms', () => {
     expect(shaderProgram.worldXOffsetLoc).toBeNull()
   })
 
+  it('builds a custom shader that reads neither opacity nor any band', () => {
+    const gl = createRecordingGl({
+      inactiveUniforms: ['opacity', 'u_texScale', 'u_texOffset'],
+    })
+    const { shaderProgram } = createShaderProgram(gl, {
+      fragmentShaderSource: maplibreFragmentShaderSource,
+      shaderData: FAKE_SHADER_DATA,
+      projectionMode: 'maplibre-proj4',
+      customShaderConfig: {
+        bands: ['temp'],
+        customFrag: 'fragColor = vec4(1.0, 0.0, 0.0, 1.0);',
+      },
+    })
+    expect(shaderProgram.opacityLoc).toBeNull()
+    expect(shaderProgram.texScaleLoc).toBeNull()
+    expect(shaderProgram.texOffsetLoc).toBeNull()
+  })
+
   it('still rejects a program missing a uniform every variant samples', () => {
     const gl = createRecordingGl({ inactiveUniforms: ['opacity'] })
     expect(() => build(gl)).toThrow(

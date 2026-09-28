@@ -36,15 +36,17 @@ export interface ShaderProgram {
   clippingPlaneLoc: WebGLUniformLocation | null
   projectionTransitionLoc: WebGLUniformLocation | null
   climLoc: WebGLUniformLocation | null
-  opacityLoc: WebGLUniformLocation
+  /** Null when a custom shader never reads `opacity`. */
+  opacityLoc: WebGLUniformLocation | null
   fillValueLoc: WebGLUniformLocation | null
   scaleFactorLoc: WebGLUniformLocation | null
   addOffsetLoc: WebGLUniformLocation | null
   cmapLoc: WebGLUniformLocation | null
   colormapLoc: WebGLUniformLocation | null
   texLoc: WebGLUniformLocation | null
-  texScaleLoc: WebGLUniformLocation
-  texOffsetLoc: WebGLUniformLocation
+  /** Null when a custom shader reads no bands. */
+  texScaleLoc: WebGLUniformLocation | null
+  texOffsetLoc: WebGLUniformLocation | null
   vertexLoc: number
   pixCoordLoc: number
   projectionMode: ProjectionMode
@@ -209,6 +211,10 @@ export function createShaderProgram(
     needsMaplibre ? gl.getUniformLocation(program, name) : null
   const mapboxUniform = (name: string) =>
     needsMapbox ? gl.getUniformLocation(program, name) : null
+  const optionalForCustom = (name: string) =>
+    useCustomShader
+      ? gl.getUniformLocation(program, name)
+      : mustGetUniformLocation(gl, program, name)
 
   const shaderProgram: ShaderProgram = {
     program,
@@ -243,9 +249,12 @@ export function createShaderProgram(
     clippingPlaneLoc: maplibreUniform('u_projection_clipping_plane'),
     projectionTransitionLoc: maplibreUniform('u_projection_transition'),
 
-    opacityLoc: mustGetUniformLocation(gl, program, 'opacity'),
-    texScaleLoc: mustGetUniformLocation(gl, program, 'u_texScale'),
-    texOffsetLoc: mustGetUniformLocation(gl, program, 'u_texOffset'),
+    // Built-in shaders always read opacity and sample the data; a custom
+    // one may do neither (the sample coordinates only feed band reads), and
+    // the compiler then drops those uniforms.
+    opacityLoc: optionalForCustom('opacity'),
+    texScaleLoc: optionalForCustom('u_texScale'),
+    texOffsetLoc: optionalForCustom('u_texOffset'),
     vertexLoc: gl.getAttribLocation(program, 'vertex'),
     pixCoordLoc: gl.getAttribLocation(program, 'pix_coord_in'),
 
