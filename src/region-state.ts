@@ -37,7 +37,7 @@ export interface RegionState {
   selectorVersion: number
   // Multi-band support
   bandData: Map<string, Float32Array>
-  // Every band packed into one RGBA texture array, four bands per layer
+  // Every band a custom shader samples, one band per texture array layer
   bandTexture: WebGLTexture | null
   // Band list the resident texture holds (see bandTextureKey); null until uploaded
   bandTextureKey: string | null

@@ -20,7 +20,13 @@ const TEXTURE0 = 0x84c0
 const TEXTURE_2D_ARRAY = 0x8c1a
 const R32F = 0x822e
 
-function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
+const MAX_ARRAY_TEXTURE_LAYERS = 0x88ff
+const MAX_TEXTURE_SIZE = 0x0d33
+
+function fakeGl({
+  failTextures = false,
+  maxLayers = 256,
+}: { failTextures?: boolean; maxLayers?: number } = {}) {
   let textureCount = 0
   let bufferCount = 0
   return {
@@ -30,6 +36,15 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
     R32F,
     RED: 0x1903,
     FLOAT: 0x1406,
+    MAX_ARRAY_TEXTURE_LAYERS,
+    MAX_TEXTURE_SIZE,
+    getParameter: vi.fn((pname: number) =>
+      pname === MAX_ARRAY_TEXTURE_LAYERS
+        ? maxLayers
+        : pname === MAX_TEXTURE_SIZE
+        ? 4096
+        : null
+    ),
     createTexture: vi.fn(() => (failTextures ? null : { tex: ++textureCount })),
     createBuffer: vi.fn(() => ({ buf: ++bufferCount })),
     deleteTexture: vi.fn(),
@@ -232,6 +247,32 @@ describe('ensureRegionGpuResources with band rendering', () => {
     expect(ensureRegionGpuResources(gl, region, bands)).toBe(true)
     expect(gl.createTexture).toHaveBeenCalledTimes(1)
     expect(gl.texImage3D.mock.calls[0][5]).toBe(64)
+  })
+
+  it('refuses more bands than the texture array limit, once per context', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const gl = fakeGl({ maxLayers: 4 })
+      const region = fetchedRegion()
+      const bands = Array.from({ length: 5 }, (_, i) => `band_${i}`)
+      for (const band of bands) region.bandData.set(band, new Float32Array(4))
+
+      expect(ensureRegionGpuResources(gl, region, bands)).toBe(false)
+      expect(ensureRegionGpuResources(gl, region, bands)).toBe(false)
+      expect(gl.texImage3D).not.toHaveBeenCalled()
+      expect(region.bandTextureKey).toBeNull()
+      expect(errorSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('creates no texture while a sampled band is missing', () => {
+    const gl = fakeGl()
+    const region = bandRegion()
+    expect(ensureRegionGpuResources(gl, region, ['red', 'blue'])).toBe(false)
+    expect(gl.createTexture).not.toHaveBeenCalled()
+    expect(gl.texImage3D).not.toHaveBeenCalled()
   })
 
   it('is idempotent once the band texture is resident', () => {

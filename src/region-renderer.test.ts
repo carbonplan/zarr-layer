@@ -41,6 +41,11 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
     TEXTURE0: 0x84c0,
     TEXTURE_2D: 0x0de1,
     TEXTURE_2D_ARRAY: 0x8c1a,
+    MAX_ARRAY_TEXTURE_LAYERS: 0x88ff,
+    MAX_TEXTURE_SIZE: 0x0d33,
+    getParameter: vi.fn((pname: number) =>
+      pname === 0x88ff ? 256 : pname === 0x0d33 ? 4096 : null
+    ),
     createTexture: vi.fn(() => (failTextures ? null : { tex: ++textures })),
     createBuffer: vi.fn(() => ({ buf: ++buffers })),
     deleteTexture: vi.fn(),

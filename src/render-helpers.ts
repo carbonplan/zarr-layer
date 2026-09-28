@@ -137,6 +137,43 @@ function deleteBandTexture(
   region.bandTextureKey = null
 }
 
+const bandTextureLimits = new WeakMap<
+  WebGL2RenderingContext,
+  { layers: number; size: number; warned: boolean }
+>()
+
+/**
+ * Whether a texture array of this size fits the context. An upload past the
+ * limits fails without an exception, so it is refused up front, with one
+ * error per context.
+ */
+function fitsBandTexture(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number,
+  layers: number
+): boolean {
+  let limits = bandTextureLimits.get(gl)
+  if (!limits) {
+    limits = {
+      layers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number,
+      size: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+      warned: false,
+    }
+    bandTextureLimits.set(gl, limits)
+  }
+  if (layers <= limits.layers && width <= limits.size && height <= limits.size)
+    return true
+  if (!limits.warned) {
+    limits.warned = true
+    console.error(
+      `[zarr-layer] ${layers} bands of ${width}x${height} exceed this GPU's ` +
+        `texture array limits (${limits.layers} layers, ${limits.size} px).`
+    )
+  }
+  return false
+}
+
 /**
  * Upload every band a custom shader samples into one texture array, one band
  * per layer. Returns false if a band's data is missing or the texture cannot
@@ -149,6 +186,13 @@ function ensureBandTexture(
 ): boolean {
   const key = bandTextureKey(bands)
   if (region.bandTexture && region.bandTextureKey === key) return true
+
+  // Checked before allocating: a region missing a band is retried every
+  // frame until it is refetched or evicted.
+  if (!bands.every((band) => region.bandData.has(band))) return false
+  if (!fitsBandTexture(gl, region.width, region.height, bands.length)) {
+    return false
+  }
 
   const layerSize = region.width * region.height
   const packed = new Float32Array(layerSize * bands.length)
