@@ -239,7 +239,7 @@ const layer = new ZarrLayer({
 layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
 ```
 
-Updating an array's values is cheap, but changing its length recompiles the shader. Each array element takes one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), and the layer throws if the arrays need more than the device has.
+Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile.
 
 ### NDVI example
 

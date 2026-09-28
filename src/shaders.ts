@@ -495,6 +495,16 @@ interface FragmentShaderOptions {
 // Compiled once at module load to avoid recompilation on every shader creation
 const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*(?:\[\s*\w+\s*\])?\s*;/g
 
+/**
+ * Blank out comments in one left-to-right pass, so `// /*` is a line comment
+ * and a block comment still separates the tokens around it. Newlines are
+ * kept, so compiler errors keep their line numbers.
+ */
+const stripGlslComments = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
+    comment.replace(/[^\n]/g, ' ')
+  )
+
 function declareUniform(name: string, value: UniformValue): string {
   return typeof value === 'number'
     ? `uniform float ${name};`
@@ -549,7 +559,9 @@ export function createFragmentShaderSource(
     .join('\n')
 
   const declaredUniforms = new Set(Object.keys(customUniforms))
-  let processedFragBody = customFrag || ''
+  // Comments are dropped first, so a commented-out declaration is not
+  // hoisted into the shader.
+  let processedFragBody = stripGlslComments(customFrag || '')
   // Reset lastIndex since we reuse the regex
   UNIFORM_REGEX.lastIndex = 0
   let match

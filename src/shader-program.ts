@@ -123,25 +123,26 @@ function uniformSignature(uniforms: Record<string, UniformValue> = {}): string {
 }
 
 /**
- * GLSL ES gives each float array element its own vec4 register, so an array
- * of N floats needs N of the device's fragment uniform vectors.
+ * Explains a failed link when uniform arrays are the likely cause. GLSL ES
+ * gives each float array element its own vec4 register, so an array of N
+ * floats the shader reads takes N of the device's fragment uniform vectors.
+ * The driver counts only uniforms the shader uses, so the limit shows only
+ * when linking fails.
  */
-function assertUniformArraysFit(
+function uniformArrayHint(
   gl: WebGL2RenderingContext,
   uniforms: Record<string, UniformValue> = {}
-): void {
-  let vectors = 0
+): string {
+  let elements = 0
   for (const value of Object.values(uniforms)) {
-    if (typeof value !== 'number') vectors += value.length
+    if (typeof value !== 'number') elements += value.length
   }
-  if (vectors === 0) return
+  if (elements === 0) return ''
   const max = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) as number
-  if (vectors > max) {
-    throw new Error(
-      `[ZarrLayer] Uniform arrays need ${vectors} fragment uniform vectors, ` +
-        `but this device supports ${max}.`
-    )
-  }
+  return (
+    ` Its uniform arrays hold ${elements} floats, and each element read by ` +
+    `the shader takes one of this device's ${max} fragment uniform vectors.`
+  )
 }
 
 const toFloat32Array = (
@@ -216,10 +217,6 @@ export function createShaderProgram(
         })
       : fragmentShaderSource
 
-  if (useCustomShader && config) {
-    assertUniformArraysFit(gl, config.customUniforms)
-  }
-
   const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexSource)
   const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentSource)
   if (!vertexShader || !fragmentShader) {
@@ -228,7 +225,12 @@ export function createShaderProgram(
 
   const program = createProgram(gl, vertexShader, fragmentShader)
   if (!program) {
-    throw new Error(`Failed to create program for variant: ${variantName}`)
+    throw new Error(
+      `Failed to create program for variant: ${variantName}.` +
+        (useCustomShader && config
+          ? uniformArrayHint(gl, config.customUniforms)
+          : '')
+    )
   }
 
   const customUniformLocs = new Map<string, WebGLUniformLocation>()

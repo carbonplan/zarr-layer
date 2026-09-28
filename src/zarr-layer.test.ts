@@ -100,4 +100,25 @@ describe('ZarrLayer uniforms', () => {
       "Uniform array 'w' is empty"
     )
   })
+
+  it('rejects uniform values that are not numbers or number arrays', () => {
+    const layer = withUniforms({ w: [1] })
+    expect(() => layer.setUniforms({ w: {} as unknown as number[] })).toThrow(
+      "Uniform 'w' must be a number or an array of numbers"
+    )
+    expect(() =>
+      layer.setUniforms({ w: [1, 'oops'] as unknown as number[] })
+    ).toThrow("Uniform array 'w' holds a non-number: oops")
+  })
+
+  it('keeps the working uniforms when an update is rejected', () => {
+    const layer = withUniforms({ w: [1, 2] })
+    expect(() =>
+      layer.setUniforms({ w: [1, 'oops'] as unknown as number[] })
+    ).toThrow()
+    const uniforms = (
+      layer as unknown as { customUniforms: Record<string, unknown> }
+    ).customUniforms
+    expect(uniforms.w).toEqual([1, 2])
+  })
 })

@@ -119,9 +119,29 @@ function mapboxGlobeToMercatorTransition(zoom: number): number {
 function checkUniforms(
   uniforms: Record<string, UniformValue>
 ): Record<string, UniformValue> {
-  for (const [name, value] of Object.entries(uniforms)) {
-    if (typeof value !== 'number' && value.length === 0) {
+  // Values arrive from JavaScript too, so the declared type is not trusted.
+  for (const [name, value] of Object.entries(uniforms) as [string, unknown][]) {
+    if (typeof value === 'number') continue
+    if (
+      !Array.isArray(value) &&
+      !(value instanceof Float32Array) &&
+      !(value instanceof Float64Array)
+    ) {
+      throw new Error(
+        `[ZarrLayer] Uniform '${name}' must be a number or an array of numbers.`
+      )
+    }
+    if (value.length === 0) {
       throw new Error(`[ZarrLayer] Uniform array '${name}' is empty.`)
+    }
+    for (const element of value) {
+      if (typeof element !== 'number') {
+        throw new Error(
+          `[ZarrLayer] Uniform array '${name}' holds a non-number: ${String(
+            element
+          )}.`
+        )
+      }
     }
   }
   return uniforms

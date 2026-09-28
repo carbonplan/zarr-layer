@@ -205,6 +205,36 @@ describe('createFragmentShaderSource — structure', () => {
     expect(main).not.toContain('uniform')
   })
 
+  it('ignores declarations inside comments', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: [
+        '// uniform float opacity[2];',
+        '/* uniform float w[4];',
+        '   uniform float gain; */',
+        'fragColor = vec4(temp);',
+      ].join('\n'),
+    })
+    expect(src).not.toContain('uniform float opacity[2];')
+    expect(src).not.toContain('uniform float w[4];')
+    expect(src).not.toContain('uniform float gain;')
+  })
+
+  it('keeps code that comments sit between or around', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: [
+        'float/* units */gain = 2.0;',
+        '// /*',
+        'float offset = 1.0;',
+        '// */',
+        'fragColor = vec4(temp * gain + offset);',
+      ].join('\n'),
+    })
+    expect(src).toMatch(/float\s+gain = 2\.0;/)
+    expect(src).toContain('float offset = 1.0;')
+  })
+
   it('drops a customFrag declaration of a uniform the layer declares', () => {
     const src = createFragmentShaderSource({
       bands: ['temp'],

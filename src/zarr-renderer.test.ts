@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ZarrRenderer } from './zarr-renderer'
 import { maplibreFragmentShaderSource } from './shaders'
 import type { CustomShaderConfig, RendererUniforms } from './renderer-types'
@@ -66,7 +66,10 @@ describe('custom uniforms', () => {
     )
   })
 
-  it('rejects arrays that exceed the device uniform budget', () => {
+  it('leaves the uniform budget to the driver', () => {
+    // Only uniforms the shader reads count against the budget, which the
+    // driver knows and this library does not, so a large array links when
+    // the driver accepts it.
     const gl = createRecordingGl({ maxFragmentUniformVectors: 16 })
     const config: CustomShaderConfig = {
       bands: ['temp'],
@@ -74,8 +77,31 @@ describe('custom uniforms', () => {
       customUniforms: { gain: 1, weights: new Float32Array(64) },
     }
     const renderer = new ZarrRenderer(gl, maplibreFragmentShaderSource, config)
-    expect(() => renderer.getProgram(FAKE_SHADER_DATA, config)).toThrow(
-      'Uniform arrays need 64 fragment uniform vectors, but this device supports 16'
-    )
+    expect(() => renderer.getProgram(FAKE_SHADER_DATA, config)).not.toThrow()
+  })
+
+  it('names the uniform arrays when a program fails to link', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const gl = createRecordingGl({
+        maxFragmentUniformVectors: 16,
+        linkFails: true,
+      })
+      const config: CustomShaderConfig = {
+        bands: ['temp'],
+        customFrag,
+        customUniforms: { gain: 1, weights: new Float32Array(64) },
+      }
+      const renderer = new ZarrRenderer(
+        gl,
+        maplibreFragmentShaderSource,
+        config
+      )
+      expect(() => renderer.getProgram(FAKE_SHADER_DATA, config)).toThrow(
+        "Its uniform arrays hold 64 floats, and each element read by the shader takes one of this device's 16 fragment uniform vectors."
+      )
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 })
