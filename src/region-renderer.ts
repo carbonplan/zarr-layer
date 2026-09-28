@@ -162,14 +162,17 @@ export class RegionRenderer {
   private isGlobeProjection: boolean = false
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
+  private minRegionSize: number
 
   constructor(
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    fixedDataScale: number = 1
+    fixedDataScale: number = 1,
+    minRegionSize: number = 0
   ) {
+    this.minRegionSize = minRegionSize
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
@@ -399,7 +402,7 @@ export class RegionRenderer {
   private getRegionSize(
     array: zarr.Array<zarr.DataType>
   ): [number, number] | null {
-    return getRegionSize(array, this.dimIndices)
+    return getRegionSize(array, this.dimIndices, this.minRegionSize)
   }
 
   /**

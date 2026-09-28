@@ -123,6 +123,13 @@ export interface ZarrLayerOptions {
   crs?: string
   latIsAscending?: boolean | null
   fillValue?: number
+  /**
+   * Smallest region, in pixels per axis, the layer loads and draws as a unit.
+   * Regions are whole numbers of chunks, so this groups small chunks (e.g.
+   * 32x32) into fewer, larger regions, up to 2048 px per axis. Defaults to
+   * one chunk.
+   */
+  minRegionSize?: number
   customFrag?: string
   uniforms?: Record<string, UniformValue>
   renderingMode?: '2d' | '3d'

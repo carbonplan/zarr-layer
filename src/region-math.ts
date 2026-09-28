@@ -14,8 +14,34 @@ import type { DimIndicesProps, MapLike, ResolutionLevel } from './types'
 export type RegionCoordinate = { regionX: number; regionY: number }
 type SourceBounds = { xMin: number; xMax: number; yMin: number; yMax: number }
 
-/** Detect optimal region size from array metadata. */
+/**
+ * Largest size `minRegionSize` grows a region to, per axis: the smallest
+ * MAX_TEXTURE_SIZE WebGL2 guarantees, so a grown region always uploads.
+ */
+export const MAX_GROWN_REGION_SIZE = 2048
+
+/**
+ * Region size in pixels along [lat, lon]: one chunk (the inner chunk of a
+ * sharded array), grown to a whole number of chunks of at least
+ * `minRegionSize` per axis, up to MAX_GROWN_REGION_SIZE. Grouping small
+ * chunks keeps the number of regions, each a draw and a cache entry, down.
+ */
 export function getRegionSize(
+  array: zarr.Array<zarr.DataType>,
+  dimIndices: DimIndicesProps,
+  minRegionSize = 0
+): [number, number] | null {
+  const size = getChunkRegionSize(array, dimIndices)
+  if (!size) return null
+  const grow = (chunk: number) => {
+    const wanted = Math.ceil(minRegionSize / chunk)
+    const fits = Math.floor(MAX_GROWN_REGION_SIZE / chunk)
+    return chunk * Math.max(1, Math.min(wanted, fits))
+  }
+  return [grow(size[0]), grow(size[1])]
+}
+
+function getChunkRegionSize(
   array: zarr.Array<zarr.DataType>,
   dimIndices: DimIndicesProps
 ): [number, number] | null {

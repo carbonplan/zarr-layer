@@ -174,6 +174,7 @@ export class ZarrLayer {
   private scaleFactor: number = 1
   private offset: number = 0
   private fixedDataScale: number
+  private minRegionSize: number
   // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
@@ -348,6 +349,7 @@ export class ZarrLayer {
     fillValue,
     customFrag,
     uniforms,
+    minRegionSize = 0,
     renderingMode = '3d',
     onLoadingStateChange,
     proj4,
@@ -402,6 +404,12 @@ export class ZarrLayer {
     this.opacity = opacity
     this.minZoom = minzoom
     this.maxZoom = maxzoom
+    if (!Number.isFinite(minRegionSize) || minRegionSize < 0) {
+      throw new Error(
+        `[ZarrLayer] minRegionSize must be a non-negative number, got ${minRegionSize}.`
+      )
+    }
+    this.minRegionSize = minRegionSize
 
     this.customFrag = customFrag
     this.customUniforms = checkUniforms(uniforms || {})
@@ -682,7 +690,8 @@ export class ZarrLayer {
       this.variable,
       this.normalizedSelector,
       this.invalidate,
-      this.fixedDataScale
+      this.fixedDataScale,
+      this.minRegionSize
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()
