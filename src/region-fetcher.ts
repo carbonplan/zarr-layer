@@ -25,6 +25,108 @@ import {
 } from './region-utils'
 import { RegionCache, createRegionState, makeRegionKey } from './region-cache'
 
+/**
+ * When the only multi-value dimension selects an ascending run of
+ * non-negative indices and comes before the other sliced dimensions, one
+ * read returns every band, in selection order.
+ */
+export function contiguousBandRange(
+  multiValueDims: LevelSnapshot['baseMultiValueDims'],
+  sliceArgs: (number | zarr.Slice | null)[],
+  shape: readonly number[]
+): { dimIndex: number; start: number } | null {
+  if (multiValueDims.length !== 1) return null
+  const { dimIndex, values } = multiValueDims[0]
+  // A negative index counts from the end, and a fractional one is
+  // truncated; as a slice start neither would be.
+  if (values.length < 2 || values[0] < 0 || !Number.isInteger(values[0])) {
+    return null
+  }
+  // A slice past the end is clipped where an index would fail, which would
+  // quietly return fewer bands than selected.
+  if (values[0] + values.length > shape[dimIndex]) return null
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] !== values[0] + i) return null
+  }
+  // Integer args drop their dimension from the result; every other
+  // dimension must come after this one for its bands to be contiguous.
+  for (let d = 0; d < dimIndex; d++) {
+    if (typeof sliceArgs[d] !== 'number') return null
+  }
+  return { dimIndex, start: values[0] }
+}
+
+/**
+ * Split a read whose first dimension is the band into one array per band,
+ * each holding its values in the result's own memory order, as a separate
+ * read of that band would return them. In a C-order result each band is a
+ * contiguous block and becomes a view; otherwise (a Fortran-order store)
+ * each band is gathered by stride.
+ */
+export function splitBands(result: {
+  data: ArrayLike<number> & {
+    subarray(begin: number, end: number): ArrayLike<number>
+  }
+  shape: number[]
+  stride: number[]
+}): ArrayLike<number>[] {
+  const { data, shape, stride } = result
+  const bands = shape[0]
+  const bandLength = shape.slice(1).reduce((n, size) => n * size, 1)
+  if (isCOrder(shape, stride)) {
+    return Array.from({ length: bands }, (_, c) =>
+      data.subarray(c * bandLength, (c + 1) * bandLength)
+    )
+  }
+  // The band's other dimensions, the one that varies fastest in memory first.
+  const dims = shape
+    .map((_, d) => d)
+    .slice(1)
+    .sort((a, b) => stride[a] - stride[b])
+  const Typed = data.constructor as new (length: number) => {
+    [i: number]: number
+    length: number
+  }
+  return Array.from({ length: bands }, (_, c) => {
+    const out = new Typed(bandLength)
+    const index = new Array<number>(dims.length).fill(0)
+    for (let i = 0; i < bandLength; i++) {
+      let offset = c * stride[0]
+      for (let k = 0; k < dims.length; k++) {
+        offset += index[k] * stride[dims[k]]
+      }
+      out[i] = data[offset]
+      for (let k = 0; k < dims.length; k++) {
+        if (++index[k] < shape[dims[k]]) break
+        index[k] = 0
+      }
+    }
+    return out as unknown as ArrayLike<number>
+  })
+}
+
+const NUMERIC_DTYPES = new Set<string>([
+  'int8',
+  'uint8',
+  'int16',
+  'uint16',
+  'int32',
+  'uint32',
+  'float16',
+  'float32',
+  'float64',
+])
+
+/** Whether strides describe a dense row-major (C-order) layout. */
+export function isCOrder(shape: number[], stride: number[]): boolean {
+  let expected = 1
+  for (let d = shape.length - 1; d >= 0; d--) {
+    if (shape[d] > 1 && stride[d] !== expected) return false
+    expected *= shape[d]
+  }
+  return true
+}
+
 export type RegionFetcherContext = {
   zarrStore: ZarrStore
   dimIndices: DimIndicesProps
@@ -268,6 +370,15 @@ export class RegionFetcher {
         snapshot.baseMultiValueDims
       )
       const numChannels = channelCombinations.length || 1
+      // Only typed numeric arrays split into band views; bool arrays are
+      // read band by band.
+      const contiguousRange = NUMERIC_DTYPES.has(snapshot.zarrArray.dtype)
+        ? contiguousBandRange(
+            snapshot.baseMultiValueDims,
+            baseSliceArgs,
+            snapshot.zarrArray.shape
+          )
+        : null
 
       // Band-sampling shaders read small integer dtypes straight from
       // integer textures; everything else is converted to float32 here.
@@ -299,37 +410,59 @@ export class RegionFetcher {
 
         bandArrays.push(toBand(result.data))
       } else {
-        // Multi-channel - fetch all channels in parallel
         if (isStale()) return
 
-        // Build slice args for all channels upfront
-        const allSliceArgs: (number | zarr.Slice)[][] = []
-        for (let c = 0; c < numChannels; c++) {
+        // One read covers every band of a contiguous selection, so bands
+        // come out of it rather than a read each.
+        if (contiguousRange) {
           const sliceArgs = [...baseSliceArgs]
-          const combo = channelCombinations[c]
-
-          // Apply channel-specific indices to multi-value dimensions
-          for (let i = 0; i < snapshot.baseMultiValueDims.length; i++) {
-            sliceArgs[snapshot.baseMultiValueDims[i].dimIndex] = combo[i]
-          }
-          allSliceArgs.push(sliceArgs)
-        }
-
-        // Fetch all bands in parallel
-        const results = await Promise.all(
-          allSliceArgs.map((sliceArgs) =>
-            zarr.get(snapshot.zarrArray, sliceArgs, {
-              signal: controller.signal,
-            })
+          sliceArgs[contiguousRange.dimIndex] = zarr.slice(
+            contiguousRange.start,
+            contiguousRange.start + numChannels
           )
-        )
+          const result = (await zarr.get(snapshot.zarrArray, sliceArgs, {
+            signal: controller.signal,
+          })) as {
+            data: ArrayLike<number> & {
+              subarray(begin: number, end: number): ArrayLike<number>
+            }
+            shape: number[]
+            stride: number[]
+          }
 
-        if (isStale()) return
+          if (isStale()) return
 
-        // Process results in order
-        for (let c = 0; c < numChannels; c++) {
-          const result = results[c] as { data: ArrayLike<number> }
-          bandArrays.push(toBand(result.data))
+          for (const band of splitBands(result)) bandArrays.push(toBand(band))
+        } else {
+          // Build slice args for all channels upfront
+          const allSliceArgs: (number | zarr.Slice)[][] = []
+          for (let c = 0; c < numChannels; c++) {
+            const sliceArgs = [...baseSliceArgs]
+            const combo = channelCombinations[c]
+
+            // Apply channel-specific indices to multi-value dimensions
+            for (let i = 0; i < snapshot.baseMultiValueDims.length; i++) {
+              sliceArgs[snapshot.baseMultiValueDims[i].dimIndex] = combo[i]
+            }
+            allSliceArgs.push(sliceArgs)
+          }
+
+          // Fetch all bands in parallel
+          const results = await Promise.all(
+            allSliceArgs.map((sliceArgs) =>
+              zarr.get(snapshot.zarrArray, sliceArgs, {
+                signal: controller.signal,
+              })
+            )
+          )
+
+          if (isStale()) return
+
+          // Process results in order
+          for (let c = 0; c < numChannels; c++) {
+            const result = results[c] as { data: ArrayLike<number> }
+            bandArrays.push(toBand(result.data))
+          }
         }
       }
 

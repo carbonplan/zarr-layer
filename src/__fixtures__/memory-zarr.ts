@@ -19,7 +19,7 @@ export interface ArraySpec {
   shape: number[]
   chunkShape: number[]
   /** Defaults to 'float32'. */
-  dtype?: 'float32' | 'float64' | 'int8' | 'uint8' | 'int16' | 'uint16'
+  dtype?: 'float32' | 'float64' | 'int8' | 'uint8' | 'int16' | 'uint16' | 'bool'
   fillValue?: number | null
   dimensionNames?: string[]
   /** Array-level attributes (e.g. scale_factor, add_offset). */
@@ -30,6 +30,31 @@ export interface ArraySpec {
    * `'0/0/0'`.
    */
   chunks?: Record<string, ArrayLike<number>>
+  /**
+   * 'F' stores chunks in Fortran order through a transpose codec. Chunk data
+   * is still given in C order and converted when written.
+   */
+  order?: 'C' | 'F'
+}
+
+/** Reorder a C-order chunk into Fortran order. */
+function toFortranOrder(data: ArrayLike<number>, shape: number[]): number[] {
+  const out = new Array<number>(data.length)
+  const index = new Array<number>(shape.length).fill(0)
+  for (let i = 0; i < data.length; i++) {
+    let f = 0
+    let stride = 1
+    for (let d = 0; d < shape.length; d++) {
+      f += index[d] * stride
+      stride *= shape[d]
+    }
+    out[f] = data[i]
+    for (let d = shape.length - 1; d >= 0; d--) {
+      if (++index[d] < shape[d]) break
+      index[d] = 0
+    }
+  }
+  return out
 }
 
 export interface ZarrSpec {
@@ -46,6 +71,7 @@ const CHUNK_ENCODERS: Record<string, (data: ArrayLike<number>) => Uint8Array> =
     uint8: (data) => Uint8Array.from(data),
     int16: (data) => new Uint8Array(Int16Array.from(data).buffer),
     uint16: (data) => new Uint8Array(Uint16Array.from(data).buffer),
+    bool: (data) => Uint8Array.from(data, (v) => (v ? 1 : 0)),
   }
 
 /** Minimal Readable shape; matches zarrita's `Readable` structurally. */
@@ -80,7 +106,19 @@ export function buildMemoryZarrStore(spec: ZarrSpec): MemoryStore {
         name: 'default',
         configuration: { separator: '/' },
       },
-      codecs: [{ name: 'bytes', configuration: { endian: 'little' } }],
+      codecs: [
+        ...(a.order === 'F'
+          ? [
+              {
+                name: 'transpose',
+                configuration: {
+                  order: a.shape.map((_, d) => a.shape.length - 1 - d),
+                },
+              },
+            ]
+          : []),
+        { name: 'bytes', configuration: { endian: 'little' } },
+      ],
       fill_value: a.fillValue ?? null,
       dimension_names: a.dimensionNames,
       attributes: a.attributes ?? {},
@@ -88,7 +126,8 @@ export function buildMemoryZarrStore(spec: ZarrSpec): MemoryStore {
 
     const encode = CHUNK_ENCODERS[dtype]
     for (const [idx, data] of Object.entries(a.chunks ?? {})) {
-      map.set(`/${a.name}/c/${idx}`, encode(data))
+      const stored = a.order === 'F' ? toFortranOrder(data, a.chunkShape) : data
+      map.set(`/${a.name}/c/${idx}`, encode(stored))
     }
   }
 

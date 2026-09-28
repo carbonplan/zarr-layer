@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
-import { RegionFetcher, type RegionFetcherContext } from './region-fetcher'
+import * as zarr from 'zarrita'
+import {
+  RegionFetcher,
+  contiguousBandRange,
+  isCOrder,
+  splitBands,
+  type RegionFetcherContext,
+} from './region-fetcher'
 import { RegionCache, makeRegionKey } from './region-cache'
 import { createProjectionContext } from './projection-utils'
 import {
@@ -36,6 +43,44 @@ function chunkData(chunkY: number, chunkX: number): number[] {
   return out
 }
 
+// Band b of the multi-band fixture is the ramp plus 100 * b.
+function bandChunkData(bands: number, chunkY: number, chunkX: number) {
+  const out: number[] = []
+  for (let b = 0; b < bands; b++) {
+    out.push(...chunkData(chunkY, chunkX).map((v) => v + 100 * b))
+  }
+  return out
+}
+
+function makeMultiBandStore(
+  bands: number,
+  dtype?: ArraySpec['dtype'],
+  order?: ArraySpec['order'],
+  attributes: Record<string, unknown> = {},
+  fillValue?: number
+) {
+  return buildMemoryZarrStore({
+    arrays: [
+      {
+        name: 'temperature',
+        shape: [bands, HEIGHT, WIDTH],
+        attributes,
+        fillValue,
+        chunkShape: [bands, ...REGION],
+        dimensionNames: ['band', 'lat', 'lon'],
+        dtype,
+        order,
+        chunks: {
+          '0/0/0': bandChunkData(bands, 0, 0),
+          '0/0/1': bandChunkData(bands, 0, 1),
+          '0/1/0': bandChunkData(bands, 1, 0),
+          '0/1/1': bandChunkData(bands, 1, 1),
+        },
+      },
+    ],
+  })
+}
+
 function makeMemoryStore(
   attributes: Record<string, unknown> = {},
   dtype?: ArraySpec['dtype'],
@@ -69,9 +114,23 @@ async function makeHarness(
     dtype?: ArraySpec['dtype']
     fillValue?: number
     bandTextures?: boolean
+    /** Band count of a (band, lat, lon) array, with these bands selected. */
+    bands?: {
+      count: number
+      selected: number[]
+      order?: ArraySpec['order']
+    }
   } = {}
 ) {
-  const memory = makeMemoryStore(opts.attributes, opts.dtype, opts.fillValue)
+  const memory = opts.bands
+    ? makeMultiBandStore(
+        opts.bands.count,
+        opts.dtype,
+        opts.bands.order,
+        opts.attributes,
+        opts.fillValue
+      )
+    : makeMemoryStore(opts.attributes, opts.dtype, opts.fillValue)
   let releaseReads = () => {}
   const readsReleased = new Promise<void>((res) => {
     releaseReads = res
@@ -105,8 +164,17 @@ async function makeHarness(
     width: WIDTH,
     height: HEIGHT,
     regionSize: REGION,
-    baseSliceArgs: [0, 0],
-    baseMultiValueDims: [],
+    baseSliceArgs: opts.bands ? [0, 0, 0] : [0, 0],
+    baseMultiValueDims: opts.bands
+      ? [
+          {
+            dimIndex: 0,
+            dimName: 'band',
+            values: opts.bands.selected,
+            labels: opts.bands.selected,
+          },
+        ]
+      : [],
   }
   let selectorVersion = 0
 
@@ -140,7 +208,10 @@ async function makeHarness(
     },
     getActiveLevel: () => level,
     getSelectorVersion: () => selectorVersion,
-    getBandNames: () => ['temperature'],
+    getBandNames: () =>
+      opts.bands
+        ? opts.bands.selected.map((b) => `band_${b}`)
+        : ['temperature'],
     usesBandTextures: () => opts.bandTextures ?? false,
     isRemoved: () => false,
     getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
@@ -544,5 +615,239 @@ describe('RegionFetcher', () => {
     // texture before the refetch landed.
     expect(region.data).toBeNull()
     expect(region.channels).toBe(2)
+  })
+
+  describe('multi-band regions', () => {
+    const expectBands = (
+      region: { bandData: Map<string, ArrayLike<number>> },
+      selected: number[]
+    ) => {
+      for (const b of selected) {
+        expect(Array.from(region.bandData.get(`band_${b}`)!)).toEqual(
+          chunkData(0, 0).map((v) => v + 100 * b)
+        )
+      }
+    }
+
+    it('reads a contiguous band range in one read', async () => {
+      const selected = [1, 2, 3]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 4, selected },
+        dtype: 'int16',
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      expectBands(region, selected)
+      // Every band is a view into the one result.
+      const buffers = new Set(
+        selected.map(
+          (b) => (region.bandData.get(`band_${b}`) as Int16Array).buffer
+        )
+      )
+      expect(buffers.size).toBe(1)
+    })
+
+    it("keeps each band in the store's memory order when it is Fortran-order", async () => {
+      // Every band holds its own values, in the order a separate read of
+      // that band lays them out: latitude varies fastest here.
+      const selected = [0, 1, 2]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 3, selected, order: 'F' },
+        dtype: 'int16',
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      for (const b of selected) {
+        const rowMajor = chunkData(0, 0).map((v) => v + 100 * b)
+        const expected: number[] = []
+        for (let x = 0; x < 4; x++) {
+          for (let y = 0; y < 2; y++) expected.push(rowMajor[y * 4 + x])
+        }
+        expect(Array.from(region.bandData.get(`band_${b}`)!)).toEqual(expected)
+      }
+    })
+
+    it('fails a region whose selection runs past the last band', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const selected = [3, 4]
+        const { fetcher, cache } = await makeHarness({
+          bands: { count: 4, selected },
+          dtype: 'int16',
+          bandTextures: true,
+        })
+        await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+        // Band by band, index 4 fails the read: nothing partial is kept.
+        const region = cache.get(makeRegionKey(0, 0, 0))!
+        expect(region.bandData.size).toBe(0)
+        expect(region.loading).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('scales float bands read in one get', async () => {
+      const selected = [0, 1]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 2, selected },
+        attributes: { scale_factor: 2, add_offset: 1 },
+        fillValue: 0,
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      for (const b of selected) {
+        // The ramp's first pixel of band 0 is the fill value, so it is NaN.
+        const expected = chunkData(0, 0).map((v) => {
+          const raw = v + 100 * b
+          return raw === 0 ? NaN : raw * 2 + 1
+        })
+        expect(Array.from(region.bandData.get(`band_${b}`)!)).toEqual(expected)
+      }
+    })
+
+    it('reads a bool band selection band by band', async () => {
+      const selected = [0, 1]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 2, selected },
+        dtype: 'bool',
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      // Band 0 of the fixture is the ramp, true everywhere but its first
+      // pixel; band 1 adds 100, so it is all true.
+      const truthy = (b: number) =>
+        chunkData(0, 0).map((v) => (v + 100 * b ? 1 : 0))
+      expect(Array.from(region.bandData.get('band_0')!)).toEqual(truthy(0))
+      expect(Array.from(region.bandData.get('band_1')!)).toEqual(truthy(1))
+    })
+
+    it('reads a run of negative indices band by band', async () => {
+      const selected = [-2, -1]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 4, selected },
+        dtype: 'int16',
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      expect(Array.from(region.bandData.get('band_-2')!)).toEqual(
+        chunkData(0, 0).map((v) => v + 200)
+      )
+      expect(Array.from(region.bandData.get('band_-1')!)).toEqual(
+        chunkData(0, 0).map((v) => v + 300)
+      )
+    })
+
+    it('reads each band of a scattered selection', async () => {
+      const selected = [3, 0]
+      const { fetcher, cache } = await makeHarness({
+        bands: { count: 4, selected },
+        dtype: 'int16',
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      expectBands(cache.get(makeRegionKey(0, 0, 0))!, selected)
+    })
+  })
+})
+
+describe('contiguousBandRange', () => {
+  // time, band, lat, lon
+  const SHAPE = [1, 10, 4, 4]
+  const dims = (values: number[], dimIndex = 1) => [
+    { dimIndex, dimName: 'band', values, labels: values },
+  ]
+
+  it('accepts an ascending run after integer-indexed dimensions', () => {
+    expect(contiguousBandRange(dims([4, 5, 6]), [0, 0, 0, 0], SHAPE)).toEqual({
+      dimIndex: 1,
+      start: 4,
+    })
+  })
+
+  it('rejects a run starting at a negative index', () => {
+    expect(contiguousBandRange(dims([-2, -1]), [0, 0, 0, 0], SHAPE)).toBeNull()
+    expect(contiguousBandRange(dims([-1, 0]), [0, 0, 0, 0], SHAPE)).toBeNull()
+  })
+
+  it('rejects a run starting at a fractional index', () => {
+    expect(
+      contiguousBandRange(dims([0.5, 1.5]), [0, 0, 0, 0], SHAPE)
+    ).toBeNull()
+  })
+
+  it('rejects a run past the end of the dimension', () => {
+    expect(contiguousBandRange(dims([8, 9]), [0, 0, 0, 0], SHAPE)).toEqual({
+      dimIndex: 1,
+      start: 8,
+    })
+    expect(contiguousBandRange(dims([9, 10]), [0, 0, 0, 0], SHAPE)).toBeNull()
+  })
+
+  it('rejects gaps, descending runs and single bands', () => {
+    expect(contiguousBandRange(dims([0, 2]), [0, 0, 0, 0], SHAPE)).toBeNull()
+    expect(contiguousBandRange(dims([2, 1]), [0, 0, 0, 0], SHAPE)).toBeNull()
+    expect(contiguousBandRange(dims([2]), [0, 0, 0, 0], SHAPE)).toBeNull()
+  })
+
+  it('rejects a band dimension after another sliced dimension', () => {
+    expect(
+      contiguousBandRange(dims([0, 1]), [zarr.slice(0, 2), 0, 0, 0], SHAPE)
+    ).toBeNull()
+  })
+
+  it('rejects more than one multi-value dimension', () => {
+    expect(
+      contiguousBandRange(
+        [...dims([0, 1], 0), ...dims([0, 1], 1)],
+        [0, 0, 0, 0],
+        SHAPE
+      )
+    ).toBeNull()
+  })
+})
+
+describe('splitBands', () => {
+  // Two bands of 2x3, band b holding 10 * b + (row-major position).
+  const expected = [
+    [0, 1, 2, 3, 4, 5],
+    [10, 11, 12, 13, 14, 15],
+  ]
+
+  it('returns views of a C-order result', () => {
+    const data = new Int16Array(expected.flat())
+    const bands = splitBands({ data, shape: [2, 2, 3], stride: [6, 3, 1] })
+    expect(bands.map((b) => Array.from(b))).toEqual(expected)
+    expect((bands[1] as Int16Array).buffer).toBe(data.buffer)
+  })
+
+  it('gathers each band of a Fortran-order result in memory order', () => {
+    // (band, lon, lat) in Fortran order: longitude varies fastest after the
+    // band, so each band comes out as rows of latitude, which is how the
+    // renderer draws it.
+    const bands = [0, 1].map((c) => [0, 1, 2, 3, 4, 5].map((v) => v + 10 * c))
+    const data = new Int16Array(12)
+    for (let c = 0; c < 2; c++)
+      for (let lon = 0; lon < 3; lon++)
+        for (let lat = 0; lat < 2; lat++)
+          data[c + 2 * lon + 6 * lat] = bands[c][lat * 3 + lon]
+    const split = splitBands({ data, shape: [2, 3, 2], stride: [1, 2, 6] })
+    expect(split.map((b) => Array.from(b))).toEqual(bands)
+    expect(split[0]).toBeInstanceOf(Int16Array)
+  })
+})
+
+describe('isCOrder', () => {
+  it('accepts row-major strides and ignores size-1 dimensions', () => {
+    expect(isCOrder([3, 2, 4], [8, 4, 1])).toBe(true)
+    expect(isCOrder([1, 2, 4], [99, 4, 1])).toBe(true)
+  })
+
+  it('rejects Fortran-order strides', () => {
+    expect(isCOrder([3, 2, 4], [1, 3, 6])).toBe(false)
   })
 })
