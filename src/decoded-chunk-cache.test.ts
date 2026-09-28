@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import * as zarr from 'zarrita'
-import { withDecodedChunkCaching } from './decoded-chunk-cache'
+import {
+  abortWaiterCount,
+  withDecodedChunkCaching,
+} from './decoded-chunk-cache'
 import { buildMemoryZarrStore, ramp } from './__fixtures__/memory-zarr'
 
 /**
@@ -152,4 +155,186 @@ describe('withDecodedChunkCaching', () => {
     await array.getChunk([0, 1])
     expect(reads).toHaveLength(4)
   })
+
+  it('listens once per signal however many reads share it', async () => {
+    const { array } = await makeArray({})
+    const { signal } = new AbortController()
+    const add = vi.spyOn(signal, 'addEventListener')
+    const remove = vi.spyOn(signal, 'removeEventListener')
+    await Promise.all(
+      [0, 1, 2, 3].map((x) => array.getChunk([0, x], { signal }))
+    )
+    await array.getChunk([0, 0], { signal })
+    expect(add).toHaveBeenCalledTimes(1)
+    expect(remove).not.toHaveBeenCalled()
+  })
+
+  it('rejects every read waiting on an aborted signal', async () => {
+    const { array } = await makeArray({})
+    const controller = new AbortController()
+    const reads = [0, 1, 2].map((x) =>
+      array.getChunk([0, x], { signal: controller.signal })
+    )
+    controller.abort()
+    for (const read of reads) {
+      await expect(read).rejects.toMatchObject({ name: 'AbortError' })
+    }
+  })
+
+  it('keeps one caller waiting when another sharing the read aborts', async () => {
+    // A store that honors abort signals and holds reads open until released,
+    // so cancelling the shared read would reject the surviving caller.
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temperature',
+          shape: [4, 4],
+          chunkShape: [4, 4],
+          dimensionNames: ['lat', 'lon'],
+          chunks: { '0/0': ramp(16) },
+        },
+      ],
+    })
+    let release = () => {}
+    const released = new Promise<void>((res) => {
+      release = res
+    })
+    const readSignals: (AbortSignal | undefined)[] = []
+    const gated = {
+      get: async (key: string, options?: { signal?: AbortSignal }) => {
+        if (key.includes('/c/')) {
+          readSignals.push(options?.signal)
+          await released
+          if (options?.signal?.aborted) throw createAbortError()
+        }
+        return memory.get(key)
+      },
+    }
+    const store = await zarr.extendStore(gated, (inner) =>
+      withDecodedChunkCaching(inner, {})
+    )
+    const array = await zarr.open.v3(zarr.root(store).resolve('temperature'), {
+      kind: 'array',
+    })
+
+    const first = new AbortController()
+    const abandoned = array.getChunk([0, 0], { signal: first.signal })
+    const kept = array.getChunk([0, 0], {
+      signal: new AbortController().signal,
+    })
+    first.abort()
+    await expect(abandoned).rejects.toMatchObject({ name: 'AbortError' })
+    await Promise.resolve()
+    expect(readSignals).toHaveLength(1)
+    expect(readSignals[0]?.aborted ?? false).toBe(false)
+
+    release()
+    await expect(kept).resolves.toBeDefined()
+  })
+
+  it('ignores an abort after the read has finished', async () => {
+    const { array } = await makeArray({})
+    const controller = new AbortController()
+    const chunk = await array.getChunk([0, 0], { signal: controller.signal })
+    controller.abort()
+    expect(chunk.data).toHaveLength(16)
+  })
+
+  it('forgets each read on a long-lived signal once it settles', async () => {
+    const { array } = await makeArray({})
+    const { signal } = new AbortController()
+    for (const x of [0, 1, 2, 3]) await array.getChunk([0, x], { signal })
+    expect(abortWaiterCount(signal)).toBe(0)
+  })
+
+  it('forgets a read that fails', async () => {
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temperature',
+          shape: [4, 4],
+          chunkShape: [4, 4],
+          dimensionNames: ['lat', 'lon'],
+          chunks: { '0/0': ramp(16) },
+        },
+      ],
+    })
+    const failing = {
+      get: async (key: string) => {
+        if (key.includes('/c/')) throw new Error('network down')
+        return memory.get(key)
+      },
+    }
+    const store = await zarr.extendStore(failing, (inner) =>
+      withDecodedChunkCaching(inner, {})
+    )
+    const array = await zarr.open.v3(zarr.root(store).resolve('temperature'), {
+      kind: 'array',
+    })
+    const { signal } = new AbortController()
+    await expect(array.getChunk([0, 0], { signal })).rejects.toThrow(
+      'network down'
+    )
+    expect(abortWaiterCount(signal)).toBe(0)
+  })
+
+  it('holds a read on its signal only while it is pending', async () => {
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temperature',
+          shape: [4, 4],
+          chunkShape: [4, 4],
+          dimensionNames: ['lat', 'lon'],
+          chunks: { '0/0': ramp(16) },
+        },
+      ],
+    })
+    let release = () => {}
+    const released = new Promise<void>((res) => {
+      release = res
+    })
+    const gated = {
+      get: async (key: string) => {
+        if (key.includes('/c/')) await released
+        return memory.get(key)
+      },
+    }
+    const store = await zarr.extendStore(gated, (inner) =>
+      withDecodedChunkCaching(inner, {})
+    )
+    const array = await zarr.open.v3(zarr.root(store).resolve('temperature'), {
+      kind: 'array',
+    })
+    const { signal } = new AbortController()
+
+    const read = array.getChunk([0, 0], { signal })
+    await Promise.resolve()
+    expect(abortWaiterCount(signal)).toBe(1)
+    release()
+    await read
+    expect(abortWaiterCount(signal)).toBe(0)
+  })
+
+  it('rejects a read whose signal is already aborted', async () => {
+    const { array, reads } = await makeArray({})
+    await array.getChunk([0, 0])
+    const controller = new AbortController()
+    controller.abort()
+
+    // Neither a cached chunk nor a new one is read for an aborted caller.
+    for (const coords of [
+      [0, 0],
+      [0, 1],
+    ]) {
+      await expect(
+        array.getChunk(coords, { signal: controller.signal })
+      ).rejects.toMatchObject({ name: 'AbortError' })
+    }
+    expect(reads).toHaveLength(1)
+    expect(abortWaiterCount(controller.signal)).toBe(0)
+  })
 })
+
+const createAbortError = () =>
+  new DOMException('The operation was aborted.', 'AbortError')

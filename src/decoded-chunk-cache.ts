@@ -89,6 +89,52 @@ const chunkCacheKey = (path: string, coords: number[]): string =>
 const createAbortError = () =>
   new DOMException('The operation was aborted.', 'AbortError')
 
+// Reads waiting on each caller signal, behind one 'abort' listener per
+// signal. Browsers scan a target's listener list on every add and remove, so
+// a listener per read costs quadratic time when thousands of small chunks are
+// read under one signal.
+const abortWaiters = new WeakMap<AbortSignal, Set<() => void>>()
+
+/** Reads still waiting on a signal's abort, for tests. */
+export function abortWaiterCount(signal: AbortSignal): number {
+  return abortWaiters.get(signal)?.size ?? 0
+}
+
+/**
+ * The waiters on a signal, behind its one 'abort' listener. The listener is
+ * made here, apart from any read, because V8 shares one closure context
+ * among functions created in the same scope: made alongside a read's
+ * unsubscribe, it would keep that read's callback, and the chunk it
+ * resolves, alive for as long as the signal lives.
+ */
+function waitersFor(signal: AbortSignal): Set<() => void> {
+  const existing = abortWaiters.get(signal)
+  if (existing) return existing
+  const waiters = new Set<() => void>()
+  abortWaiters.set(signal, waiters)
+  signal.addEventListener(
+    'abort',
+    () => {
+      abortWaiters.delete(signal)
+      for (const waiter of waiters) waiter()
+      // A read still pending after the abort holds its unsubscribe, and
+      // through it this set; clearing it releases every callback at once.
+      waiters.clear()
+    },
+    { once: true }
+  )
+  return waiters
+}
+
+/** Run `callback` once if `signal` aborts; returns an unsubscribe. */
+function onAbort(signal: AbortSignal, callback: () => void): () => void {
+  const waiters = waitersFor(signal)
+  waiters.add(callback)
+  return () => {
+    waiters.delete(callback)
+  }
+}
+
 interface PendingEntry {
   promise: Promise<AnyChunk>
   // Used to abort the underlying fetch only when every awaiter has given
@@ -169,26 +215,24 @@ const decodedChunkExtension = zarr.defineArrayExtension(
 
       return new Promise<AnyChunk>((resolve, reject) => {
         let settled = false
-        const onAbort = () => {
+        const unsubscribe = onAbort(callerSignal, () => {
           if (settled) return
           settled = true
-          callerSignal.removeEventListener('abort', onAbort)
           abandonRef()
           reject(createAbortError())
-        }
-        callerSignal.addEventListener('abort', onAbort, { once: true })
+        })
         ownedEntry.promise.then(
           (chunk) => {
             if (settled) return
             settled = true
-            callerSignal.removeEventListener('abort', onAbort)
+            unsubscribe()
             releaseRef()
             resolve(chunk)
           },
           (err) => {
             if (settled) return
             settled = true
-            callerSignal.removeEventListener('abort', onAbort)
+            unsubscribe()
             releaseRef()
             reject(err)
           }
