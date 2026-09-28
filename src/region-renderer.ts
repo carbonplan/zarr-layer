@@ -77,9 +77,13 @@ import {
   type LoadingManager,
   type ChunkLoadingDebouncer,
   createRequestCanceller,
+  MAX_ACTIVE_REGION_FETCHES,
   createLoadingManager,
   createChunkLoadingDebouncer,
   cancelAllRequests,
+  dropQueuedFetches,
+  hasActiveRequests,
+  prioritizeQueuedFetches,
   setLoadingCallback as setLoadingCallbackUtil,
   emitLoadingState as emitLoadingStateUtil,
 } from './region-utils'
@@ -134,7 +138,7 @@ export class RegionRenderer {
   private _antimeridianWarnings: Set<string> = new Set()
 
   // Shared state managers
-  private requestCanceller: RequestCanceller = createRequestCanceller()
+  private requestCanceller: RequestCanceller
   private loadingManager: LoadingManager = createLoadingManager()
   private loadingDebouncer: ChunkLoadingDebouncer = createChunkLoadingDebouncer(
     this.loadingManager
@@ -170,9 +174,11 @@ export class RegionRenderer {
     selector: NormalizedSelector,
     invalidate: () => void,
     fixedDataScale: number = 1,
-    minRegionSize: number = 0
+    minRegionSize: number = 0,
+    maxRegionFetches: number = MAX_ACTIVE_REGION_FETCHES
   ) {
     this.minRegionSize = minRegionSize
+    this.requestCanceller = createRequestCanceller(maxRegionFetches)
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
@@ -217,7 +223,9 @@ export class RegionRenderer {
       getSelector: () => this.selector,
       isRemoved: () => this.isRemoved,
       onCancelInflight: () => {
-        if (this.requestCanceller.controllers.size > 0) {
+        // Queued fetches have no controller yet but would still start
+        // against the level being replaced.
+        if (hasActiveRequests(this.requestCanceller)) {
           cancelAllRequests(this.requestCanceller)
           this.loadingDebouncer.hide()
         }
@@ -781,6 +789,10 @@ export class RegionRenderer {
         this.requestCanceller.controllers.get(region.requestId)?.abort()
       }
     }
+    dropQueuedFetches(
+      this.requestCanceller,
+      (fetch) => !visibleKeys.has(fetch.key)
+    )
 
     // Separate regions into two categories:
     // 1. New regions (no data) - viewport change
@@ -825,34 +837,17 @@ export class RegionRenderer {
       return
     }
 
-    // The browser drains requests roughly in issue order, so the viewport
-    // center loads first.
-    if (visible.length > 1) {
-      let cx = 0
-      let cy = 0
-      for (const { regionX, regionY } of visible) {
-        cx += regionX
-        cy += regionY
-      }
-      cx /= visible.length
-      cy /= visible.length
-      const byCenterDistance = (
-        a: { regionX: number; regionY: number },
-        b: { regionX: number; regionY: number }
-      ) =>
-        (a.regionX - cx) ** 2 +
-        (a.regionY - cy) ** 2 -
-        (b.regionX - cx) ** 2 -
-        (b.regionY - cy) ** 2
-      newRegions.sort(byCenterDistance)
-      staleRegions.sort(byCenterDistance)
-    }
-
     if (newRegions.length > 0) {
       this.fetchRegions(newRegions)
     }
     if (staleRegions.length > 0) {
       this.fetchRegions(staleRegions)
+    }
+    // Queued regions start nearest the viewport center first.
+    if (visible.length > 1) {
+      const cx = visible.reduce((sum, r) => sum + r.regionX, 0) / visible.length
+      const cy = visible.reduce((sum, r) => sum + r.regionY, 0) / visible.length
+      prioritizeQueuedFetches(this.requestCanceller, cx, cy)
     }
     this.evictOldRegions(gl)
   }

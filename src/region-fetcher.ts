@@ -20,6 +20,7 @@ import {
   type ChunkLoadingDebouncer,
   type RequestCanceller,
   cancelAllRequests,
+  enqueueFetches,
   hasActiveRequests,
 } from './region-utils'
 import { RegionCache, createRegionState, makeRegionKey } from './region-cache'
@@ -151,16 +152,46 @@ export class RegionFetcher {
       cancelAllRequests(this.context.requestCanceller)
       this.clearBatchLoadingFlags(regions, snapshot.index)
     } else {
-      // Kick off every region synchronously so their underlying chunk reads
-      // land in one microtask drain — that's what lets the range coalescer
-      // (icechunk-js + zarrita) merge them into a handful of HTTP fetches
-      // instead of one per region. Browser HTTP queueing handles back-
-      // pressure on the connection pool; throttling fetchRegion calls here
-      // just fragments the coalescer's same-tick batch window.
-      const fetches = regions.map(({ regionX, regionY }) =>
-        this.fetchRegion(regionX, regionY, snapshot)
+      // Regions wait in the layer's queue, which starts a few at a time,
+      // nearest the viewport center first. A region that leaves the
+      // viewport while queued is dropped without a request.
+      const fetches = regions.map(
+        ({ regionX, regionY }) =>
+          new Promise<void>((resolve) => {
+            const key = makeRegionKey(snapshot.index, regionX, regionY)
+            const release = () => {
+              const region = this.context.regionCache.get(key)
+              if (region && region.requestId === null) {
+                region.loading = false
+              }
+              resolve()
+            }
+            enqueueFetches(this.context.requestCanceller, [
+              {
+                key,
+                regionX,
+                regionY,
+                start: async () => {
+                  // The level or selector may have moved on while queued.
+                  if (
+                    this.context.isRemoved() ||
+                    (this.context.getActiveLevel()?.index ?? -1) !==
+                      snapshot.index ||
+                    this.context.getSelectorVersion() !==
+                      snapshot.selectorVersion
+                  ) {
+                    release()
+                    return
+                  }
+                  await this.fetchRegion(regionX, regionY, snapshot)
+                  resolve()
+                },
+                drop: release,
+              },
+            ])
+          })
       )
-      await Promise.allSettled(fetches)
+      await Promise.all(fetches)
     }
 
     // Only update loading state if we're still on the same level

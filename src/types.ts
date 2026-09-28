@@ -130,6 +130,11 @@ export interface ZarrLayerOptions {
    * one chunk.
    */
   minRegionSize?: number
+  /**
+   * Region fetches the layer keeps in flight at once; the rest wait in a
+   * queue, nearest the viewport center first. Defaults to 16.
+   */
+  maxRegionFetches?: number
   customFrag?: string
   uniforms?: Record<string, UniformValue>
   renderingMode?: '2d' | '3d'

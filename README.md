@@ -111,6 +111,7 @@ map.on('load', () => {
 | minzoom | number | `0` | Minimum zoom level for rendering |
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
+| maxRegionFetches | number | `16` | Region fetches in flight at once; the rest wait in a queue, nearest the viewport center first. Raise it for viewports of many small, quick regions |
 | minRegionSize | number | one chunk | Smallest region, in pixels per axis, loaded and drawn as a unit. Regions are whole numbers of chunks, so this groups small chunks into fewer, larger regions. Growth stops at 2048 px per axis |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
 | crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Codes proj4 defines (the WGS84 UTM zones, among others) or that were registered with `proj4.defs` work without a `proj4` string. |

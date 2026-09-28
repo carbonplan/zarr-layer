@@ -163,3 +163,46 @@ describe('minRegionSize', () => {
     }
   })
 })
+
+describe('maxRegionFetches', () => {
+  const layer = (maxRegionFetches?: number) =>
+    new ZarrLayer({
+      id: 'zarr',
+      store: store(),
+      variable: 'temperature',
+      colormap: [
+        [0, 0, 0],
+        [255, 255, 255],
+      ],
+      clim: [0, 31],
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+      maxRegionFetches,
+    })
+  const limit = (l: ZarrLayer) =>
+    (
+      l as unknown as {
+        regionRenderer: { requestCanceller: { maxActive: number } }
+      }
+    ).regionRenderer.requestCanceller.maxActive
+
+  it('sets how many region fetches run at once', async () => {
+    const custom = layer(3)
+    custom.onAdd(map, createRecordingGl())
+    await custom.ready
+    expect(limit(custom)).toBe(3)
+
+    const byDefault = layer()
+    byDefault.onAdd(map, createRecordingGl())
+    await byDefault.ready
+    expect(limit(byDefault)).toBe(16)
+  })
+
+  it('rejects a limit that is not a positive integer', () => {
+    for (const bad of [0, -1, 1.5, NaN]) {
+      expect(() => layer(bad)).toThrow(
+        'maxRegionFetches must be a positive integer'
+      )
+    }
+  })
+})

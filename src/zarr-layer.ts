@@ -34,6 +34,7 @@ import type {
 } from './types'
 import type { RenderContext } from './renderer-types'
 import { RegionRenderer } from './region-renderer'
+import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
   computeWorldOffsets,
   resolveProjectionParams,
@@ -175,6 +176,7 @@ export class ZarrLayer {
   private offset: number = 0
   private fixedDataScale: number
   private minRegionSize: number
+  private maxRegionFetches: number
   // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
@@ -350,6 +352,7 @@ export class ZarrLayer {
     customFrag,
     uniforms,
     minRegionSize = 0,
+    maxRegionFetches = MAX_ACTIVE_REGION_FETCHES,
     renderingMode = '3d',
     onLoadingStateChange,
     proj4,
@@ -410,6 +413,12 @@ export class ZarrLayer {
       )
     }
     this.minRegionSize = minRegionSize
+    if (!Number.isInteger(maxRegionFetches) || maxRegionFetches < 1) {
+      throw new Error(
+        `[ZarrLayer] maxRegionFetches must be a positive integer, got ${maxRegionFetches}.`
+      )
+    }
+    this.maxRegionFetches = maxRegionFetches
 
     this.customFrag = customFrag
     this.customUniforms = checkUniforms(uniforms || {})
@@ -691,7 +700,8 @@ export class ZarrLayer {
       this.normalizedSelector,
       this.invalidate,
       this.fixedDataScale,
-      this.minRegionSize
+      this.minRegionSize,
+      this.maxRegionFetches
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()

@@ -560,6 +560,23 @@ describe('RegionRenderer', () => {
     expect(gl.texImage3D.mock.calls[0][9]).toBeInstanceOf(Int16Array)
   })
 
+  it('drops queued fetches when a selector change starts rebuilding', async () => {
+    const { renderer, gl, map } = await makeRenderer({
+      time: { selected: 0, type: 'index' },
+    })
+    renderer.update(map, gl)
+    const queue = () =>
+      (renderer as unknown as { requestCanceller: { queue: unknown[] } })
+        .requestCanceller.queue
+    expect(queue().length).toBeGreaterThan(0)
+
+    const rebuilt = renderer.setSelector({
+      time: { selected: 1, type: 'index' },
+    })
+    expect(queue()).toEqual([])
+    await rebuilt
+  })
+
   it('latches an unresolvable selector and recovers on setSelector', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {

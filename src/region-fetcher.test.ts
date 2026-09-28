@@ -2,7 +2,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { RegionFetcher, type RegionFetcherContext } from './region-fetcher'
 import { RegionCache, makeRegionKey } from './region-cache'
 import { createProjectionContext } from './projection-utils'
-import { createRequestCanceller, cancelAllRequests } from './region-utils'
+import {
+  createRequestCanceller,
+  cancelAllRequests,
+  dropQueuedFetches,
+} from './region-utils'
 import { ZarrStore } from './zarr-store'
 import {
   buildMemoryZarrStore,
@@ -167,6 +171,17 @@ async function makeHarness(
   }
 }
 
+/**
+ * Wait until a batch has dispatched a chunk read. Fetches start from a queue
+ * in a later task, so a test cancelling "mid-fetch" has to let the read
+ * begin first, or it only exercises the queue.
+ */
+async function untilReading(chunkReads: string[]): Promise<void> {
+  while (chunkReads.length === 0) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
+
 describe('RegionFetcher', () => {
   it('fetches region chunks into CPU-side state', async () => {
     const { fetcher, cache, createRegionGeometry, invalidate } =
@@ -323,10 +338,12 @@ describe('RegionFetcher', () => {
 
   it('drops data when the level changes mid-fetch', async () => {
     const harness = await makeHarness({ gateReads: true })
-    const { fetcher, cache, setLevel, getLevel, releaseReads } = harness
+    const { fetcher, cache, setLevel, getLevel, releaseReads, chunkReads } =
+      harness
     const original = getLevel()!
 
     const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await untilReading(chunkReads)
     setLevel({ ...original, index: 1 })
     releaseReads()
     await batch
@@ -341,10 +358,17 @@ describe('RegionFetcher', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const harness = await makeHarness({ gateReads: true })
-      const { fetcher, cache, requestCanceller, invalidate, releaseReads } =
-        harness
+      const {
+        fetcher,
+        cache,
+        requestCanceller,
+        invalidate,
+        releaseReads,
+        chunkReads,
+      } = harness
 
       const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await untilReading(chunkReads)
       cancelAllRequests(requestCanceller)
       releaseReads()
       await batch
@@ -363,9 +387,11 @@ describe('RegionFetcher', () => {
 
   it('an aborted fetch does not clobber a newer request that took over the region', async () => {
     const harness = await makeHarness({ gateReads: true })
-    const { fetcher, cache, requestCanceller, releaseReads } = harness
+    const { fetcher, cache, requestCanceller, releaseReads, chunkReads } =
+      harness
 
     const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await untilReading(chunkReads)
     const region = cache.get(makeRegionKey(0, 0, 0))!
     cancelAllRequests(requestCanceller)
     // A newer request takes over the region while the aborted one unwinds.
@@ -376,6 +402,34 @@ describe('RegionFetcher', () => {
 
     expect(region.requestId).toBe(999)
     expect(region.loading).toBe(true)
+  })
+
+  it('reads nothing for a region whose level changed while it was queued', async () => {
+    const { fetcher, cache, setLevel, getLevel, chunkReads } =
+      await makeHarness()
+    const original = getLevel()!
+
+    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    setLevel({ ...original, index: 1 })
+    await batch
+
+    expect(chunkReads).toEqual([])
+    expect(cache.get(makeRegionKey(0, 0, 0))!.loading).toBe(false)
+  })
+
+  it('fetches a region dropped from the queue when it is requested again', async () => {
+    const { fetcher, cache, requestCanceller, chunkReads } = await makeHarness()
+
+    const dropped = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    dropQueuedFetches(requestCanceller, () => true)
+    await dropped
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    expect(chunkReads).toEqual([])
+    expect(region.loading).toBe(false)
+
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    expect(Array.from(region.data!)).toEqual(chunkData(0, 0))
+    expect(region.loading).toBe(false)
   })
 
   it('does nothing without a committed level', async () => {
