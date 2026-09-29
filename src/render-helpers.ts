@@ -13,6 +13,7 @@ import {
   allocateLike,
   bandFormatOf,
   bandTextureFormats,
+  type BandArray,
   type BandFormat,
 } from './band-format'
 
@@ -187,6 +188,41 @@ function fitsBandTexture(
 }
 
 /**
+ * The bands as one array when they already lie back to back in one buffer,
+ * in shader order, as a single read of a band range leaves them: the texture
+ * array takes that layout as is. Null otherwise.
+ */
+function adjacentBands(
+  arrays: BandArray[],
+  layerSize: number
+): BandArray | null {
+  const first = arrays[0]
+  const layerBytes = layerSize * first.BYTES_PER_ELEMENT
+  for (let layer = 0; layer < arrays.length; layer++) {
+    const data = arrays[layer]
+    if (
+      data.buffer !== first.buffer ||
+      data.length !== layerSize ||
+      data.byteOffset !== first.byteOffset + layer * layerBytes
+    ) {
+      return null
+    }
+  }
+  return new (first.constructor as new (
+    buffer: ArrayBufferLike,
+    byteOffset: number,
+    length: number
+  ) => BandArray)(first.buffer, first.byteOffset, layerSize * arrays.length)
+}
+
+/** Copy the bands into one new array, one band after another. */
+function packBands(arrays: BandArray[], layerSize: number): BandArray {
+  const packed = allocateLike(arrays[0], layerSize * arrays.length)
+  arrays.forEach((data, layer) => packed.set(data, layer * layerSize))
+  return packed
+}
+
+/**
  * Upload every band a custom shader samples into one texture array, one band
  * per layer, in the bands' own storage format. Returns false if a band's data
  * is missing, is not stored as `format`, or the texture cannot be allocated,
@@ -216,12 +252,14 @@ function ensureBandTexture(
   if (!first || bandFormatOf(first) !== format) return false
 
   const layerSize = region.width * region.height
-  const packed = allocateLike(first, layerSize * bands.length)
-  for (let layer = 0; layer < bands.length; layer++) {
-    const data = region.bandData.get(bands[layer])
+  const arrays: BandArray[] = []
+  for (const band of bands) {
+    const data = region.bandData.get(band)
     if (!data || data.constructor !== first.constructor) return false
-    packed.set(data, layer * layerSize)
+    arrays.push(data)
   }
+  const packed =
+    adjacentBands(arrays, layerSize) ?? packBands(arrays, layerSize)
 
   if (!region.bandTexture) region.bandTexture = gl.createTexture()
   if (!region.bandTexture) return false

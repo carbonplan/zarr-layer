@@ -427,6 +427,58 @@ describe('ensureRegionGpuResources with integer bands', () => {
     expect(region.bandTextureKey).toBe(bandTextureKey(['a', 'b'], 'int'))
   })
 
+  describe('bands read together', () => {
+    // Three 2x2 bands back to back in one buffer, as one read of a band
+    // range returns them.
+    const buffer = () =>
+      new Int16Array([0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23])
+    const views = (all: Int16Array) =>
+      [0, 1, 2].map((b) => all.subarray(b * 4, b * 4 + 4))
+
+    it('uploads adjacent views as they are, without a copy', () => {
+      const gl = fakeGl()
+      const region = fetchedRegion()
+      const all = buffer()
+      views(all).forEach((view, b) => region.bandData.set(`b${b}`, view))
+
+      expect(
+        ensureRegionGpuResources(gl, region, ['b0', 'b1', 'b2'], 'int')
+      ).toBe(true)
+      const data = gl.texImage3D.mock.calls[0][9] as Int16Array
+      expect(data.buffer).toBe(all.buffer)
+      expect(data.byteOffset).toBe(all.byteOffset)
+      expect([...data]).toEqual([...all])
+    })
+
+    it('copies bands sampled in a different order', () => {
+      const gl = fakeGl()
+      const region = fetchedRegion()
+      const all = buffer()
+      views(all).forEach((view, b) => region.bandData.set(`b${b}`, view))
+
+      expect(
+        ensureRegionGpuResources(gl, region, ['b2', 'b0', 'b1'], 'int')
+      ).toBe(true)
+      const data = gl.texImage3D.mock.calls[0][9] as Int16Array
+      expect(data.buffer).not.toBe(all.buffer)
+      expect([...data]).toEqual([20, 21, 22, 23, 0, 1, 2, 3, 10, 11, 12, 13])
+    })
+
+    it('copies a subset that skips a band', () => {
+      const gl = fakeGl()
+      const region = fetchedRegion()
+      const all = buffer()
+      views(all).forEach((view, b) => region.bandData.set(`b${b}`, view))
+
+      expect(ensureRegionGpuResources(gl, region, ['b0', 'b2'], 'int')).toBe(
+        true
+      )
+      const data = gl.texImage3D.mock.calls[0][9] as Int16Array
+      expect(data.buffer).not.toBe(all.buffer)
+      expect([...data]).toEqual([0, 1, 2, 3, 20, 21, 22, 23])
+    })
+  })
+
   it('picks the texture format from the array type', () => {
     const gl = fakeGl()
     const region = fetchedRegion()
