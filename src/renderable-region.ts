@@ -165,6 +165,7 @@ export function renderRegion(
       gl.uniform1f(shaderProgram.bandScaleLoc, transform.scale)
       gl.uniform1f(shaderProgram.bandOffsetLoc, transform.offset)
       gl.uniform1f(shaderProgram.bandFillLoc, transform.fill ?? NaN)
+      gl.uniform1f(shaderProgram.nanLoc, NaN)
     }
   } else {
     if (!region.texture) return false

@@ -148,9 +148,7 @@ describe('createFragmentShaderSource — structure', () => {
 
   it('turns the integer fill value into NaN for customFrag', () => {
     const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'int' })
-    expect(src).toContain(
-      'return raw == u_bandFill ? uintBitsToFloat(0x7fc00000u) : raw;'
-    )
+    expect(src).toContain('return raw == u_bandFill ? u_zl_nan : raw;')
   })
 
   it('omits the integer read helper for float bands', () => {

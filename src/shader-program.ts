@@ -57,6 +57,7 @@ export interface ShaderProgram {
   bandScaleLoc: WebGLUniformLocation | null
   bandOffsetLoc: WebGLUniformLocation | null
   bandFillLoc: WebGLUniformLocation | null
+  nanLoc: WebGLUniformLocation | null
   customUniformLocs: Map<string, WebGLUniformLocation>
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
@@ -279,6 +280,7 @@ export function createShaderProgram(
     bandScaleLoc: gl.getUniformLocation(program, 'u_bandScale'),
     bandOffsetLoc: gl.getUniformLocation(program, 'u_bandOffset'),
     bandFillLoc: gl.getUniformLocation(program, 'u_bandFill'),
+    nanLoc: gl.getUniformLocation(program, 'u_zl_nan'),
     customUniformLocs,
     globeToMercMatrixLoc: mapboxUniform('u_globe_to_merc'),
     globeTransitionLoc: mapboxUniform('u_globe_transition'),

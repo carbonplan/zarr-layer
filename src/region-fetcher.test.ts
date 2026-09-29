@@ -225,6 +225,21 @@ describe('RegionFetcher', () => {
     expect(region.data).toBeNull()
   })
 
+  it('keeps integer bands raw for a scale float32 cannot hold exactly', async () => {
+    // 0.1 is inexact in float32, like most real scale factors; the region
+    // must stay in the integer format the renderer draws this level with.
+    const { fetcher, cache } = await makeHarness({
+      dtype: 'int16',
+      attributes: { scale_factor: 0.1 },
+      bandTextures: true,
+    })
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+
+    const region = cache.get(makeRegionKey(0, 0, 0))!
+    expect(region.bandData.get('temperature')).toBeInstanceOf(Int16Array)
+    expect(region.bandTransform).toEqual({ scale: 0.1, offset: 0, fill: null })
+  })
+
   it('converts integer bands to float for the main texture', async () => {
     const { fetcher, cache } = await makeHarness({ dtype: 'int8' })
     await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])

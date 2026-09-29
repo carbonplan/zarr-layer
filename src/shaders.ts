@@ -510,16 +510,18 @@ const BAND_SAMPLER_TYPES: Record<BandFormat, string> = {
 /**
  * Integer bands arrive raw: the fill value becomes NaN, as it does for float
  * bands on upload, and scale/offset come from per-region uniforms since each
- * pyramid level may declare its own.
+ * pyramid level may declare its own. The NaN comes from a uniform, since
+ * GLSL ES has no portable way to write one.
  */
 const NATIVE_BAND_READ = `
 uniform float u_bandScale;
 uniform float u_bandOffset;
 uniform float u_bandFill;
+uniform float u_zl_nan;
 
 float zl_readBand(vec2 uv, float layer) {
   float raw = float(texture(${BAND_SAMPLER}, vec3(uv, layer)).r);
-  return raw == u_bandFill ? uintBitsToFloat(0x7fc00000u) : raw;
+  return raw == u_bandFill ? u_zl_nan : raw;
 }
 `
 
