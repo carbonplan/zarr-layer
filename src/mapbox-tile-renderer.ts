@@ -90,7 +90,7 @@ export function renderMapboxTile({
     true // useMapbox
   )
 
-  setupBandTextureUniforms(renderer.gl, shaderProgram, customShaderConfig)
+  setupBandTextureUniforms(renderer.gl, shaderProgram)
 
   let needsMoreData = false
   for (const region of regions) {
@@ -104,12 +104,9 @@ export function renderMapboxTile({
       pixCoordBuffer: region.pixCoordBuffer,
       indexCount: region.indexCount,
       texture: region.texture,
-      bandData: region.bandData ?? new Map(),
-      bandTextures: region.bandTextures ?? new Map(),
-      bandTexturesUploaded: region.bandTexturesUploaded ?? new Set(),
-      bandTexturesConfigured: region.bandTexturesConfigured ?? new Set(),
-      width: region.width,
-      height: region.height,
+      bandTexture: region.bandTexture,
+      bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
       indexBuffer: region.indexBuffer,
       meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,

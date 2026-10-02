@@ -2,9 +2,13 @@ import { describe, it, expect, vi } from 'vitest'
 import { RegionRenderer } from './region-renderer'
 import { createRegionState, type RegionCache } from './region-cache'
 import { ZarrStore } from './zarr-store'
-import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
+import {
+  buildMemoryZarrStore,
+  type ArraySpec,
+} from './__fixtures__/memory-zarr'
 import type { MapLike, NormalizedSelector } from './types'
 import type { RegionRenderState } from './renderer-types'
+import { bandTextureKey } from './render-helpers'
 import type { RegionState } from './region-state'
 
 /**
@@ -39,6 +43,13 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
   return {
     TEXTURE0: 0x84c0,
     TEXTURE_2D: 0x0de1,
+    TEXTURE_2D_ARRAY: 0x8c1a,
+    MAX_ARRAY_TEXTURE_LAYERS: 0x88ff,
+    MAX_TEXTURE_SIZE: 0x0d33,
+    // Array limits, then UNPACK_ALIGNMENT for everything else.
+    getParameter: vi.fn((pname: number) =>
+      pname === 0x88ff ? 256 : pname === 0x0d33 ? 4096 : 4
+    ),
     createTexture: vi.fn(() => (failTextures ? null : { tex: ++textures })),
     createBuffer: vi.fn(() => ({ buf: ++buffers })),
     deleteTexture: vi.fn(),
@@ -47,10 +58,13 @@ function fakeGl({ failTextures = false }: { failTextures?: boolean } = {}) {
     bindBuffer: vi.fn(),
     bufferData: vi.fn(),
     texImage2D: vi.fn(),
+    texImage3D: vi.fn(),
     texParameteri: vi.fn(),
     activeTexture: vi.fn(),
+    pixelStorei: vi.fn(),
   } as unknown as WebGL2RenderingContext & {
     createTexture: ReturnType<typeof vi.fn>
+    texImage3D: ReturnType<typeof vi.fn>
     deleteTexture: ReturnType<typeof vi.fn>
     texImage2D: ReturnType<typeof vi.fn>
     bufferData: ReturnType<typeof vi.fn>
@@ -127,10 +141,9 @@ function seedFallbackRegion(
     region.indexBuffer = {} as WebGLBuffer
     region.textureUploaded = true
     region.geometryUploaded = true
-    for (const band of bands ?? []) {
-      region.bandTextures.set(band, {} as WebGLTexture)
-      region.bandTexturesUploaded.add(band)
-      region.bandTexturesConfigured.add(band)
+    if (bands) {
+      region.bandTexture = {} as WebGLTexture
+      region.bandTextureKey = bandTextureKey(bands)
     }
   }
 
@@ -163,7 +176,10 @@ async function settle(renderer: RegionRenderer): Promise<void> {
   } while (fetching())
 }
 
-async function makeRenderer(selector: NormalizedSelector = {}) {
+async function makeRenderer(
+  selector: NormalizedSelector = {},
+  dtype?: ArraySpec['dtype']
+) {
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -171,6 +187,7 @@ async function makeRenderer(selector: NormalizedSelector = {}) {
         shape: [2, HEIGHT, WIDTH],
         chunkShape: [2, 2, 4],
         dimensionNames: ['time', 'lat', 'lon'],
+        dtype,
         chunks: {
           '0/0/0': chunk(0, 0),
           '0/0/1': chunk(0, 1),
@@ -450,7 +467,7 @@ describe('RegionRenderer', () => {
     const failing = fakeGl({ failTextures: true })
     const states = seam(renderer).getRegionStates(failing)
     expect(states).toHaveLength(1)
-    expect(states[0].bandTextures).toBe(fallback.bandTextures)
+    expect(states[0].bandTexture).toBe(fallback.bandTexture)
   })
 
   it('holds other-level eviction protection until the level is drawable', async () => {
@@ -469,6 +486,20 @@ describe('RegionRenderer', () => {
     seam(renderer).getRegionStates(gl)
     renderer.update(map, gl)
     expect(cache.isProtected(fallback.key)).toBe(false)
+  })
+
+  it('evicts on a settled viewport once fetched bytes have landed', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle(renderer)
+    seam(renderer).getRegionStates(gl)
+    const cache = seam(renderer).regionCache
+    const evict = vi.spyOn(cache, 'evict')
+
+    // Nothing left to fetch, but the bytes that arrived after the last
+    // eviction may have pushed the cache over its budget.
+    renderer.update(map, gl)
+    expect(evict).toHaveBeenCalled()
   })
 
   it('drops the interleaved copy once the shader samples band textures', async () => {
@@ -503,9 +534,47 @@ describe('RegionRenderer', () => {
     for (const state of states) {
       expect(state.texture).toBeNull()
     }
-    expect([...refetched.bandTexturesUploaded]).toEqual(['time_10', 'time_20'])
-    // Two bands per region across the 2x2 grid, no main textures.
-    expect(gl.createTexture).toHaveBeenCalledTimes(8)
+    expect(refetched.bandTextureKey).toBe(
+      bandTextureKey(['time_10', 'time_20'])
+    )
+    // One band array per region across the 2x2 grid, no main textures.
+    expect(gl.createTexture).toHaveBeenCalledTimes(4)
+  })
+
+  it('draws integer datasets from integer band textures', async () => {
+    const { renderer, gl, map } = await makeRenderer({}, 'int16')
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.setRendersFromBandTextures(true)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    // Readiness is judged against the level's format, so a mismatch here
+    // would leave every region undrawable.
+    const states = seam(renderer).getRegionStates(gl)
+    expect(states).toHaveLength(4)
+    for (const state of states) {
+      expect(state.bandTextureKey).toBe(bandTextureKey(['temperature'], 'int'))
+      expect(state.bandTransform).toEqual({ scale: 1, offset: 0, fill: null })
+    }
+    expect(gl.texImage3D.mock.calls[0][9]).toBeInstanceOf(Int16Array)
+  })
+
+  it('drops queued fetches when a selector change starts rebuilding', async () => {
+    const { renderer, gl, map } = await makeRenderer({
+      time: { selected: 0, type: 'index' },
+    })
+    renderer.update(map, gl)
+    const queue = () =>
+      (renderer as unknown as { requestCanceller: { queue: unknown[] } })
+        .requestCanceller.queue
+    expect(queue().length).toBeGreaterThan(0)
+
+    const rebuilt = renderer.setSelector({
+      time: { selected: 1, type: 'index' },
+    })
+    expect(queue()).toEqual([])
+    await rebuilt
   })
 
   it('latches an unresolvable selector and recovers on setSelector', async () => {

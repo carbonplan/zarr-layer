@@ -11,6 +11,7 @@ export type {
   OnAuthError,
   RequestParameters,
 } from './types'
+export type { UniformValue } from './renderer-types'
 
 // Query interface exports
 export type {

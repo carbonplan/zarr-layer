@@ -64,6 +64,39 @@ describe('getRegionSize', () => {
     expect(getRegionSize(array, LATLON_INDICES)).toEqual([64, 128])
   })
 
+  it('groups small chunks up to a minimum region size', () => {
+    const array = fakeArray({
+      shape: [4096, 4096],
+      chunks: [4096, 4096],
+      codecs: [
+        { name: 'sharding_indexed', configuration: { chunk_shape: [32, 32] } },
+      ],
+    })
+    expect(getRegionSize(array, LATLON_INDICES, 256)).toEqual([256, 256])
+    // Rounded up to a whole number of chunks, per axis.
+    expect(getRegionSize(array, LATLON_INDICES, 100)).toEqual([128, 128])
+  })
+
+  it('stops growing at the WebGL2 minimum texture size', () => {
+    const small = fakeArray({ shape: [8192, 8192], chunks: [300, 300] })
+    expect(getRegionSize(small, LATLON_INDICES, 4096)).toEqual([1800, 1800])
+    const large = fakeArray({ shape: [8192, 8192], chunks: [3000, 3000] })
+    expect(getRegionSize(large, LATLON_INDICES, 4096)).toEqual([3000, 3000])
+  })
+
+  it('grows each axis separately for non-square chunks', () => {
+    const rows = fakeArray({ shape: [8192, 4096], chunks: [1, 4096] })
+    // A chunk cannot be split, so the wide axis stays one chunk wide.
+    expect(getRegionSize(rows, LATLON_INDICES, 256)).toEqual([256, 4096])
+    const strips = fakeArray({ shape: [4096, 4096], chunks: [16, 1024] })
+    expect(getRegionSize(strips, LATLON_INDICES, 256)).toEqual([256, 1024])
+  })
+
+  it('leaves chunks at or above the minimum alone', () => {
+    const array = fakeArray({ shape: [1000, 2000], chunks: [256, 512] })
+    expect(getRegionSize(array, LATLON_INDICES, 256)).toEqual([256, 512])
+  })
+
   it('returns null for a single-chunk array', () => {
     const array = fakeArray({ shape: [100, 200], chunks: [100, 200] })
     expect(getRegionSize(array, LATLON_INDICES)).toBeNull()

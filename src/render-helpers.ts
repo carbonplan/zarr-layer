@@ -7,182 +7,60 @@
  */
 
 import type { ShaderProgram } from './shader-program'
-import type { CustomShaderConfig } from './renderer-types'
 import type { RegionState } from './region-state'
 import { configureDataTexture, getTextureFormats } from './webgl-utils'
+import {
+  allocateLike,
+  bandFormatOf,
+  bandTextureFormats,
+  type BandArray,
+  type BandFormat,
+} from './band-format'
+
+/** Texture unit for the band array (0 = main texture, 1 = colormap). */
+const BAND_TEXTURE_UNIT = 2
 
 /**
- * Set up band texture uniform locations.
+ * Identifies which bands, in which order and storage format, a band texture
+ * holds. A texture is only drawable by a shader whose band list and sampler
+ * type produce the same key.
+ */
+export function bandTextureKey(
+  bands: readonly string[],
+  format: BandFormat = 'float'
+): string {
+  return `${format}:${bands.join(',')}`
+}
+
+/**
+ * Point the band sampler at its texture unit.
  * Called once per frame before rendering any tiles/regions.
- *
- * @param gl - WebGL context
- * @param shaderProgram - Shader program with band texture uniform locations
- * @param customShaderConfig - Custom shader configuration with band names
  */
 export function setupBandTextureUniforms(
   gl: WebGL2RenderingContext,
-  shaderProgram: ShaderProgram,
-  customShaderConfig?: CustomShaderConfig
+  shaderProgram: ShaderProgram
 ): void {
-  if (!shaderProgram.useCustomShader || !customShaderConfig) return
-
-  let textureUnit = 2 // 0 = main texture, 1 = colormap
-  for (const bandName of customShaderConfig.bands) {
-    const loc = shaderProgram.bandTexLocs.get(bandName)
-    if (loc) {
-      gl.uniform1i(loc, textureUnit)
-    }
-    textureUnit++
-  }
-}
-
-/** Options for band texture binding */
-interface BindBandTexturesOptions {
-  /** Band data arrays by name */
-  bandData: Map<string, Float32Array>
-  /** Band textures by name */
-  bandTextures: Map<string, WebGLTexture>
-  /** Set of band names that have been uploaded */
-  bandTexturesUploaded: Set<string>
-  /** Set of band names that have been configured */
-  bandTexturesConfigured: Set<string>
-  /** Custom shader config with band names */
-  customShaderConfig: CustomShaderConfig
-  /** Texture width */
-  width: number
-  /** Texture height */
-  height: number
-  /** Optional function to ensure a texture exists for a band */
-  ensureTexture?: (bandName: string) => WebGLTexture | null
-}
-
-/** Shared empty list so the no-bands prune allocates nothing per frame. */
-const EMPTY_BANDS: readonly string[] = []
-
-/** The per-band GPU bookkeeping carried on a region. */
-interface BandTextureState {
-  bandTextures: Map<string, WebGLTexture>
-  bandTexturesUploaded: Set<string>
-  bandTexturesConfigured: Set<string>
+  if (!shaderProgram.useCustomShader || !shaderProgram.bandTexLoc) return
+  gl.uniform1i(shaderProgram.bandTexLoc, BAND_TEXTURE_UNIT)
 }
 
 /**
- * Delete every band texture whose name is not in `wanted`. Runs per region on
- * every render call, so it exits without allocating in the common case where
- * the resident set already matches.
+ * Bind a region's band texture array for drawing. Returns false unless the
+ * resident texture holds exactly the bands the shader samples.
  */
-function pruneBandTextures(
+export function bindBandTexture(
   gl: WebGL2RenderingContext,
-  wanted: readonly string[],
-  state: BandTextureState
-): void {
-  const { bandTextures } = state
-  if (bandTextures.size === 0) return
-  if (
-    bandTextures.size === wanted.length &&
-    wanted.every((name) => bandTextures.has(name))
-  ) {
-    return
-  }
-
-  const keep = new Set(wanted)
-  for (const [name, tex] of bandTextures) {
-    if (keep.has(name)) continue
-    gl.deleteTexture(tex)
-    bandTextures.delete(name)
-    state.bandTexturesUploaded.delete(name)
-    state.bandTexturesConfigured.delete(name)
-  }
-}
-
-/**
- * Bind and upload band textures for a single tile/region.
- * Returns false if any required band data is missing.
- *
- * @param gl - WebGL context
- * @param options - Band texture binding options
- * @returns true if all bands bound successfully, false if missing data
- */
-export function bindBandTextures(
-  gl: WebGL2RenderingContext,
-  options: BindBandTexturesOptions
+  region: {
+    bandTexture: WebGLTexture | null
+    bandTextureKey: string | null
+  },
+  bands: readonly string[],
+  format: BandFormat = 'float'
 ): boolean {
-  const {
-    bandData,
-    bandTextures,
-    bandTexturesUploaded,
-    bandTexturesConfigured,
-    customShaderConfig,
-    width,
-    height,
-    ensureTexture,
-  } = options
-
-  // Band names track the selector on some datasets, so the set changes as the
-  // user scrubs. Prune by membership rather than count: a same-size swap
-  // (red, green -> nir, swir) replaces every name without changing the size.
-  // Skipped when the caller owns the textures.
-  if (!ensureTexture) {
-    pruneBandTextures(gl, customShaderConfig.bands, {
-      bandTextures,
-      bandTexturesUploaded,
-      bandTexturesConfigured,
-    })
-  }
-
-  let textureUnit = 2
-  for (const bandName of customShaderConfig.bands) {
-    const data = bandData.get(bandName)
-    if (!data) {
-      return false // Missing band data
-    }
-
-    let bandTex = bandTextures.get(bandName)
-    if (!bandTex) {
-      if (ensureTexture) {
-        const newTex = ensureTexture(bandName)
-        if (newTex) {
-          bandTex = newTex
-          bandTextures.set(bandName, bandTex)
-        }
-      } else {
-        // Create texture directly
-        bandTex = gl.createTexture()
-        if (bandTex) {
-          bandTextures.set(bandName, bandTex)
-        }
-      }
-    }
-    if (!bandTex) {
-      return false // Failed to create texture
-    }
-
-    gl.activeTexture(gl.TEXTURE0 + textureUnit)
-    gl.bindTexture(gl.TEXTURE_2D, bandTex)
-
-    if (!bandTexturesConfigured.has(bandName)) {
-      configureDataTexture(gl)
-      bandTexturesConfigured.add(bandName)
-    }
-
-    if (!bandTexturesUploaded.has(bandName)) {
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.R32F,
-        width,
-        height,
-        0,
-        gl.RED,
-        gl.FLOAT,
-        data
-      )
-      bandTexturesUploaded.add(bandName)
-    }
-
-    textureUnit++
-  }
-
+  if (!region.bandTexture) return false
+  if (region.bandTextureKey !== bandTextureKey(bands, format)) return false
+  gl.activeTexture(gl.TEXTURE0 + BAND_TEXTURE_UNIT)
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, region.bandTexture)
   return true
 }
 
@@ -262,49 +140,158 @@ export function uploadDataTexture(
   return { configured: true, uploaded: true }
 }
 
+function deleteBandTexture(
+  gl: WebGL2RenderingContext,
+  region: RegionState
+): void {
+  if (region.bandTexture) gl.deleteTexture(region.bandTexture)
+  region.bandTexture = null
+  region.bandTextureKey = null
+  region.bandTextureBytes = 0
+}
+
+const bandTextureLimits = new WeakMap<
+  WebGL2RenderingContext,
+  { layers: number; size: number; warned: boolean }
+>()
+
 /**
- * Create and upload the band textures a custom shader samples, dropping any
- * that are no longer requested. Returns false if a band's data is missing or
- * a texture cannot be allocated, which makes the region undrawable.
+ * Whether a texture array of this size fits the context. An upload past the
+ * limits fails without an exception, so it is refused up front, with one
+ * error per context.
  */
-function ensureBandTextures(
+function fitsBandTexture(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number,
+  layers: number
+): boolean {
+  let limits = bandTextureLimits.get(gl)
+  if (!limits) {
+    limits = {
+      layers: gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number,
+      size: gl.getParameter(gl.MAX_TEXTURE_SIZE) as number,
+      warned: false,
+    }
+    bandTextureLimits.set(gl, limits)
+  }
+  if (layers <= limits.layers && width <= limits.size && height <= limits.size)
+    return true
+  if (!limits.warned) {
+    limits.warned = true
+    console.error(
+      `[zarr-layer] ${layers} bands of ${width}x${height} exceed this GPU's ` +
+        `texture array limits (${limits.layers} layers, ${limits.size} px).`
+    )
+  }
+  return false
+}
+
+/**
+ * The bands as one array when they already lie back to back in one buffer,
+ * in shader order, as a single read of a band range leaves them: the texture
+ * array takes that layout as is. Null otherwise.
+ */
+function adjacentBands(
+  arrays: BandArray[],
+  layerSize: number
+): BandArray | null {
+  const first = arrays[0]
+  const layerBytes = layerSize * first.BYTES_PER_ELEMENT
+  for (let layer = 0; layer < arrays.length; layer++) {
+    const data = arrays[layer]
+    if (
+      data.buffer !== first.buffer ||
+      data.length !== layerSize ||
+      data.byteOffset !== first.byteOffset + layer * layerBytes
+    ) {
+      return null
+    }
+  }
+  return new (first.constructor as new (
+    buffer: ArrayBufferLike,
+    byteOffset: number,
+    length: number
+  ) => BandArray)(first.buffer, first.byteOffset, layerSize * arrays.length)
+}
+
+/** Copy the bands into one new array, one band after another. */
+function packBands(arrays: BandArray[], layerSize: number): BandArray {
+  const packed = allocateLike(arrays[0], layerSize * arrays.length)
+  arrays.forEach((data, layer) => packed.set(data, layer * layerSize))
+  return packed
+}
+
+/**
+ * Upload every band a custom shader samples into one texture array, one band
+ * per layer, in the bands' own storage format. Returns false if a band's data
+ * is missing, is not stored as `format`, or the texture cannot be allocated,
+ * which makes the region undrawable.
+ *
+ * The band arrays are released once uploaded: the texture is the only copy
+ * the region keeps, and anything that needs different bands refetches (from
+ * the decoded chunk cache, when it still holds the chunk).
+ */
+function ensureBandTexture(
   gl: WebGL2RenderingContext,
   region: RegionState,
-  bands: readonly string[]
+  bands: readonly string[],
+  format: BandFormat
 ): boolean {
-  pruneBandTextures(gl, bands, region)
+  const key = bandTextureKey(bands, format)
+  if (region.bandTexture && region.bandTextureKey === key) return true
 
-  for (const name of bands) {
-    const data = region.bandData.get(name)
-    if (!data) return false
-
-    let texture = region.bandTextures.get(name)
-    if (!texture) {
-      texture = gl.createTexture()
-      if (!texture) return false
-      region.bandTextures.set(name, texture)
-    }
-    if (region.bandTexturesUploaded.has(name)) continue
-
-    gl.activeTexture(gl.TEXTURE0)
-    gl.bindTexture(gl.TEXTURE_2D, texture)
-    if (!region.bandTexturesConfigured.has(name)) {
-      configureDataTexture(gl)
-      region.bandTexturesConfigured.add(name)
-    }
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.R32F,
-      region.width,
-      region.height,
-      0,
-      gl.RED,
-      gl.FLOAT,
-      data
-    )
-    region.bandTexturesUploaded.add(name)
+  // Checked before allocating: a region missing a band is retried every
+  // frame until it is refetched or evicted.
+  if (!bands.every((band) => region.bandData.has(band))) return false
+  if (!fitsBandTexture(gl, region.width, region.height, bands.length)) {
+    return false
   }
+
+  const first = region.bandData.get(bands[0])
+  if (!first || bandFormatOf(first) !== format) return false
+
+  const layerSize = region.width * region.height
+  const arrays: BandArray[] = []
+  for (const band of bands) {
+    const data = region.bandData.get(band)
+    if (!data || data.constructor !== first.constructor) return false
+    arrays.push(data)
+  }
+  const packed =
+    adjacentBands(arrays, layerSize) ?? packBands(arrays, layerSize)
+
+  if (!region.bandTexture) region.bandTexture = gl.createTexture()
+  if (!region.bandTexture) return false
+
+  const {
+    internalFormat,
+    format: glFormat,
+    type,
+  } = bandTextureFormats(gl, first)
+  gl.activeTexture(gl.TEXTURE0)
+  gl.bindTexture(gl.TEXTURE_2D_ARRAY, region.bandTexture)
+  configureDataTexture(gl, gl.TEXTURE_2D_ARRAY)
+  // Rows of 1- and 2-byte texels need not be 4-byte aligned.
+  const alignment =
+    format === 'float' ? null : gl.getParameter(gl.UNPACK_ALIGNMENT)
+  if (alignment !== null) gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+  gl.texImage3D(
+    gl.TEXTURE_2D_ARRAY,
+    0,
+    internalFormat,
+    region.width,
+    region.height,
+    bands.length,
+    0,
+    glFormat,
+    type,
+    packed
+  )
+  if (alignment !== null) gl.pixelStorei(gl.UNPACK_ALIGNMENT, alignment)
+  region.bandTextureKey = key
+  region.bandTextureBytes = packed.byteLength
+  region.bandData.clear()
   return true
 }
 
@@ -319,11 +306,16 @@ function ensureBandTextures(
  * whether the level is considered covered, and a level that displaces its
  * fallbacks and then fails to bind a band leaves the viewport blank. The main
  * texture is not created in that mode, since nothing samples it.
+ *
+ * `bandFormat` is the storage format the shader's band sampler reads. A
+ * region stored in another format (a fallback from a level with a different
+ * dtype) is reported undrawable rather than drawn through the wrong sampler.
  */
 export function ensureRegionGpuResources(
   gl: WebGL2RenderingContext,
   region: RegionState,
-  requiredBands?: readonly string[]
+  requiredBands?: readonly string[],
+  bandFormat: BandFormat = 'float'
 ): boolean {
   if (!region.vertexArr || !region.pixCoordArr || !region.indexArr) return false
 
@@ -337,9 +329,9 @@ export function ensureRegionGpuResources(
       region.texture = null
       region.textureUploaded = false
     }
-    texturesReady = ensureBandTextures(gl, region, requiredBands)
+    texturesReady = ensureBandTexture(gl, region, requiredBands, bandFormat)
   } else {
-    pruneBandTextures(gl, EMPTY_BANDS, region)
+    deleteBandTexture(gl, region)
     // A region fetched for a band-sampling shader has no interleaved copy, so
     // it stays undrawable here until the refetch that follows the switch.
     if (!region.data) return false

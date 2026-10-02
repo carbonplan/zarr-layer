@@ -17,7 +17,7 @@ import { ZarrStore } from './zarr-store'
 import { maplibreFragmentShaderSource } from './shaders'
 import { ColormapState } from './colormap'
 import { ZarrRenderer } from './zarr-renderer'
-import type { CustomShaderConfig } from './renderer-types'
+import type { CustomShaderConfig, UniformValue } from './renderer-types'
 import type {
   Bounds,
   ColormapArray,
@@ -34,6 +34,7 @@ import type {
 } from './types'
 import type { RenderContext } from './renderer-types'
 import { RegionRenderer } from './region-renderer'
+import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
   computeWorldOffsets,
   resolveProjectionParams,
@@ -115,6 +116,38 @@ function mapboxGlobeToMercatorTransition(zoom: number): number {
   return smoothstep(5, 6, zoom)
 }
 
+/** GLSL has no zero-length arrays, so an empty one could never compile. */
+function checkUniforms(
+  uniforms: Record<string, UniformValue>
+): Record<string, UniformValue> {
+  // Values arrive from JavaScript too, so the declared type is not trusted.
+  for (const [name, value] of Object.entries(uniforms) as [string, unknown][]) {
+    if (typeof value === 'number') continue
+    if (
+      !Array.isArray(value) &&
+      !(value instanceof Float32Array) &&
+      !(value instanceof Float64Array)
+    ) {
+      throw new Error(
+        `[ZarrLayer] Uniform '${name}' must be a number or an array of numbers.`
+      )
+    }
+    if (value.length === 0) {
+      throw new Error(`[ZarrLayer] Uniform array '${name}' is empty.`)
+    }
+    for (const element of value) {
+      if (typeof element !== 'number') {
+        throw new Error(
+          `[ZarrLayer] Uniform array '${name}' holds a non-number: ${String(
+            element
+          )}.`
+        )
+      }
+    }
+  }
+  return uniforms
+}
+
 export class ZarrLayer {
   readonly type: 'custom' = 'custom'
   readonly renderingMode: '2d' | '3d'
@@ -142,6 +175,8 @@ export class ZarrLayer {
   private scaleFactor: number = 1
   private offset: number = 0
   private fixedDataScale: number
+  private minRegionSize: number
+  private maxRegionFetches: number
   // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
@@ -194,7 +229,7 @@ export class ZarrLayer {
   private readyPromise: Promise<void> | null = null
   private fragmentShaderSource: string = maplibreFragmentShaderSource
   private customFrag: string | undefined
-  private customUniforms: Record<string, number> = {}
+  private customUniforms: Record<string, UniformValue> = {}
   private bandNames: string[] = []
   private customShaderConfig: CustomShaderConfig | null = null
   private onLoadingStateChange: LoadingStateCallback | undefined
@@ -316,6 +351,8 @@ export class ZarrLayer {
     fillValue,
     customFrag,
     uniforms,
+    minRegionSize = 0,
+    maxRegionFetches = MAX_ACTIVE_REGION_FETCHES,
     renderingMode = '3d',
     onLoadingStateChange,
     proj4,
@@ -370,9 +407,21 @@ export class ZarrLayer {
     this.opacity = opacity
     this.minZoom = minzoom
     this.maxZoom = maxzoom
+    if (!Number.isFinite(minRegionSize) || minRegionSize < 0) {
+      throw new Error(
+        `[ZarrLayer] minRegionSize must be a non-negative number, got ${minRegionSize}.`
+      )
+    }
+    this.minRegionSize = minRegionSize
+    if (!Number.isInteger(maxRegionFetches) || maxRegionFetches < 1) {
+      throw new Error(
+        `[ZarrLayer] maxRegionFetches must be a positive integer, got ${maxRegionFetches}.`
+      )
+    }
+    this.maxRegionFetches = maxRegionFetches
 
     this.customFrag = customFrag
-    this.customUniforms = uniforms || {}
+    this.customUniforms = checkUniforms(uniforms || {})
 
     this.refreshCustomShaderConfig()
 
@@ -456,7 +505,7 @@ export class ZarrLayer {
     this.invalidate()
   }
 
-  setUniforms(uniforms: Record<string, number>) {
+  setUniforms(uniforms: Record<string, UniformValue>) {
     if (!this.customShaderConfig) {
       console.warn(
         '[ZarrLayer] setUniforms() called but layer was not created with customFrag. ' +
@@ -464,7 +513,7 @@ export class ZarrLayer {
       )
       return
     }
-    this.customUniforms = { ...this.customUniforms, ...uniforms }
+    this.customUniforms = { ...this.customUniforms, ...checkUniforms(uniforms) }
     this.customShaderConfig.customUniforms = this.customUniforms
     this.invalidate()
   }
@@ -617,7 +666,8 @@ export class ZarrLayer {
       this.lastIsGlobe = isGlobe
       this.regionRenderer?.onProjectionChange(isGlobe)
 
-      this.regionRenderer?.update(this.map, this.gl!)
+      if (this.isZoomInRange()) this.regionRenderer?.update(this.map, this.gl!)
+      else this.regionRenderer?.followZoom(this.map, this.gl!)
     } catch (err) {
       this.initError = err instanceof Error ? err : new Error(String(err))
       console.error(
@@ -649,7 +699,9 @@ export class ZarrLayer {
       this.variable,
       this.normalizedSelector,
       this.invalidate,
-      this.fixedDataScale
+      this.fixedDataScale,
+      this.minRegionSize,
+      this.maxRegionFetches
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()
@@ -661,8 +713,12 @@ export class ZarrLayer {
     this.regionRenderer.setLoadingCallback(this.handleChunkLoadingChange)
     await this.regionRenderer.initialize()
 
+    // The map may have zoomed out of range while this was loading; the
+    // per-frame update picks up again once it zooms back in. Until then the
+    // level still follows the zoom, for queries and `ready`.
     if (this.map && this.gl) {
-      this.regionRenderer.update(this.map, this.gl)
+      if (this.isZoomInRange()) this.regionRenderer.update(this.map, this.gl)
+      else this.regionRenderer.followZoom(this.map, this.gl)
     }
   }
 

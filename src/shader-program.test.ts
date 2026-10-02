@@ -103,6 +103,18 @@ describe('makeShaderVariantKey', () => {
     expect(banded).not.toBe(base)
     expect(banded).toContain('red_nir')
   })
+
+  it('keys custom shaders by uniform array length', () => {
+    const key = (customUniforms: Record<string, number | number[]>) =>
+      makeShaderVariantKey({
+        projectionMode: 'mapbox',
+        customShaderConfig: { bands: ['a'], customUniforms },
+      })
+    // Lengths are compiled into the declarations; values are not.
+    expect(key({ w: [1, 2] })).toBe(key({ w: [3, 4] }))
+    expect(key({ w: [1, 2] })).not.toBe(key({ w: [1, 2, 3] }))
+    expect(key({ w: 1 })).not.toBe(key({ w: [1] }))
+  })
 })
 
 describe('projection mode -> compiled vertex shader', () => {
@@ -346,6 +358,24 @@ describe('driver-eliminated uniforms', () => {
     expect(shaderProgram.shiftXLoc).toBeNull()
     expect(shaderProgram.shiftYLoc).toBeNull()
     expect(shaderProgram.worldXOffsetLoc).toBeNull()
+  })
+
+  it('builds a custom shader that reads neither opacity nor any band', () => {
+    const gl = createRecordingGl({
+      inactiveUniforms: ['opacity', 'u_texScale', 'u_texOffset'],
+    })
+    const { shaderProgram } = createShaderProgram(gl, {
+      fragmentShaderSource: maplibreFragmentShaderSource,
+      shaderData: FAKE_SHADER_DATA,
+      projectionMode: 'maplibre-proj4',
+      customShaderConfig: {
+        bands: ['temp'],
+        customFrag: 'fragColor = vec4(1.0, 0.0, 0.0, 1.0);',
+      },
+    })
+    expect(shaderProgram.opacityLoc).toBeNull()
+    expect(shaderProgram.texScaleLoc).toBeNull()
+    expect(shaderProgram.texOffsetLoc).toBeNull()
   })
 
   it('still rejects a program missing a uniform every variant samples', () => {

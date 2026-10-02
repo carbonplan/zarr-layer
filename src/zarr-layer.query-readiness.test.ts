@@ -158,7 +158,41 @@ function pixelCenter(x: number, y: number): [number, number] {
   ]
 }
 
+/** The level index a layer's renderer committed. */
+const committedLevel = (layer: ZarrLayer) =>
+  (
+    layer as unknown as {
+      regionRenderer: { activeLevel: { index: number } | null }
+    }
+  ).regionRenderer.activeLevel?.index
+
 describe('queryData readiness', () => {
+  it('answers a query right after being added below minzoom', async () => {
+    const layer = makeLayer({ store: samefieldPyramid(), minzoom: 2 })
+    layer.onAdd(staticMap(1), createRecordingGl())
+
+    const result = await layer.queryData({
+      type: 'Point',
+      coordinates: pixelCenter(3, 1),
+    })
+    expect(result.temperature).toEqual([1 * COARSE.width + 3])
+  })
+
+  it('commits the zoom-selected level when added below minzoom', async () => {
+    // Out of range, the layer skips fetching but still tracks which level
+    // the zoom asks for, so queries and `ready` answer from that level.
+    const inRange = makeLayer({ store: samefieldPyramid() })
+    inRange.onAdd(staticMap(1), createRecordingGl())
+    await inRange.ready
+
+    const outOfRange = makeLayer({ store: samefieldPyramid(), minzoom: 2 })
+    outOfRange.onAdd(staticMap(1), createRecordingGl())
+    await outOfRange.ready
+
+    expect(committedLevel(outOfRange)).toBe(committedLevel(inRange))
+    expect(committedLevel(inRange)).toBe(1)
+  })
+
   it('resolves with data when called immediately after onAdd on a map that never renders', async () => {
     const layer = makeLayer({ store: samefieldPyramid() })
     layer.onAdd(staticMap(), createRecordingGl())

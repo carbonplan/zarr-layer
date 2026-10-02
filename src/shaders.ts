@@ -5,6 +5,9 @@
  * Consolidated vertex shaders built from reusable components.
  */
 
+import type { BandFormat } from './band-format'
+import type { UniformValue } from './renderer-types'
+
 export interface ShaderData {
   vertexShaderPrelude: string
   define: string
@@ -484,34 +487,88 @@ ${FRAGMENT_SHADER_REPROJECT}
 
 interface FragmentShaderOptions {
   bands: string[]
-  customUniforms?: string[]
+  customUniforms?: Record<string, UniformValue>
   customFrag?: string
+  bandFormat?: BandFormat
 }
 
 // Compiled once at module load to avoid recompilation on every shader creation
-const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*;/g
+const UNIFORM_REGEX = /uniform\s+\w+\s+(\w+)\s*(?:\[\s*\w+\s*\])?\s*;/g
+
+/**
+ * Blank out comments in one left-to-right pass, so `// /*` is a line comment
+ * and a block comment still separates the tokens around it. Newlines are
+ * kept, so compiler errors keep their line numbers.
+ */
+const stripGlslComments = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
+    comment.replace(/[^\n]/g, ' ')
+  )
+
+function declareUniform(name: string, value: UniformValue): string {
+  return typeof value === 'number'
+    ? `uniform float ${name};`
+    : `uniform float ${name}[${value.length}];`
+}
+
+/**
+ * Sampler for the texture array holding every band a custom shader reads,
+ * one band per layer. Any band count costs a single texture unit, where a
+ * sampler per band would run out at WebGL's guaranteed minimum of 16.
+ */
+export const BAND_SAMPLER = 'u_zl_bands'
+
+const BAND_SAMPLER_TYPES: Record<BandFormat, string> = {
+  float: 'sampler2DArray',
+  int: 'isampler2DArray',
+  uint: 'usampler2DArray',
+}
+
+/**
+ * Integer bands arrive raw: the fill value becomes NaN, as it does for float
+ * bands on upload, and scale/offset come from per-region uniforms since each
+ * pyramid level may declare its own. The NaN comes from a uniform, since
+ * GLSL ES has no portable way to write one.
+ */
+const NATIVE_BAND_READ = `
+uniform float u_bandScale;
+uniform float u_bandOffset;
+uniform float u_bandFill;
+uniform float u_zl_nan;
+
+float zl_readBand(vec2 uv, float layer) {
+  float raw = float(texture(${BAND_SAMPLER}, vec3(uv, layer)).r);
+  return raw == u_bandFill ? u_zl_nan : raw;
+}
+`
 
 export function createFragmentShaderSource(
   options: FragmentShaderOptions
 ): string {
-  const { bands, customUniforms = [], customFrag } = options
+  const {
+    bands,
+    customUniforms = {},
+    customFrag,
+    bandFormat = 'float',
+  } = options
+  const native = bandFormat !== 'float'
+  const samplerType = BAND_SAMPLER_TYPES[bandFormat]
 
-  const bandSamplers = bands
-    .map((name) => `uniform sampler2D ${name};`)
+  const customUniformDecls = Object.entries(customUniforms)
+    .map(([name, value]) => declareUniform(name, value))
     .join('\n')
 
-  const customUniformDecls = customUniforms
-    .map((name) => `uniform float ${name};`)
-    .join('\n')
-
-  let processedFragBody = customFrag || ''
+  const declaredUniforms = new Set(Object.keys(customUniforms))
+  // Comments are dropped first, so a commented-out declaration is not
+  // hoisted into the shader.
+  let processedFragBody = stripGlslComments(customFrag || '')
   // Reset lastIndex since we reuse the regex
   UNIFORM_REGEX.lastIndex = 0
   let match
   const extractedUniforms: string[] = []
 
   while ((match = UNIFORM_REGEX.exec(processedFragBody)) !== null) {
-    if (!customUniforms.includes(match[1])) {
+    if (!declaredUniforms.has(match[1])) {
       extractedUniforms.push(match[0])
     }
   }
@@ -521,9 +578,10 @@ export function createFragmentShaderSource(
   const extraUniformsDecl = extractedUniforms.join('\n')
 
   const bandReads = bands
-    .map(
-      (name) =>
-        `  float ${name}_tex = texture(${name}, sample_coord).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+    .map((name, layer) =>
+      native
+        ? `  float ${name}_tex = zl_readBand(sample_coord, ${layer}.0);\n  float ${name}_raw = ${name}_tex;\n  float ${name}_val = ${name}_raw * u_bandScale + u_bandOffset;`
+        : `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
     )
     .join('\n')
 
@@ -537,6 +595,7 @@ export function createFragmentShaderSource(
 
   return `#version 300 es
 precision highp float;
+precision highp ${samplerType};
 
 uniform float opacity;
 uniform vec2 clim;
@@ -554,7 +613,7 @@ uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D colormap;
 
-${bandSamplers}
+uniform ${samplerType} ${BAND_SAMPLER};
 ${customUniformDecls}
 ${extraUniformsDecl}
 
@@ -565,7 +624,7 @@ out vec4 fragColor;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
-
+${native ? NATIVE_BAND_READ : ''}
 void main() {
 ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}

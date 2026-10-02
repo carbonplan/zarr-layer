@@ -29,7 +29,9 @@ const stripComments = (source: string) =>
 
 const isActiveUniform = (source: string, name: string): boolean => {
   const code = stripComments(source)
-  const declaration = new RegExp(`uniform\\s+\\w+\\s+${name}\\s*;`)
+  const declaration = new RegExp(
+    `uniform\\s+\\w+\\s+${name}\\s*(?:\\[\\s*\\d+\\s*\\])?\\s*;`
+  )
   if (!declaration.test(code)) return false
   return new RegExp(`\\b${name}\\b`).test(code.replace(declaration, ''))
 }
@@ -74,6 +76,8 @@ export interface RecordingGl extends WebGL2RenderingContext {
 /**
  * @param failTextures - make createTexture return null, to drive the
  *   "region cannot be uploaded" branches.
+ * @param linkFails - make every program fail to link, as a driver does when
+ *   a shader exceeds its uniform budget.
  * @param inactiveUniforms - uniform names whose location is null even though
  *   the source references them, the way Mesa reports a uniform whose only
  *   consumer is a varying component the fragment shader never reads.
@@ -81,7 +85,14 @@ export interface RecordingGl extends WebGL2RenderingContext {
 export function createRecordingGl({
   failTextures = false,
   inactiveUniforms = [],
-}: { failTextures?: boolean; inactiveUniforms?: string[] } = {}): RecordingGl {
+  maxFragmentUniformVectors = 224,
+  linkFails = false,
+}: {
+  failTextures?: boolean
+  inactiveUniforms?: string[]
+  maxFragmentUniformVectors?: number
+  linkFails?: boolean
+} = {}): RecordingGl {
   const calls: RecordedCall[] = []
   const record = (name: string, ...args: unknown[]) => {
     calls.push({ name, args })
@@ -148,6 +159,11 @@ export function createRecordingGl({
     RGB32F: 0x8815,
     RGBA32F: 0x8814,
     RGB16F: 0x881b,
+    MAX_FRAGMENT_UNIFORM_VECTORS: 0x8dfd,
+
+    getParameter: vi.fn((pname: number) =>
+      pname === 0x8dfd ? maxFragmentUniformVectors : null
+    ),
 
     getExtension: vi.fn(() => null),
     drawBuffers: vi.fn(),
@@ -166,7 +182,7 @@ export function createRecordingGl({
       program.shaders.push(shader)
     }),
     linkProgram: vi.fn(),
-    getProgramParameter: vi.fn(() => true),
+    getProgramParameter: vi.fn(() => !linkFails),
     getProgramInfoLog: vi.fn(() => ''),
     deleteProgram: vi.fn(),
     useProgram: vi.fn(),
@@ -189,6 +205,9 @@ export function createRecordingGl({
     ),
     uniform1f: vi.fn((loc: UniformLocationStub, v: number) =>
       record('uniform1f', loc?.name, v)
+    ),
+    uniform1fv: vi.fn((loc: UniformLocationStub, v: ArrayLike<number>) =>
+      record('uniform1fv', loc?.name, Array.from(v))
     ),
     uniform2f: vi.fn((loc: UniformLocationStub, a: number, b: number) =>
       record('uniform2f', loc?.name, a, b)

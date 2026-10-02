@@ -67,6 +67,7 @@ import {
   isRegionGpuReady,
   makeRegionKey,
 } from './region-cache'
+import { bandFormatForDtype, type BandFormat } from './band-format'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader, type LevelLoadOutcome } from './level-loader'
 import { wrapError } from './errors'
@@ -76,9 +77,13 @@ import {
   type LoadingManager,
   type ChunkLoadingDebouncer,
   createRequestCanceller,
+  MAX_ACTIVE_REGION_FETCHES,
   createLoadingManager,
   createChunkLoadingDebouncer,
   cancelAllRequests,
+  dropQueuedFetches,
+  hasActiveRequests,
+  prioritizeQueuedFetches,
   setLoadingCallback as setLoadingCallbackUtil,
   emitLoadingState as emitLoadingStateUtil,
 } from './region-utils'
@@ -133,7 +138,7 @@ export class RegionRenderer {
   private _antimeridianWarnings: Set<string> = new Set()
 
   // Shared state managers
-  private requestCanceller: RequestCanceller = createRequestCanceller()
+  private requestCanceller: RequestCanceller
   private loadingManager: LoadingManager = createLoadingManager()
   private loadingDebouncer: ChunkLoadingDebouncer = createChunkLoadingDebouncer(
     this.loadingManager
@@ -161,14 +166,19 @@ export class RegionRenderer {
   private isGlobeProjection: boolean = false
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
+  private minRegionSize: number
 
   constructor(
     store: ZarrStore,
     variable: string,
     selector: NormalizedSelector,
     invalidate: () => void,
-    fixedDataScale: number = 1
+    fixedDataScale: number = 1,
+    minRegionSize: number = 0,
+    maxRegionFetches: number = MAX_ACTIVE_REGION_FETCHES
   ) {
+    this.minRegionSize = minRegionSize
+    this.requestCanceller = createRequestCanceller(maxRegionFetches)
     this.zarrStore = store
     this.variable = variable
     this.selector = selector
@@ -213,7 +223,9 @@ export class RegionRenderer {
       getSelector: () => this.selector,
       isRemoved: () => this.isRemoved,
       onCancelInflight: () => {
-        if (this.requestCanceller.controllers.size > 0) {
+        // Queued fetches have no controller yet but would still start
+        // against the level being replaced.
+        if (hasActiveRequests(this.requestCanceller)) {
           cancelAllRequests(this.requestCanceller)
           this.loadingDebouncer.hide()
         }
@@ -398,7 +410,7 @@ export class RegionRenderer {
   private getRegionSize(
     array: zarr.Array<zarr.DataType>
   ): [number, number] | null {
-    return getRegionSize(array, this.dimIndices)
+    return getRegionSize(array, this.dimIndices, this.minRegionSize)
   }
 
   /**
@@ -471,7 +483,10 @@ export class RegionRenderer {
     for (const { regionX, regionY } of this.lastVisibleRegions) {
       const key = this.makeRegionKey(levelIndex, regionX, regionY)
       const region = this.regionCache.get(key)
-      if (!region || !isRegionGpuReady(region, this.requiredBands())) {
+      if (
+        !region ||
+        !isRegionGpuReady(region, this.requiredBands(), this.bandFormat())
+      ) {
         return false
       }
     }
@@ -484,6 +499,21 @@ export class RegionRenderer {
    */
   private requiredBands(): string[] | undefined {
     return this.rendersFromBandTextures ? this.bandNames : undefined
+  }
+
+  /** Storage format the band sampler reads, set by the active level's dtype. */
+  private bandFormat(): BandFormat {
+    return bandFormatForDtype(this.activeLevel?.zarrArray.dtype)
+  }
+
+  /** The layer's shader config, told which band sampler type to declare. */
+  private shaderConfigForLevel(
+    config: CustomShaderConfig | undefined
+  ): CustomShaderConfig | undefined {
+    if (!config) return config
+    const bandFormat = this.bandFormat()
+    if (config.bandFormat === bandFormat) return config
+    return { ...config, bandFormat }
   }
 
   /**
@@ -514,10 +544,12 @@ export class RegionRenderer {
     const currentLevelRegions: RegionState[] = []
 
     const requiredBands = this.requiredBands()
+    const bandFormat = this.bandFormat()
     for (const region of this.regionCache.values()) {
       if (region.levelIndex !== currentLevel) continue
       if (!isRegionCpuReady(region)) continue
-      if (!ensureRegionGpuResources(gl, region, requiredBands)) continue
+      if (!ensureRegionGpuResources(gl, region, requiredBands, bandFormat))
+        continue
       currentLevelRegions.push(region)
     }
 
@@ -527,7 +559,8 @@ export class RegionRenderer {
 
     // Render order: fallbacks first (beneath), current level on top
     const fallbackRegions = this.getProtectedFallbackRegions().filter(
-      (region) => ensureRegionGpuResources(gl, region, requiredBands)
+      (region) =>
+        ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
     )
     return [...fallbackRegions, ...currentLevelRegions]
   }
@@ -756,6 +789,10 @@ export class RegionRenderer {
         this.requestCanceller.controllers.get(region.requestId)?.abort()
       }
     }
+    dropQueuedFetches(
+      this.requestCanceller,
+      (fetch) => !visibleKeys.has(fetch.key)
+    )
 
     // Separate regions into two categories:
     // 1. New regions (no data) - viewport change
@@ -789,36 +826,15 @@ export class RegionRenderer {
     const viewportChanged = viewportHash !== this.lastViewportHash
     this.lastViewportHash = viewportHash
 
-    // Skip if nothing to fetch
+    // Skip if nothing to fetch. Still evict: fetches started on an earlier
+    // update have since landed, and their bytes count towards the budget.
     if (
       newRegions.length === 0 &&
       staleRegions.length === 0 &&
       !viewportChanged
     ) {
+      this.evictOldRegions(gl)
       return
-    }
-
-    // The browser drains requests roughly in issue order, so the viewport
-    // center loads first.
-    if (visible.length > 1) {
-      let cx = 0
-      let cy = 0
-      for (const { regionX, regionY } of visible) {
-        cx += regionX
-        cy += regionY
-      }
-      cx /= visible.length
-      cy /= visible.length
-      const byCenterDistance = (
-        a: { regionX: number; regionY: number },
-        b: { regionX: number; regionY: number }
-      ) =>
-        (a.regionX - cx) ** 2 +
-        (a.regionY - cy) ** 2 -
-        (b.regionX - cx) ** 2 -
-        (b.regionY - cy) ** 2
-      newRegions.sort(byCenterDistance)
-      staleRegions.sort(byCenterDistance)
     }
 
     if (newRegions.length > 0) {
@@ -826,6 +842,12 @@ export class RegionRenderer {
     }
     if (staleRegions.length > 0) {
       this.fetchRegions(staleRegions)
+    }
+    // Queued regions start nearest the viewport center first.
+    if (visible.length > 1) {
+      const cx = visible.reduce((sum, r) => sum + r.regionX, 0) / visible.length
+      const cy = visible.reduce((sum, r) => sum + r.regionY, 0) / visible.length
+      prioritizeQueuedFetches(this.requestCanceller, cx, cy)
     }
     this.evictOldRegions(gl)
   }
@@ -860,14 +882,14 @@ export class RegionRenderer {
     await fetcher.fetchRegions(regions)
   }
 
-  update(map: MapLike, gl: WebGL2RenderingContext): void {
-    // Cache gl context for use in setSelector
+  /**
+   * Track the map without fetching: pick the level the zoom asks for, which
+   * queries and `ready` load, and keep the gl context. `update` does this
+   * too; a layer outside its zoom range calls only this.
+   */
+  followZoom(map: MapLike, gl: WebGL2RenderingContext): void {
     this.cachedGl = gl
-
-    // Don't proceed if metadata is still loading
-    if (this.loadingManager.metadataLoading) {
-      return
-    }
+    if (this.loadingManager.metadataLoading) return
 
     // Pick target: zoom-selected for multiscale, single level otherwise.
     if (this.isMultiscale && this.levels.length > 0) {
@@ -875,6 +897,15 @@ export class RegionRenderer {
       this.desiredLevelIndex = this.selectLevelForZoom(mapZoom)
     } else {
       this.desiredLevelIndex = 0
+    }
+  }
+
+  update(map: MapLike, gl: WebGL2RenderingContext): void {
+    this.followZoom(map, gl)
+
+    // Don't proceed if metadata is still loading
+    if (this.loadingManager.metadataLoading) {
+      return
     }
 
     // Kick off a load only when the committed level doesn't match the
@@ -918,6 +949,10 @@ export class RegionRenderer {
   }
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
+    context = {
+      ...context,
+      customShaderConfig: this.shaderConfigForLevel(context.customShaderConfig),
+    }
     const useMapbox = !!context.mapbox
     // Use the source-projected mesh path when the CRS is resolved via proj4.
     const useWgs84 = !!this.projection.def && !!this.projection.to4326
@@ -1014,12 +1049,9 @@ export class RegionRenderer {
       meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
       texture: region.texture,
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
-      width: region.width,
-      height: region.height,
+      bandTexture: region.bandTexture,
+      bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
     }
   }
 
@@ -1038,7 +1070,7 @@ export class RegionRenderer {
     const gl = renderer.gl
 
     // Set up band texture uniforms once per frame
-    setupBandTextureUniforms(gl, shaderProgram, customShaderConfig)
+    setupBandTextureUniforms(gl, shaderProgram)
 
     // Render each loaded region using unified path
     for (const region of this.getLoadedRegions(gl)) {
@@ -1066,6 +1098,9 @@ export class RegionRenderer {
       context: {
         ...context,
         uniforms: this.getUniformsForRender(context.uniforms),
+        customShaderConfig: this.shaderConfigForLevel(
+          context.customShaderConfig
+        ),
       },
       regions: this.getRegionStates(renderer.gl),
     })
@@ -1092,10 +1127,9 @@ export class RegionRenderer {
       mercatorBounds: region.mercatorBounds!,
       width: region.width,
       height: region.height,
-      bandData: region.bandData,
-      bandTextures: region.bandTextures,
-      bandTexturesUploaded: region.bandTexturesUploaded,
-      bandTexturesConfigured: region.bandTexturesConfigured,
+      bandTexture: region.bandTexture,
+      bandTextureKey: region.bandTextureKey,
+      bandTransform: region.bandTransform,
       indexBuffer: region.indexBuffer!,
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,
@@ -1154,12 +1188,6 @@ export class RegionRenderer {
     // Retry levels latched by the previous selector.
     this.levelLoader.clearSelectorFailures()
 
-    if (!this.cachedGl) {
-      // No gl context yet — selector is stored, update() will handle loading.
-      this.invalidate()
-      return
-    }
-
     // Abort in-flight region fetches still running with the old selector.
     // Their catch/finally handles state cleanup and re-invalidation.
     for (const [, region] of this.regionCache) {
@@ -1177,8 +1205,11 @@ export class RegionRenderer {
       const outcome = await this.loadLevel(this.activeLevel.index, {
         reuseArray: true,
       })
-      // Cached regions also belong to the previous selector.
-      if (outcome === 'failed') this.clearRegionCache(this.cachedGl)
+      // Cached regions also belong to the previous selector. Without a gl
+      // context no update has run yet, so there are none to clear.
+      if (outcome === 'failed' && this.cachedGl) {
+        this.clearRegionCache(this.cachedGl)
+      }
     } else if (this.loadingLevelIndex !== null) {
       // A level load is already in flight; let it pick up the new
       // selector via its pre-commit `this.selector !== selectorSnapshot`

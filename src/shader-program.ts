@@ -6,6 +6,7 @@ import {
 import {
   createVertexShader,
   createFragmentShaderSource,
+  BAND_SAMPLER,
   type ProjectionData,
   type ShaderData,
   type VertexShaderInputSpace,
@@ -15,6 +16,7 @@ import type {
   CustomShaderConfig,
   MapboxParams,
   ProjectionMode,
+  UniformValue,
 } from './renderer-types'
 
 export interface ShaderProgram {
@@ -36,20 +38,27 @@ export interface ShaderProgram {
   clippingPlaneLoc: WebGLUniformLocation | null
   projectionTransitionLoc: WebGLUniformLocation | null
   climLoc: WebGLUniformLocation | null
-  opacityLoc: WebGLUniformLocation
+  /** Null when a custom shader never reads `opacity`. */
+  opacityLoc: WebGLUniformLocation | null
   fillValueLoc: WebGLUniformLocation | null
   scaleFactorLoc: WebGLUniformLocation | null
   addOffsetLoc: WebGLUniformLocation | null
   cmapLoc: WebGLUniformLocation | null
   colormapLoc: WebGLUniformLocation | null
   texLoc: WebGLUniformLocation | null
-  texScaleLoc: WebGLUniformLocation
-  texOffsetLoc: WebGLUniformLocation
+  /** Null when a custom shader reads no bands. */
+  texScaleLoc: WebGLUniformLocation | null
+  texOffsetLoc: WebGLUniformLocation | null
   vertexLoc: number
   pixCoordLoc: number
   projectionMode: ProjectionMode
   useCustomShader: boolean
-  bandTexLocs: Map<string, WebGLUniformLocation>
+  bandTexLoc: WebGLUniformLocation | null
+  // Per-region transform for raw integer bands; null for float bands
+  bandScaleLoc: WebGLUniformLocation | null
+  bandOffsetLoc: WebGLUniformLocation | null
+  bandFillLoc: WebGLUniformLocation | null
+  nanLoc: WebGLUniformLocation | null
   customUniformLocs: Map<string, WebGLUniformLocation>
   globeToMercMatrixLoc?: WebGLUniformLocation | null
   globeTransitionLoc?: WebGLUniformLocation | null
@@ -93,9 +102,47 @@ export function makeShaderVariantKey(options: {
 
   const baseVariant =
     useCustomShader && customShaderConfig
-      ? ['custom', customShaderConfig.bands.join('_'), shaderVariant].join('_')
+      ? [
+          'custom',
+          customShaderConfig.bandFormat ?? 'float',
+          customShaderConfig.bands.join('_'),
+          uniformSignature(customShaderConfig.customUniforms),
+          shaderVariant,
+        ].join('_')
       : shaderVariant
   return [baseVariant, projectionMode].join('_')
+}
+
+/** Array lengths are compiled into the declarations, so they key the program. */
+function uniformSignature(uniforms: Record<string, UniformValue> = {}): string {
+  return Object.entries(uniforms)
+    .map(([name, value]) =>
+      typeof value === 'number' ? name : `${name}[${value.length}]`
+    )
+    .join(',')
+}
+
+/**
+ * Explains a failed link when uniform arrays are the likely cause. GLSL ES
+ * gives each float array element its own vec4 register, so an array of N
+ * floats the shader reads takes N of the device's fragment uniform vectors.
+ * The driver counts only uniforms the shader uses, so the limit shows only
+ * when linking fails.
+ */
+function uniformArrayHint(
+  gl: WebGL2RenderingContext,
+  uniforms: Record<string, UniformValue> = {}
+): string {
+  let elements = 0
+  for (const value of Object.values(uniforms)) {
+    if (typeof value !== 'number') elements += value.length
+  }
+  if (elements === 0) return ''
+  const max = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) as number
+  return (
+    ` Its uniform arrays hold ${elements} floats, and each element read by ` +
+    `the shader takes one of this device's ${max} fragment uniform vectors.`
+  )
 }
 
 const toFloat32Array = (
@@ -164,10 +211,9 @@ export function createShaderProgram(
     useCustomShader && config
       ? createFragmentShaderSource({
           bands: config.bands,
-          customUniforms: config.customUniforms
-            ? Object.keys(config.customUniforms)
-            : [],
+          customUniforms: config.customUniforms,
           customFrag: config.customFrag,
+          bandFormat: config.bandFormat,
         })
       : fragmentShaderSource
 
@@ -179,19 +225,17 @@ export function createShaderProgram(
 
   const program = createProgram(gl, vertexShader, fragmentShader)
   if (!program) {
-    throw new Error(`Failed to create program for variant: ${variantName}`)
+    throw new Error(
+      `Failed to create program for variant: ${variantName}.` +
+        (useCustomShader && config
+          ? uniformArrayHint(gl, config.customUniforms)
+          : '')
+    )
   }
 
-  const bandTexLocs = new Map<string, WebGLUniformLocation>()
   const customUniformLocs = new Map<string, WebGLUniformLocation>()
 
   if (useCustomShader && config) {
-    for (const bandName of config.bands) {
-      const loc = gl.getUniformLocation(program, bandName)
-      if (loc) {
-        bandTexLocs.set(bandName, loc)
-      }
-    }
     if (config.customUniforms) {
       for (const uniformName of Object.keys(config.customUniforms)) {
         const loc = gl.getUniformLocation(program, uniformName)
@@ -209,6 +253,10 @@ export function createShaderProgram(
     needsMaplibre ? gl.getUniformLocation(program, name) : null
   const mapboxUniform = (name: string) =>
     needsMapbox ? gl.getUniformLocation(program, name) : null
+  const optionalForCustom = (name: string) =>
+    useCustomShader
+      ? gl.getUniformLocation(program, name)
+      : mustGetUniformLocation(gl, program, name)
 
   const shaderProgram: ShaderProgram = {
     program,
@@ -243,9 +291,12 @@ export function createShaderProgram(
     clippingPlaneLoc: maplibreUniform('u_projection_clipping_plane'),
     projectionTransitionLoc: maplibreUniform('u_projection_transition'),
 
-    opacityLoc: mustGetUniformLocation(gl, program, 'opacity'),
-    texScaleLoc: mustGetUniformLocation(gl, program, 'u_texScale'),
-    texOffsetLoc: mustGetUniformLocation(gl, program, 'u_texOffset'),
+    // Built-in shaders always read opacity and sample the data; a custom
+    // one may do neither (the sample coordinates only feed band reads), and
+    // the compiler then drops those uniforms.
+    opacityLoc: optionalForCustom('opacity'),
+    texScaleLoc: optionalForCustom('u_texScale'),
+    texOffsetLoc: optionalForCustom('u_texOffset'),
     vertexLoc: gl.getAttribLocation(program, 'vertex'),
     pixCoordLoc: gl.getAttribLocation(program, 'pix_coord_in'),
 
@@ -260,7 +311,13 @@ export function createShaderProgram(
 
     projectionMode,
     useCustomShader: !!useCustomShader,
-    bandTexLocs,
+    bandTexLoc: useCustomShader
+      ? gl.getUniformLocation(program, BAND_SAMPLER)
+      : null,
+    bandScaleLoc: gl.getUniformLocation(program, 'u_bandScale'),
+    bandOffsetLoc: gl.getUniformLocation(program, 'u_bandOffset'),
+    bandFillLoc: gl.getUniformLocation(program, 'u_bandFill'),
+    nanLoc: gl.getUniformLocation(program, 'u_zl_nan'),
     customUniformLocs,
     globeToMercMatrixLoc: mapboxUniform('u_globe_to_merc'),
     globeTransitionLoc: mapboxUniform('u_globe_transition'),

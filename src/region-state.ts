@@ -1,4 +1,5 @@
 import type * as zarr from 'zarrita'
+import type { BandArray, BandTransform } from './band-format'
 import type { MercatorBounds, MeshMercatorBounds, XYLimits } from './map-utils'
 
 /** State for a single region (chunk/shard) in region-based loading */
@@ -36,10 +37,15 @@ export interface RegionState {
   // Version tracking for selector changes
   selectorVersion: number
   // Multi-band support
-  bandData: Map<string, Float32Array>
-  bandTextures: Map<string, WebGLTexture>
-  bandTexturesUploaded: Set<string>
-  bandTexturesConfigured: Set<string>
+  bandData: Map<string, BandArray>
+  // Set when bands are raw integers the shader scales and fill-checks itself
+  bandTransform: BandTransform | null
+  // Every band a custom shader samples, one band per texture array layer
+  bandTexture: WebGLTexture | null
+  // Band list the resident texture holds (see bandTextureKey); null until uploaded
+  bandTextureKey: string | null
+  // GPU bytes of the resident band texture. bandData is released on upload.
+  bandTextureBytes: number
   // Level-specific dimensions for region geometry bounds.
   // Set from LevelSnapshot during fetch to avoid races with level switching.
   levelMeta: LevelMeta | null

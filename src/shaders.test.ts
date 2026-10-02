@@ -114,16 +114,54 @@ describe('createVertexShader — structure', () => {
 describe('createFragmentShaderSource — structure', () => {
   it('builds a single-band colormap shader', () => {
     const src = createFragmentShaderSource({ bands: ['temp'] })
-    expect(src).toContain('uniform sampler2D temp;')
+    expect(src).toContain('uniform sampler2DArray u_zl_bands;')
     expect(src).toContain('texture(colormap, vec2(rescaled, 0.5))')
     expect(src).toContain('isnan(temp_tex)')
     expect(src).toContain('out vec4 fragColor;')
   })
 
-  it('declares samplers for every band', () => {
+  it('reads every band from one sampler, one layer per band', () => {
     const src = createFragmentShaderSource({ bands: ['a', 'b'] })
-    expect(src).toContain('uniform sampler2D a;')
-    expect(src).toContain('uniform sampler2D b;')
+    expect(src.match(/uniform\s+sampler2DArray/g)).toHaveLength(1)
+    expect(src).not.toMatch(/uniform\s+sampler2D\s+[ab];/)
+    expect(src).toContain(
+      'float a_tex = texture(u_zl_bands, vec3(sample_coord, 0.0)).r;'
+    )
+    expect(src).toContain(
+      'float b_tex = texture(u_zl_bands, vec3(sample_coord, 1.0)).r;'
+    )
+  })
+
+  it('samples integer bands through an integer sampler', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'int' })
+    expect(src).toContain('precision highp isampler2DArray;')
+    expect(src).toContain('uniform isampler2DArray u_zl_bands;')
+    expect(src).toContain('float a_tex = zl_readBand(sample_coord, 0.0);')
+    // Scale/offset are per region for raw integers.
+    expect(src).toContain('float a_val = a_raw * u_bandScale + u_bandOffset;')
+  })
+
+  it('samples unsigned bands through an unsigned sampler', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'uint' })
+    expect(src).toContain('uniform usampler2DArray u_zl_bands;')
+  })
+
+  it('turns the integer fill value into NaN for customFrag', () => {
+    const src = createFragmentShaderSource({ bands: ['a'], bandFormat: 'int' })
+    expect(src).toContain('return raw == u_bandFill ? u_zl_nan : raw;')
+  })
+
+  it('omits the integer read helper for float bands', () => {
+    const src = createFragmentShaderSource({ bands: ['a'] })
+    expect(src).not.toContain('zl_readBand')
+    expect(src).not.toContain('u_bandScale')
+  })
+
+  it('declares a precision for the band array sampler', () => {
+    // GLSL ES 3.00 gives sampler2DArray no default precision; omitting it
+    // is a compile error.
+    const src = createFragmentShaderSource({ bands: ['a'] })
+    expect(src).toContain('precision highp sampler2DArray;')
   })
 
   it('hoists uniforms out of customFrag and rewrites gl_FragColor', () => {
@@ -140,11 +178,70 @@ describe('createFragmentShaderSource — structure', () => {
   it('declares explicitly-listed customUniforms', () => {
     const src = createFragmentShaderSource({
       bands: ['temp'],
-      customUniforms: ['gain'],
+      customUniforms: { gain: 1 },
       customFrag: 'gl_FragColor = vec4(temp * gain, 0.0, 0.0, 1.0);',
     })
     expect(src).toContain('uniform float gain;')
     expect(src).not.toContain('gl_FragColor')
+  })
+
+  it('declares array uniforms at the length of their value', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customUniforms: { weights: [1, 2, 3], query: new Float32Array(64) },
+      customFrag: 'fragColor = vec4(temp * weights[0] * query[63]);',
+    })
+    expect(src).toContain('uniform float weights[3];')
+    expect(src).toContain('uniform float query[64];')
+  })
+
+  it('hoists array uniforms declared in customFrag out of main', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: 'uniform float w[4];\nfragColor = vec4(temp * w[0]);',
+    })
+    const main = src.slice(src.indexOf('void main()'))
+    expect(src).toContain('uniform float w[4];')
+    expect(main).not.toContain('uniform')
+  })
+
+  it('ignores declarations inside comments', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: [
+        '// uniform float opacity[2];',
+        '/* uniform float w[4];',
+        '   uniform float gain; */',
+        'fragColor = vec4(temp);',
+      ].join('\n'),
+    })
+    expect(src).not.toContain('uniform float opacity[2];')
+    expect(src).not.toContain('uniform float w[4];')
+    expect(src).not.toContain('uniform float gain;')
+  })
+
+  it('keeps code that comments sit between or around', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customFrag: [
+        'float/* units */gain = 2.0;',
+        '// /*',
+        'float offset = 1.0;',
+        '// */',
+        'fragColor = vec4(temp * gain + offset);',
+      ].join('\n'),
+    })
+    expect(src).toMatch(/float\s+gain = 2\.0;/)
+    expect(src).toContain('float offset = 1.0;')
+  })
+
+  it('drops a customFrag declaration of a uniform the layer declares', () => {
+    const src = createFragmentShaderSource({
+      bands: ['temp'],
+      customUniforms: { w: [1, 2, 3, 4] },
+      customFrag: 'uniform float w[4];\nfragColor = vec4(temp * w[0]);',
+    })
+    expect(src.match(/uniform float w\[4\];/g)).toHaveLength(1)
   })
 })
 

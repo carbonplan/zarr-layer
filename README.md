@@ -111,6 +111,8 @@ map.on('load', () => {
 | minzoom | number | `0` | Minimum zoom level for rendering |
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | No-data value (from metadata if not set) |
+| maxRegionFetches | number | `16` | Region fetches in flight at once; the rest wait in a queue, nearest the viewport center first. Raise it for viewports of many small, quick regions |
+| minRegionSize | number | one chunk | Smallest region, in pixels per axis, loaded and drawn as a unit. Regions are whole numbers of chunks, so this groups small chunks into fewer, larger regions. Growth stops at 2048 px per axis |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
 | crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Codes proj4 defines (the WGS84 UTM zones, among others) or that were registered with `proj4.defs` work without a `proj4` string. |
 | proj4 | string | - | Proj4 definition string for CRS reprojection (`bounds` recommended, else derived from coordinates) |
@@ -118,7 +120,7 @@ map.on('load', () => {
 | latIsAscending | boolean | auto | Latitude orientation |
 | renderingMode | `'2d'` \| `'3d'` | `'3d'` | Custom layer rendering mode |
 | customFrag | string | - | Custom fragment shader |
-| uniforms | object | - | Shader uniform values (requires `customFrag`) |
+| uniforms | object | - | Shader uniform values, numbers or number arrays (requires `customFrag`) |
 | onLoadingStateChange | function | - | Loading state callback |
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
 | onAuthError | function | - | Called with the HTTP status when a signed request fails with expired credentials (see [authentication](#authentication)) |
@@ -197,7 +199,7 @@ A non-empty array value nests the result by label, whatever its length: `{ time:
 
 ## custom shaders and uniforms
 
-Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Bands can span separate chunks — each band is fetched in parallel and combined for rendering. You can pass in `uniforms` to allow user interaction to influence the custom shader code.
+Custom fragment shaders let you do math on your data to change how it's displayed. This can be useful for things like log scales, combining bands, or aggregating data over a time window. Bands can span separate chunks — each band is fetched in parallel and combined for rendering. There is no practical limit on band count, so a shader can read dozens (e.g. 64-dimensional embeddings). You can pass in `uniforms` to allow user interaction to influence the custom shader code.
 
 Band names are automatically sanitized to valid GLSL identifiers: any characters that aren't letters, digits, or underscores are replaced with underscores, and names starting with a digit are prefixed with an underscore. For example, `s2med_harvest:B02` becomes `s2med_harvest_B02` and `123band` becomes `_123band`.
 
@@ -221,6 +223,25 @@ new ZarrLayer({
   uniforms: { u_weight: 1.0 },
 })
 ```
+
+A uniform can also be an array of numbers (or a `Float32Array`), which the shader receives as a `float` array of the same length. This suits values that come as a vector, such as a query to compare against embedding bands:
+
+```ts
+const layer = new ZarrLayer({
+  // ...
+  selector: { band: ['A00', 'A01', 'A02'] },
+  customFrag: `
+    float similarity = A00 * u_query[0] + A01 * u_query[1] + A02 * u_query[2];
+    vec4 c = texture(colormap, vec2(clamp(similarity, 0.0, 1.0), 0.5));
+    fragColor = vec4(c.rgb * opacity, opacity);
+  `,
+  uniforms: { u_query: [0.2, 0.5, 0.3] },
+})
+
+layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
+```
+
+Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile.
 
 ### NDVI example
 
