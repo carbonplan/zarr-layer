@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import fixture from './__fixtures__/mapbox-globe-matrices.json'
 import {
   infiniteFarPerspective,
   mapboxEcefClipMatrix,
@@ -336,4 +337,63 @@ describe('parseMapboxRenderParameters', () => {
       })
     ).toBeUndefined()
   })
+})
+
+describe('parity against matrices captured from mapbox-gl 3.32', () => {
+  // Recorded in the demo from a real globe map: the public render parameters
+  // (8th render argument) alongside the private expandedFarZProjMatrix,
+  // worldSize and the globeToMercatorMatrix render argument, for several
+  // camera poses including pitch, bearing and padded (off-center) views.
+  const samples: Array<[number, number]> = [
+    [0, -90],
+    [0, 90],
+    [-117, -76.5],
+    [12.5, -71.2],
+    [170, 20],
+    [45, 60],
+    [-30, 5],
+    [100, -45],
+  ]
+
+  it('includes padded poses so the off-center terms are exercised', () => {
+    expect(fixture.mapboxVersion).toBe('3.32.0')
+    expect(
+      fixture.captured.some(
+        (c) => c.centerOffset[0] !== 0 || c.centerOffset[1] !== 0
+      )
+    ).toBe(true)
+  })
+
+  for (const c of fixture.captured) {
+    const label = `zoom ${c.pose.zoom}, pitch ${c.pose.pitch}, bearing ${c.pose.bearing}, offset ${c.centerOffset}`
+
+    it(`recovers Mapbox's near plane and off-center terms (${label})`, () => {
+      const rebuilt = infiniteFarPerspective(c.projectionMatrix)
+      expect(rebuilt[14] / -2).toBeCloseTo(c.nearZ, 9)
+      expect(rebuilt[8]).toBeCloseTo((2 * -c.centerOffset[0]) / c.width, 12)
+    })
+
+    it(`projects globe points like the expandedFarZ route (${label})`, () => {
+      const ws = c.worldSize
+      const oldMatrix = multiplyMat4(
+        multiplyMat4(c.expandedFarZProjMatrix, scaling(ws, ws, ws)),
+        c.globeToMercatorMatrix
+      )
+      const newMatrix = multiplyMat4(
+        infiniteFarPerspective(c.projectionMatrix),
+        c.viewMatrix
+      )
+      for (const [lng, lat] of samples) {
+        const p = ecef(lng, lat)
+        const oldClip = transformPoint(oldMatrix, p)
+        const newClip = transformPoint(newMatrix, p)
+        for (let i = 0; i < 4; i++) {
+          const tolerance = 1e-9 * Math.max(1, Math.abs(oldClip[i]))
+          expect(Math.abs(oldClip[i] - newClip[i])).toBeLessThanOrEqual(
+            tolerance
+          )
+        }
+      }
+    })
+  }
 })
