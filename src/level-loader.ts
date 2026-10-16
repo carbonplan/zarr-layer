@@ -51,7 +51,11 @@ export class LevelLoader {
   // from the camera read coarser levels than the center's, so several
   // levels are open at once; all are built against the current selector.
   private runtimes = new Map<number, LevelRuntime>()
-  private secondaryLoads = new Map<number, Promise<LevelRuntime | null>>()
+  // In-flight secondary loads, each tied to the selector it was built for.
+  private secondaryLoads = new Map<
+    number,
+    { selector: NormalizedSelector; load: Promise<LevelRuntime | null> }
+  >()
   private loadError: Error | null = null
   private loadErrorLevel: number | null = null
   // Coordinate arrays may differ by level, so latch deterministic failures per level.
@@ -91,12 +95,15 @@ export class LevelLoader {
     const count = this.context.isMultiscale() ? this.context.getLevelCount() : 1
     if (levelIndex < 0 || levelIndex >= count) return Promise.resolve(null)
     if (this.selectorFailedLevels.has(levelIndex)) return Promise.resolve(null)
+    const selector = this.context.getSelector()
+    // A load still running for an earlier selector resolves null; it is not
+    // the one to wait on.
     const pending = this.secondaryLoads.get(levelIndex)
-    if (pending) return pending
-    const load = this.runSecondaryLoad(levelIndex)
-    this.secondaryLoads.set(levelIndex, load)
+    if (pending && pending.selector === selector) return pending.load
+    const load = this.runSecondaryLoad(levelIndex, selector)
+    this.secondaryLoads.set(levelIndex, { selector, load })
     const clear = () => {
-      if (this.secondaryLoads.get(levelIndex) === load) {
+      if (this.secondaryLoads.get(levelIndex)?.load === load) {
         this.secondaryLoads.delete(levelIndex)
       }
     }
@@ -105,9 +112,9 @@ export class LevelLoader {
   }
 
   private async runSecondaryLoad(
-    levelIndex: number
+    levelIndex: number,
+    selectorSnapshot: NormalizedSelector
   ): Promise<LevelRuntime | null> {
-    const selectorSnapshot = this.context.getSelector()
     try {
       const resolved = await this.context.resolveArray(levelIndex, false)
       const coordLevelIndex = this.activeLevel?.index ?? levelIndex
@@ -139,6 +146,9 @@ export class LevelLoader {
       this.context.invalidate()
       return runtime
     } catch (err) {
+      // A failure against a selector that has since been replaced says
+      // nothing about the current one, and must not latch against it.
+      if (this.context.getSelector() !== selectorSnapshot) return null
       const error = err instanceof Error ? err : new Error(String(err))
       if (error instanceof SelectorResolutionError) {
         this.selectorFailedLevels.add(levelIndex)
@@ -154,6 +164,7 @@ export class LevelLoader {
   /** Drop every runtime but the active one, e.g. when the selector changes. */
   clearSecondaryRuntimes(): void {
     this.runtimes.clear()
+    this.secondaryLoads.clear()
     if (this.activeLevel) {
       this.runtimes.set(this.activeLevel.index, this.activeLevel)
     }
