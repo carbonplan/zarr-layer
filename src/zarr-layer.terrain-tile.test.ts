@@ -200,6 +200,48 @@ describe('terrainTileRevision', () => {
   })
 })
 
+describe('zoom range with cached terrain tiles', () => {
+  it('forces a redraw when the zoom crosses the layer range', async () => {
+    // MapLibre reuses a terrain tile's texture across zoom changes while the
+    // map moves, so leaving or entering the range must change the revision,
+    // or the tile keeps showing (or keeps lacking) the layer.
+    const { layer, gl, state, renderToTile, settled } = await addLayer(
+      { zoom: 3 },
+      { maxzoom: 4 }
+    )
+    await settled()
+
+    // A tile cache that redraws only when the revision changes.
+    const drawnAt = new Map<string, number>()
+    const frame = () => {
+      layer.prerender(gl, {})
+      if (drawnAt.get('0/0/0') !== layer.terrainTileRevision) {
+        layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
+        drawnAt.set('0/0/0', layer.terrainTileRevision)
+      }
+    }
+
+    frame()
+    expect(renderToTile).toHaveBeenCalledTimes(1)
+    const inRange = layer.terrainTileRevision
+    frame()
+    expect(layer.terrainTileRevision).toBe(inRange)
+
+    state.zoom = 6
+    frame()
+    expect(layer.terrainTileRevision).toBe(inRange + 1)
+    // The tile was redrawn and the hook left it empty.
+    expect(renderToTile).toHaveBeenCalledTimes(1)
+    frame()
+    expect(layer.terrainTileRevision).toBe(inRange + 1)
+
+    state.zoom = 3
+    frame()
+    expect(layer.terrainTileRevision).toBe(inRange + 2)
+    expect(renderToTile).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('Mapbox renderToTile', () => {
   it('draws north-down and keeps the shouldRerenderTiles poll', async () => {
     const { layer, gl, renderToTile } = await addLayer()

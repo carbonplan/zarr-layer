@@ -214,6 +214,7 @@ export class ZarrLayer {
   private customStore: Readable | undefined
   private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
+  private lastZoomInRange: boolean | null = null
   private usingDirectMapboxGlobePath: boolean = false
   private renderPathSwitchPending: boolean = false
   private mapboxRenderParametersSeen: boolean = false
@@ -829,7 +830,16 @@ export class ZarrLayer {
     // Mapbox runs prerender for draped layers too, so this is where the
     // render parameters first show up when the layer starts out draped.
     this.noteMapboxRenderParameters(renderParameters)
-    if (!this.isZoomInRange()) return
+
+    // Draped terrain tiles are cached by the map and reused across zoom
+    // changes while it moves, so crossing the zoom range has to force a
+    // redraw or the tiles keep (or lack) the layer until movement stops.
+    const inRange = this.isZoomInRange()
+    if (this.lastZoomInRange !== null && this.lastZoomInRange !== inRange) {
+      this.invalidate()
+    }
+    this.lastZoomInRange = inRange
+    if (!inRange) return
 
     this.syncProjectionState()
     this.regionRenderer.update(this.map, this.gl)
