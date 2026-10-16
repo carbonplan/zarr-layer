@@ -138,7 +138,8 @@ export type RegionFetcherContext = {
   regionCache: RegionCache
   requestCanceller: RequestCanceller
   loadingDebouncer: ChunkLoadingDebouncer
-  getActiveLevel: () => LevelRuntime | null
+  /** The committed runtime of a level, or null once it has been replaced. */
+  getLevel: (levelIndex: number) => LevelRuntime | null
   getSelectorVersion: () => number
   getBandNames: () => string[]
   /**
@@ -199,10 +200,11 @@ export class RegionFetcher {
    * Fetch multiple regions with limited concurrency to avoid overwhelming the browser.
    */
   async fetchRegions(
-    regions: Array<{ regionX: number; regionY: number }>
+    regions: Array<{ regionX: number; regionY: number }>,
+    levelIndex: number
   ): Promise<void> {
     // Can't fetch without a committed level.
-    const level = this.context.getActiveLevel()
+    const level = this.context.getLevel(levelIndex)
     if (!level) return
 
     // Capture ALL level-dependent state at start to pass to fetchRegion.
@@ -250,7 +252,7 @@ export class RegionFetcher {
     // `cancelAllRequests` in `loadLevel`/`setSelector`, which aborts the
     // signals that fetchRegion threads through every await.
     if (
-      (this.context.getActiveLevel()?.index ?? -1) !== snapshot.index ||
+      this.context.getLevel(snapshot.index)?.zarrArray !== snapshot.zarrArray ||
       this.context.getSelectorVersion() !== snapshot.selectorVersion
     ) {
       cancelAllRequests(this.context.requestCanceller)
@@ -279,8 +281,8 @@ export class RegionFetcher {
                   // The level or selector may have moved on while queued.
                   if (
                     this.context.isRemoved() ||
-                    (this.context.getActiveLevel()?.index ?? -1) !==
-                      snapshot.index ||
+                    this.context.getLevel(snapshot.index)?.zarrArray !==
+                      snapshot.zarrArray ||
                     this.context.getSelectorVersion() !==
                       snapshot.selectorVersion
                   ) {
@@ -316,8 +318,8 @@ export class RegionFetcher {
     regionY: number,
     snapshot: LevelSnapshot
   ): Promise<void> {
-    const levelAtStart = this.context.getActiveLevel()
-    if ((levelAtStart?.index ?? -1) !== snapshot.index) {
+    const levelAtStart = this.context.getLevel(snapshot.index)
+    if (levelAtStart?.zarrArray !== snapshot.zarrArray) {
       return
     }
 
@@ -400,7 +402,7 @@ export class RegionFetcher {
       const isStale = () =>
         controller.signal.aborted ||
         this.context.isRemoved() ||
-        (this.context.getActiveLevel()?.index ?? -1) !== snapshot.index
+        this.context.getLevel(snapshot.index)?.zarrArray !== snapshot.zarrArray
 
       if (numChannels === 1) {
         // Single channel - simple fetch
@@ -612,7 +614,7 @@ export class RegionFetcher {
         const superseded =
           controller.signal.aborted ||
           this.context.isRemoved() ||
-          this.context.getActiveLevel() !== levelAtStart ||
+          this.context.getLevel(snapshot.index) !== levelAtStart ||
           this.context.regionCache.get(key) !== region
         if (
           !superseded &&

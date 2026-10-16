@@ -3,7 +3,8 @@ import { ZarrLayer } from './zarr-layer'
 import type { RegionRenderer } from './region-renderer'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
 import { createRecordingGl } from './__fixtures__/fake-gl'
-import type { MapLike } from './types'
+import type { RegionCache } from './region-cache'
+import type { LoadingState, MapLike } from './types'
 
 /**
  * MapLibre's terrain draping contract. With terrain on, MapLibre calls
@@ -30,6 +31,24 @@ const memoryStore = () =>
       },
     ],
   })
+
+/** The memory store with chunk reads held back until `release` is called. */
+function gatedStore() {
+  const memory = memoryStore()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return {
+    store: {
+      get: async (key: string) => {
+        if (key.includes('/temperature/c/')) await gate
+        return memory.get(key)
+      },
+    },
+    release,
+  }
+}
 
 function fakeMap({ globe = false, zoom = 0 } = {}) {
   const state = { globe, zoom }
@@ -61,10 +80,21 @@ function fakeMap({ globe = false, zoom = 0 } = {}) {
 }
 
 type Seam = { regionRenderer: RegionRenderer }
+type RendererInternals = { regionCache: RegionCache }
+
+/** Hop the macrotask queue until the condition holds. */
+async function waitFor(condition: () => boolean): Promise<void> {
+  while (!condition()) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+}
 
 async function addLayer(
   mapOptions: { globe?: boolean; zoom?: number } = {},
-  layerOptions: { maxzoom?: number } = {}
+  layerOptions: {
+    maxzoom?: number
+    store?: { get(key: string): Promise<Uint8Array | undefined> }
+  } = {}
 ) {
   const { map, state, repaints, holder } = fakeMap(mapOptions)
   const gl = createRecordingGl()
@@ -76,7 +106,7 @@ async function addLayer(
 
   const layer = new ZarrLayer({
     id: 'zarr',
-    store: memoryStore(),
+    store: layerOptions.store ?? memoryStore(),
     variable: 'temperature',
     colormap: [
       [0, 0, 0],
@@ -87,7 +117,7 @@ async function addLayer(
     latIsAscending: false,
     crs: 'EPSG:4326',
     maxzoom: layerOptions.maxzoom,
-    onLoadingStateChange: (loadingState) => {
+    onLoadingStateChange: (loadingState: LoadingState) => {
       if (!loadingState.metadata) ready()
     },
   })
@@ -96,18 +126,28 @@ async function addLayer(
   layer.onAdd(map, gl)
   await initialized
 
-  const renderToTile = vi.spyOn(
-    (layer as unknown as Seam).regionRenderer,
-    'renderToTile'
-  )
+  const regionRenderer = (layer as unknown as Seam).regionRenderer
+  const internals = regionRenderer as unknown as RendererInternals
+  const renderToTile = vi.spyOn(regionRenderer, 'renderToTile')
+  // Fetches mark their regions loading before they yield, so waiting on the
+  // cache sees a batch dispatched by the previous call.
+  const settled = () =>
+    waitFor(() => {
+      for (const cached of internals.regionCache.values()) {
+        if (cached.loading) return false
+      }
+      return true
+    })
 
-  return { layer, gl, map, state, repaints, renderToTile }
+  return { layer, gl, map, state, repaints, renderToTile, settled }
 }
 
 const terrainTile = (
   canonical: { z: number; x: number; y: number },
   wrap?: number
 ) => ({ tileID: { canonical, wrap }, width: 512, height: 512 })
+
+const WORLD_TILE = { z: 0, x: 0, y: 0 }
 
 describe('renderToTerrainTile', () => {
   it('draws the canonical tile north-up through the tile render path', async () => {
@@ -140,7 +180,7 @@ describe('renderToTerrainTile', () => {
     // Mapbox's draped globe tiles only.
     const { layer, gl, renderToTile } = await addLayer({ globe: true })
 
-    layer.renderToTerrainTile(gl, terrainTile({ z: 0, x: 0, y: 0 }))
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
 
     expect(renderToTile.mock.calls[0][2].isGlobe).toBe(false)
   })
@@ -160,18 +200,19 @@ describe('renderToTerrainTile', () => {
     const { layer, gl, map, renderToTile } = await addLayer()
     layer.onRemove(map, gl)
 
-    layer.renderToTerrainTile(gl, terrainTile({ z: 0, x: 0, y: 0 }))
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
 
     expect(renderToTile).not.toHaveBeenCalled()
   })
 
   it('leaves the revision alone when a tile draws, so drawing cannot loop', async () => {
-    const { layer, gl, map, renderToTile } = await addLayer()
+    const { layer, gl, map, renderToTile, settled } = await addLayer()
+    await settled()
     renderToTile.mockReturnValue(true) // more data still to come
     const revision = layer.terrainTileRevision
     vi.mocked(map.triggerRepaint!).mockClear()
 
-    layer.renderToTerrainTile(gl, terrainTile({ z: 0, x: 0, y: 0 }))
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
 
     expect(layer.terrainTileRevision).toBe(revision)
     expect(map.triggerRepaint).not.toHaveBeenCalled()
@@ -180,7 +221,8 @@ describe('renderToTerrainTile', () => {
 
 describe('terrainTileRevision', () => {
   it('advances before each repaint request when the drawn content changes', async () => {
-    const { layer, repaints } = await addLayer()
+    const { layer, repaints, settled } = await addLayer()
+    await settled()
     const revision = layer.terrainTileRevision
     repaints.length = 0
 
@@ -191,12 +233,27 @@ describe('terrainTileRevision', () => {
     expect(repaints).toEqual([revision + 1, revision + 2])
   })
 
-  it('advances when a region load lands', async () => {
-    // Region loads call the same invalidate hook as the setters; this is what
-    // redraws a terrain tile that drew before its data arrived.
-    const { layer, repaints } = await addLayer()
-    expect(repaints.length).toBeGreaterThan(0)
-    expect(layer.terrainTileRevision).toBe(repaints[repaints.length - 1])
+  it('advances when a region load lands, so a tile drawn while loading is redrawn complete', async () => {
+    const { store, release } = gatedStore()
+    const { layer, gl, map, renderToTile, settled } = await addLayer(
+      {},
+      { store }
+    )
+
+    // Chunks are held back, so the tile draws with nothing to show and asks
+    // for more data.
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
+    expect(renderToTile.mock.results[0].value).toBe(true)
+    const revision = layer.terrainTileRevision
+    vi.mocked(map.triggerRepaint!).mockClear()
+
+    release()
+    await settled()
+
+    expect(layer.terrainTileRevision).toBeGreaterThan(revision)
+    expect(map.triggerRepaint).toHaveBeenCalled()
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
+    expect(renderToTile.mock.results[1].value).toBe(false)
   })
 })
 
@@ -259,7 +316,7 @@ describe('Mapbox renderToTile', () => {
   it('keeps the globe blend for draped globe tiles', async () => {
     const { layer, gl, renderToTile } = await addLayer({ globe: true })
 
-    layer.renderToTile(gl, { z: 0, x: 0, y: 0 })
+    layer.renderToTile(gl, WORLD_TILE)
 
     expect(renderToTile.mock.calls[0][2].isGlobe).toBe(true)
   })

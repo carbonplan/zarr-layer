@@ -848,10 +848,10 @@ export class RegionRenderer {
     }
 
     if (newRegions.length > 0) {
-      this.fetchRegions(newRegions)
+      this.fetchRegions(newRegions, levelIndex)
     }
     if (staleRegions.length > 0) {
-      this.fetchRegions(staleRegions)
+      this.fetchRegions(staleRegions, levelIndex)
     }
     // Queued regions start nearest the viewport center first.
     if (visible.length > 1) {
@@ -863,7 +863,8 @@ export class RegionRenderer {
   }
 
   private async fetchRegions(
-    regions: Array<{ regionX: number; regionY: number }>
+    regions: Array<{ regionX: number; regionY: number }>,
+    levelIndex: number
   ): Promise<void> {
     const fetcher = new RegionFetcher({
       zarrStore: this.zarrStore,
@@ -876,7 +877,7 @@ export class RegionRenderer {
       regionCache: this.regionCache,
       requestCanceller: this.requestCanceller,
       loadingDebouncer: this.loadingDebouncer,
-      getActiveLevel: () => this.activeLevel,
+      getLevel: (index) => this.levelLoader.runtime(index),
       getSelectorVersion: () => this.selectorVersion,
       getBandNames: () => this.bandNames,
       usesBandTextures: () => this.rendersFromBandTextures,
@@ -893,7 +894,7 @@ export class RegionRenderer {
       },
       invalidate: this.invalidate,
     })
-    await fetcher.fetchRegions(regions)
+    await fetcher.fetchRegions(regions, levelIndex)
   }
 
   /**
