@@ -10,7 +10,8 @@ import {
 } from './region-cache'
 import type { LevelLoader } from './level-loader'
 import type { MapLike } from './types'
-import type { RegionCoordinate } from './region-math'
+import { getRegionsInBounds, type RegionCoordinate } from './region-math'
+import type { ProjectionContext } from './projection-utils'
 import type { RegionState } from './region-state'
 import { boundsIntersect, getTileBounds } from './tile-utils'
 
@@ -92,6 +93,8 @@ type Seam = {
     tile: TileRequest,
     drawable: (region: RegionState) => boolean
   ): { regions: RegionState[]; ready: boolean }
+  viewportTiles(map: MapLike): TileRequest[]
+  projection: ProjectionContext
   wantedCovered(): boolean
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
@@ -180,8 +183,20 @@ async function waitForRuntime(
   }
 }
 
-async function makeRenderer({ single = false } = {}) {
-  const memory = single
+async function makeRenderer({ single = false, wide = false } = {}) {
+  // `wide`: a global single level of 64x64 regions, 5.625 degrees each.
+  const memory = wide
+    ? buildMemoryZarrStore({
+        arrays: [
+          {
+            name: 'temperature',
+            shape: [2048, 4096],
+            chunkShape: [32, 64],
+            dimensionNames: ['lat', 'lon'],
+          },
+        ],
+      })
+    : single
     ? buildMemoryZarrStore({
         arrays: [
           {
@@ -781,6 +796,41 @@ describe('per-tile level selection', () => {
       }
     }
     await settle(renderer)
+  })
+
+  it('covers every column of a nearly global viewport', async () => {
+    // Both ends of a 355° viewport wrap into the same tile column. The
+    // cover follows the unwrapped span, not the wrapped ends.
+    const { renderer } = await rendererAtZoom(0)
+    const tiles = seam(renderer).viewportTiles(mapAt(10, -85, 365, 85, 3))
+    const z = tiles[0].tileId.z
+    expect(new Set(tiles.map((t) => t.tileId.x)).size).toBe(2 ** z)
+  })
+
+  it('selects exactly the viewport regions without a cover', async () => {
+    // Synthesised tiles overshoot the viewport; counting their whole
+    // footprints would let regions off screen take the budget from visible
+    // ones. Each tile is cut to the viewport, so the selection is the
+    // viewport's regions, as a whole-viewport selection would pick them.
+    const { renderer, gl } = await makeRenderer({ wide: true })
+    const map = mapAt(-33, -17, 12, 17, 3)
+    renderer.update(map, gl)
+    await waitForActive(renderer, 0)
+    renderer.setCoveringTiles(null)
+    renderer.update(map, gl)
+
+    const runtime = seam(renderer).levelLoader.runtime(0)!
+    const viewport = getRegionsInBounds({
+      bounds: { west: -33, south: -17, east: 12, north: 17 },
+      xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+      levelMeta: runtime,
+      projection: seam(renderer).projection,
+      latIsAscending: false,
+    })
+      .map((r) => makeRegionKey(0, r.regionX, r.regionY))
+      .sort()
+    expect(viewport.length).toBeGreaterThan(0)
+    expect([...seam(renderer).wantedKeys].sort()).toEqual(viewport)
   })
 
   it('falls back to the viewport at the active level without a tile cover', async () => {

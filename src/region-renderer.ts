@@ -63,6 +63,7 @@ import {
   getRegionSize,
   getRegionsInBounds,
   selectLevelForZoom,
+  type LonLatBounds,
   type RegionCoordinate,
 } from './region-math'
 import { boundsIntersect, getTileLonLatBounds } from './tile-utils'
@@ -114,6 +115,12 @@ export interface TileRequest {
    * different zooms, so ownership is per copy; undefined means every copy.
    */
   wrap?: number
+  /**
+   * The part of the tile the map shows, for a tile synthesised from the
+   * viewport: regions elsewhere in the tile are not its concern. East may
+   * run past 180 for a viewport that does.
+   */
+  extent?: LonLatBounds
 }
 
 /**
@@ -130,6 +137,26 @@ const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
  */
 const MIN_VIEWPORT_TILES = 16
 const MAX_VIEWPORT_TILE_ZOOM = 24
+
+const wrapLon = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180
+
+/**
+ * The part of a tile's longitude range inside a viewport's, which may run
+ * past 180 or start west of it; null when none.
+ */
+function intersectLon(
+  tileWest: number,
+  tileEast: number,
+  west: number,
+  east: number
+): [number, number] | null {
+  for (const shift of [0, 360, -360]) {
+    const a = Math.max(tileWest + shift, west)
+    const b = Math.min(tileEast + shift, east)
+    if (a < b) return [a, b]
+  }
+  return null
+}
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 const requestKey = (tile: TileRequest) =>
@@ -617,16 +644,21 @@ export class RegionRenderer {
   private tileRegions(
     levelIndex: number,
     levelMeta: LevelMeta,
-    { tileId, poles }: TileRequest
+    { tileId, poles, extent }: TileRequest
   ): RegionCoordinate[] {
-    const key = `${levelIndex}:${poles ? 'p' : 'm'}:${tileKey(tileId)}`
+    const extentKey = extent
+      ? `:${extent.west},${extent.south},${extent.east},${extent.north}`
+      : ''
+    const key = `${levelIndex}:${poles ? 'p' : 'm'}:${tileKey(
+      tileId
+    )}${extentKey}`
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
     // Strictly: a region whose edge lies on the tile's edge shows nothing in
     // it, and owning it would make the tile fetch it and wait on it.
     const regions = getRegionsInBounds({
-      bounds: getTileLonLatBounds(tileId, { toPoles: poles }),
+      bounds: extent ?? getTileLonLatBounds(tileId, { toPoles: poles }),
       xyLimits: this.xyLimits,
       levelMeta,
       projection: this.projection,
@@ -640,51 +672,64 @@ export class RegionRenderer {
   /**
    * A tile cover for the viewport when the map gives none (Mapbox without
    * terrain): the coarsest tiles that split the viewport into at least
-   * MIN_VIEWPORT_TILES, so they overshoot it by little whatever its extent,
-   * each read at the map zoom, nearest the centre first. Empty without map
-   * bounds.
+   * MIN_VIEWPORT_TILES, each cut down to the part of it the viewport shows
+   * so selection stays exactly the viewport's regions, each read at the map
+   * zoom, nearest the centre first. Empty without map bounds.
    */
   private viewportTiles(map: MapLike): TileRequest[] {
     const bounds = map.getBounds?.()?.toArray?.()
     if (!bounds) return []
-    const [[west, south], [east, north]] = bounds
+    const [[west, south], [rawEast, north]] = bounds
+    const east = rawEast < west ? rawEast + 360 : rawEast
+    const span = east - west
     const zoom = map.getZoom?.() ?? 0
     const center = map.getCenter?.() ?? {
       lng: (west + east) / 2,
       lat: (south + north) / 2,
     }
-    const wrapLon = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180
-    const range = (from: number, to: number) =>
-      Array.from({ length: Math.max(0, to - from) }, (_, i) => from + i)
+    const poles = this.isGlobeProjection
     for (let z = 0; z <= MAX_VIEWPORT_TILE_ZOOM; z++) {
       const n = 2 ** z
       const clamp = (v: number) => Math.min(n - 1, Math.max(0, Math.floor(v)))
       const y0 = clamp(latToMercatorNorm(north) * n)
       const y1 = clamp(latToMercatorNorm(south) * n)
-      let columns: number[]
-      if (east - west >= 360) {
-        columns = range(0, n)
-      } else {
-        const x0 = clamp(((wrapLon(west) + 180) / 360) * n)
-        const x1 = clamp(((wrapLon(east) + 180) / 360) * n)
-        columns =
-          x1 >= x0 ? range(x0, x1 + 1) : [...range(x0, n), ...range(0, x1 + 1)]
-      }
+      // Columns follow the unwrapped span: a nearly global viewport whose
+      // ends wrap into one column still covers every column between.
+      const xw = ((wrapLon(west) + 180) / 360) * n
+      const columnCount =
+        span >= 360
+          ? n
+          : Math.min(
+              n,
+              Math.floor(xw + (span / 360) * n - 1e-9) - Math.floor(xw) + 1
+            )
       if (
-        columns.length * (y1 - y0 + 1) < MIN_VIEWPORT_TILES &&
+        columnCount * (y1 - y0 + 1) < MIN_VIEWPORT_TILES &&
         z < MAX_VIEWPORT_TILE_ZOOM
       ) {
         continue
       }
       const tiles: Array<{ tile: TileRequest; d: number }> = []
-      for (const x of columns) {
+      for (let i = 0; i < columnCount; i++) {
+        const x = (Math.floor(xw) + i) % n
         for (let y = y0; y <= y1; y++) {
           const tileId = { z, x, y }
-          const b = getTileLonLatBounds(tileId)
+          const b = getTileLonLatBounds(tileId, { toPoles: poles })
+          const lon =
+            span >= 360
+              ? [b.west, b.east]
+              : intersectLon(b.west, b.east, west, east)
+          const extent = lon && {
+            west: lon[0],
+            east: lon[1],
+            south: Math.max(b.south, south),
+            north: Math.min(b.north, north),
+          }
+          if (!extent || extent.south >= extent.north) continue
           const dLon = wrapLon((b.west + b.east) / 2 - center.lng)
           const dLat = (b.south + b.north) / 2 - center.lat
           tiles.push({
-            tile: { tileId, zoom, poles: this.isGlobeProjection },
+            tile: { tileId, zoom, poles, extent },
             d: dLon * dLon + dLat * dLat,
           })
         }
