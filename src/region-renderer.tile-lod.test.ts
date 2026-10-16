@@ -602,6 +602,30 @@ describe('per-tile level selection', () => {
     expect(wantedAt(renderer, 0).length).toBeGreaterThan(0)
   })
 
+  it('targets the finest level a tile can want in full', async () => {
+    // A tile whose own level has more regions under it than one update may
+    // want could never be wanted in full, so it would never be promoted and
+    // the same subset would be requested for ever. It targets the finest
+    // coarser level that fits instead, and is shown from it once loaded.
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    // Lon -135..-112.5, lat 0..21.9: some 150 level-1 regions, 45 level-0.
+    const wide: TileRequest = { tileId: { z: 4, x: 2, y: 7 }, zoom: 1 }
+
+    renderer.setCoveringTiles([wide])
+    renderer.update(map, gl)
+    await waitForRuntime(renderer, 0)
+    renderer.update(map, gl)
+
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect(wantedAt(renderer, 0).length).toBeLessThanOrEqual(MAX_CACHED_REGIONS)
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+    const plan = seam(renderer).planTile(wide, () => true)
+    expect(plan.ready).toBe(true)
+    expect(plan.regions.length).toBe(wantedAt(renderer, 0).length)
+    expect(plan.regions.every((r) => r.levelIndex === 0)).toBe(true)
+  })
+
   it('draws nothing for a tile no level can serve', async () => {
     const { renderer, map, gl } = await rendererAtZoom(0)
     failLevel(renderer, 0)
@@ -759,6 +783,27 @@ describe('single-resolution datasets', () => {
     // The nearest tile (lon -135..-90, lat 41..67) covers region column 4..8,
     // rows 4..8; its regions are in despite being listed last.
     expect(wanted.has(makeRegionKey(0, 5, 5))).toBe(true)
+  })
+
+  it('shows what it has of the only level when a tile cannot want it in full', async () => {
+    // With no coarser level to fall back to, the tile keeps its own level,
+    // never counts as complete, and draws the regions the cap let through.
+    const { renderer, gl } = await makeRenderer({ single: true })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+
+    renderer.setCoveringTiles([world])
+    renderer.update(map, gl)
+    expect(seam(renderer).wantedKeys.size).toBe(MAX_CACHED_REGIONS)
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+
+    const plan = seam(renderer).planTile(world, () => true)
+    expect(plan.ready).toBe(false)
+    expect(plan.regions.length).toBe(MAX_CACHED_REGIONS)
+    expect(seam(renderer).plannedDraws(gl).length).toBeGreaterThan(0)
   })
 
   it('spends the cap on the regions nearest the map center, not the first rows', async () => {

@@ -581,7 +581,7 @@ export class RegionRenderer {
     this.previousDrawnTiles.delete(key)
     this.drawnTiles.set(key, tile)
 
-    const levelIndex = this.resolveLevel(tile.zoom)
+    const levelIndex = this.tileLevel(tile)
     if (levelIndex === null) return false
     const runtime = this.levelLoader.runtime(levelIndex)
     if (!runtime) return true
@@ -656,7 +656,7 @@ export class RegionRenderer {
     }> = []
     let total = 0
     for (const tile of tiles) {
-      const levelIndex = this.resolveLevel(tile.zoom)
+      const levelIndex = this.tileLevel(tile)
       if (levelIndex === null) continue
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) {
@@ -764,26 +764,64 @@ export class RegionRenderer {
     return areas
   }
 
-  /**
-   * The level a tile reads: the one its zoom selects or, when that level's
-   * selector failed to resolve, the nearest coarser level that did not.
-   * Null when no level can serve the tile, which then draws nothing.
-   */
-  private resolveLevel(zoom: number): number | null {
-    let levelIndex = this.selectLevelForZoom(zoom)
-    while (this.levelLoader.levelFailed(levelIndex)) {
-      const width = this.levelWidth(levelIndex)
-      let coarser: number | null = null
-      for (let i = 0; i < this.levels.length; i++) {
-        const w = this.levelWidth(i)
-        if (w < width && (coarser === null || w > this.levelWidth(coarser))) {
-          coarser = i
-        }
+  /** The next coarser level, or null from the coarsest. */
+  private coarserLevel(levelIndex: number): number | null {
+    const width = this.levelWidth(levelIndex)
+    let coarser: number | null = null
+    for (let i = 0; i < this.levels.length; i++) {
+      const w = this.levelWidth(i)
+      if (w < width && (coarser === null || w > this.levelWidth(coarser))) {
+        coarser = i
       }
-      if (coarser === null) return null
-      levelIndex = coarser
+    }
+    return coarser
+  }
+
+  /**
+   * The level itself or, when its selector failed to resolve, the nearest
+   * coarser level that did not. Null when none did.
+   */
+  private usableLevel(levelIndex: number | null): number | null {
+    while (levelIndex !== null && this.levelLoader.levelFailed(levelIndex)) {
+      levelIndex = this.coarserLevel(levelIndex)
     }
     return levelIndex
+  }
+
+  /**
+   * The level a zoom reads: the one it selects or, when that level's
+   * selector failed to resolve, the nearest coarser level that did not.
+   * Null when no level can serve it.
+   */
+  private resolveLevel(zoom: number): number | null {
+    return this.usableLevel(this.selectLevelForZoom(zoom))
+  }
+
+  /**
+   * The level a tile targets: the one its zoom resolves to or, when that
+   * has more regions under the tile than one update may want, the finest
+   * coarser level that fits, so the tile can be wanted in full and shown
+   * from its target. A level not yet open is trusted until it opens. With
+   * no coarser level the tile keeps its own and shows what it has of it.
+   * Null when no level can serve the tile, which then draws nothing.
+   */
+  private tileLevel(tile: TileRequest): number | null {
+    let levelIndex = this.resolveLevel(tile.zoom)
+    while (levelIndex !== null) {
+      const runtime = this.levelLoader.runtime(levelIndex)
+      if (!runtime) return levelIndex
+      const count = this.tileRegions(
+        levelIndex,
+        runtime,
+        tile.tileId,
+        tile.poles
+      ).length
+      if (count <= MAX_WANTED_REGIONS) return levelIndex
+      const coarser = this.usableLevel(this.coarserLevel(levelIndex))
+      if (coarser === null) return levelIndex
+      levelIndex = coarser
+    }
+    return null
   }
 
   /**
@@ -797,7 +835,7 @@ export class RegionRenderer {
     drawable: (region: RegionState) => boolean,
     fallbackDrawable = drawable
   ): TileDraw {
-    const levelIndex = this.resolveLevel(tile.zoom)
+    const levelIndex = this.tileLevel(tile)
     if (levelIndex === null) return { tile, regions: [], ready: true }
     const runtime = this.levelLoader.runtime(levelIndex)
     if (runtime) {
