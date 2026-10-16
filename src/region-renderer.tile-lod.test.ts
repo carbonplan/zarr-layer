@@ -27,7 +27,7 @@ import { boundsIntersect, getTileBounds } from './tile-utils'
  * level 0 is a 64x64 region grid (5.625 by 2.8125 degrees), level 1 128x128.
  */
 
-function fakeGl() {
+function fakeGl({ failTextures = false } = {}) {
   let textures = 0
   let buffers = 0
   return {
@@ -39,7 +39,7 @@ function fakeGl() {
     getParameter: vi.fn((pname: number) =>
       pname === 0x88ff ? 256 : pname === 0x0d33 ? 4096 : 4
     ),
-    createTexture: vi.fn(() => ({ tex: ++textures })),
+    createTexture: vi.fn(() => (failTextures ? null : { tex: ++textures })),
     createBuffer: vi.fn(() => ({ buf: ++buffers })),
     deleteTexture: vi.fn(),
     deleteBuffer: vi.fn(),
@@ -532,6 +532,43 @@ describe('per-tile level selection', () => {
       expect(sameBox(absoluteBoxes(draw)[0], tileBounds)).toBe(true)
     }
     await settle(renderer)
+  })
+
+  it('keeps the drawn fallback protected when its replacement cannot upload', async () => {
+    // The fine regions have landed but their textures will not allocate.
+    // Retention must judge them as the render plan does, or the coarse data
+    // on screen would lose protection and, under cache pressure, be evicted
+    // while the tile still has nothing else to show.
+    const { renderer, gl } = await rendererAtZoom(0)
+    await updateWithCover(renderer, viewportAt(0), gl, [FAR_EAST])
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+
+    const fine = viewportAt(1)
+    renderer.setCoveringTiles([NEAR_IN_FAR_EAST])
+    renderer.update(fine, gl)
+    await waitForActive(renderer, 1)
+    renderer.update(fine, gl)
+    await settle(renderer)
+
+    const failing = fakeGl({ failTextures: true })
+    renderer.update(fine, failing)
+    const cache = seam(renderer).regionCache
+    const tileBounds = getTileBounds(NEAR_IN_FAR_EAST.tileId)
+    const coarse = [...cache.values()]
+      .filter(
+        (r) =>
+          r.levelIndex === 0 && boundsIntersect(r.mercatorBounds!, tileBounds)
+      )
+      .map((r) => r.key)
+    expect(coarse.length).toBeGreaterThan(0)
+    for (const key of coarse) expect(cache.isProtected(key)).toBe(true)
+
+    cache.evict(failing, 1)
+    for (const key of coarse) expect(cache.get(key)).toBeDefined()
+    const draws = seam(renderer).plannedDraws(failing)
+    expect(draws.length).toBeGreaterThan(0)
+    expect(draws.every((d) => d.region.levelIndex === 0)).toBe(true)
   })
 
   it('shows what a tile has of its own level when no other level covers it', async () => {

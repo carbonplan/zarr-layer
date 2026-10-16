@@ -827,13 +827,10 @@ export class RegionRenderer {
   /**
    * What one tile shows: its own level once every region under it is
    * drawable, else the one cached level that serves it best meanwhile.
-   * `fallbackDrawable` may be looser than `drawable` when judging what to
-   * keep rather than what to draw.
    */
   private planTile(
     tile: TileRequest,
-    drawable: (region: RegionState) => boolean,
-    fallbackDrawable = drawable
+    drawable: (region: RegionState) => boolean
   ): TileDraw {
     const levelIndex = this.tileLevel(tile)
     if (levelIndex === null) return { tile, regions: [], ready: true }
@@ -853,7 +850,7 @@ export class RegionRenderer {
     }
     return {
       tile,
-      regions: this.fallbackRegions(tile, fallbackDrawable),
+      regions: this.fallbackRegions(tile, drawable),
       ready: false,
     }
   }
@@ -1259,23 +1256,20 @@ export class RegionRenderer {
 
     // Rebuild eviction protection from what is wanted, plus regions kept as
     // fallbacks: with a tile cover, the regions each tile shows while its
-    // own level is not ready; without one, regions no longer wanted whose
-    // area is still waiting for its replacement to become drawable. A
-    // fallback no tile shows any more is released at once. An empty result
-    // without a cover is a transient state (map bounds or transformer
-    // unavailable), so keep the previous set rather than unprotect regions
-    // that are still rendered.
+    // own level is not ready, judged exactly as the render plan judges
+    // them, so what is drawn is what is kept — fine data that has landed
+    // but cannot upload must not displace the coarse data on screen;
+    // without one, regions no longer wanted whose area is still waiting for
+    // its replacement to become drawable. A fallback no tile shows any more
+    // is released at once. An empty result without a cover is a transient
+    // state (map bounds or transformer unavailable), so keep the previous
+    // set rather than unprotect regions that are still rendered.
     const tiles = this.requestedTiles()
     if (tiles.length > 0) {
-      const requiredBands = this.requiredBands()
-      const bandFormat = this.bandFormat()
+      const drawable = this.drawableWith(gl)
       const retained = new Set<string>()
       for (const tile of tiles) {
-        const draw = this.planTile(
-          tile,
-          (region) => isRegionGpuReady(region, requiredBands, bandFormat),
-          isRegionCpuReady
-        )
+        const draw = this.planTile(tile, drawable)
         if (draw.ready) continue
         for (const region of draw.regions) retained.add(region.key)
       }
