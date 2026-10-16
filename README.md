@@ -46,7 +46,7 @@ Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" 
 
 **MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed.
 
-**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. This relies on Mapbox internal APIs and may break across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the standard draped path (with pole holes visible). Incompatible with draping the zarr layer over Mapbox terrain — when terrain is enabled the layer always uses the draped tile path.
+**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with draping the zarr layer over Mapbox terrain — when terrain is enabled the layer always uses the draped tile path.
 
 ```ts
 new ZarrLayer({

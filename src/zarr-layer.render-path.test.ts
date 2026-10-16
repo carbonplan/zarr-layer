@@ -20,7 +20,8 @@ import type { MapLike } from './types'
  * layer outright. The gate has five inputs, each covered below:
  *
  *   renderPoles opt-in, dataset ECEF-eligibility, terrain off, globe
- *   projection, and Mapbox-only internals being reachable.
+ *   projection, and Mapbox having passed its public render parameters (the
+ *   8th render/prerender argument, mapbox-gl >= 3.32) at least once.
  */
 
 const memoryStore = () =>
@@ -41,12 +42,19 @@ const memoryStore = () =>
     ],
   })
 
+/**
+ * mapbox:        mapbox-gl >= 3.32, render callbacks carry the public
+ *                render parameters as their 8th argument.
+ * mapbox-legacy: older mapbox-gl, callbacks stop at the 7th argument.
+ * maplibre:      a single params object, nothing Mapbox-shaped at all.
+ */
+type Provider = 'mapbox' | 'mapbox-legacy' | 'maplibre'
+
 interface FakeMapOptions {
   globe?: boolean
   terrain?: boolean
   zoom?: number
-  /** Mapbox exposes these internals; MapLibre does not. */
-  mapboxInternals?: boolean
+  provider?: Provider
 }
 
 function fakeMap(options: FakeMapOptions = {}) {
@@ -54,7 +62,7 @@ function fakeMap(options: FakeMapOptions = {}) {
     globe = false,
     terrain = false,
     zoom = 0,
-    mapboxInternals = true,
+    provider = 'mapbox',
   } = options
 
   const state = { globe, terrain, zoom }
@@ -62,10 +70,10 @@ function fakeMap(options: FakeMapOptions = {}) {
 
   const map = {
     getProjection: () =>
-      // Mapbox reports `name`; a MapLibre map would report `type`.
-      mapboxInternals
-        ? { name: state.globe ? 'globe' : 'mercator' }
-        : { type: state.globe ? 'globe' : 'mercator' },
+      // Mapbox reports `name`; a MapLibre map reports `type`.
+      provider === 'maplibre'
+        ? { type: state.globe ? 'globe' : 'mercator' }
+        : { name: state.globe ? 'globe' : 'mercator' },
     getTerrain: () => (state.terrain ? { source: 'dem' } : null),
     getZoom: () => state.zoom,
     getBounds: () => ({
@@ -84,19 +92,40 @@ function fakeMap(options: FakeMapOptions = {}) {
       handlers.set(event, list)
     },
     off: vi.fn(),
-    ...(mapboxInternals
-      ? {
-          transform: {
-            expandedFarZProjMatrix: new Float64Array(16).fill(1),
-            worldSize: 512,
-          },
-        }
-      : {}),
+  }
+
+  const identity = () => {
+    const m = new Float64Array(16)
+    m[0] = m[5] = m[10] = m[15] = 1
+    return m
+  }
+
+  /** The arguments the provider's painter passes to prerender/render. */
+  const renderArgs = (): unknown[] => {
+    if (provider === 'maplibre') return [{}]
+    const mapboxArgs: unknown[] = [
+      Array.from(identity()),
+      { name: state.globe ? 'globe' : 'mercator' },
+      Array.from(identity()),
+      state.globe ? 0 : 1,
+      [0.5, 0.5],
+      1,
+    ]
+    if (provider === 'mapbox') {
+      mapboxArgs.push({
+        projectionMatrix: identity(),
+        viewMatrix: identity(),
+        globeClippingPlane: null,
+        globeCenterInScreenPixels: null,
+      })
+    }
+    return mapboxArgs
   }
 
   return {
     map: map as unknown as MapLike,
     state,
+    renderArgs,
     /** Re-run the layer's gate the way a real map event would. */
     emit: (event: string) => {
       for (const handler of handlers.get(event) ?? []) handler()
@@ -106,10 +135,15 @@ function fakeMap(options: FakeMapOptions = {}) {
 
 async function addLayer(
   mapOptions: FakeMapOptions = {},
-  layerOptions: { renderPoles?: boolean; crs?: string } = {}
+  layerOptions: {
+    renderPoles?: boolean
+    crs?: string
+    /** Skip the first frame so a test can observe the pre-callback state. */
+    frame?: boolean
+  } = {}
 ) {
-  const { renderPoles = true, crs = 'EPSG:4326' } = layerOptions
-  const { map, state, emit } = fakeMap(mapOptions)
+  const { renderPoles = true, crs = 'EPSG:4326', frame = true } = layerOptions
+  const { map, state, emit, renderArgs } = fakeMap(mapOptions)
   const gl = createRecordingGl()
 
   // onAdd initializes asynchronously without returning a handle, so the layer's
@@ -142,10 +176,24 @@ async function addLayer(
   layer.onAdd(map, gl)
   await initialized
 
+  /** Mapbox runs prerender for draped layers as well, so the first frame is
+   *  where the layer learns whether render parameters exist at all. */
+  const prerender = () => {
+    const [params, ...rest] = renderArgs()
+    ;(
+      layer.prerender as (
+        gl: WebGL2RenderingContext,
+        params: unknown,
+        ...rest: unknown[]
+      ) => void
+    )(gl, params, ...rest)
+  }
+  if (frame) prerender()
+
   /** True when the layer is draped (Mapbox renders it into tile textures). */
   const isDraped = () => typeof layer.renderToTile === 'function'
 
-  return { layer, map, state, emit, isDraped }
+  return { layer, map, state, emit, isDraped, prerender }
 }
 
 describe('Mapbox draped vs direct globe path', () => {
@@ -236,23 +284,81 @@ describe('Mapbox draped vs direct globe path', () => {
   })
 })
 
-describe('MapLibre never takes the Mapbox direct path', () => {
-  it('stays draped on a globe map without Mapbox internals', async () => {
-    // MapLibre has no draping API, so renderToTile is inert there — but it is
-    // also the discriminator: the probe for Mapbox-only internals is what
-    // keeps the Mapbox-specific ECEF program off a MapLibre map.
-    const { isDraped } = await addLayer({
+describe('Mapbox render parameters as the direct-path key', () => {
+  it('starts draped and undrapes once a callback carries render parameters', async () => {
+    // Nothing outside render/prerender can tell which Mapbox this is, so the
+    // layer begins on the path every version supports.
+    const { isDraped, prerender } = await addLayer(
+      { globe: true, zoom: 0 },
+      { frame: false }
+    )
+    expect(isDraped()).toBe(true)
+
+    prerender()
+    expect(isDraped()).toBe(false)
+  })
+
+  it('remembers the parameters across map events that never see them', async () => {
+    // Terrain toggles re-run the gate from a map event with no callback
+    // arguments in sight; the availability learned on the first frame holds.
+    const { state, emit, isDraped } = await addLayer({ globe: true, zoom: 0 })
+    expect(isDraped()).toBe(false)
+
+    state.terrain = true
+    emit('move')
+    expect(isDraped()).toBe(true)
+
+    state.terrain = false
+    emit('move')
+    expect(isDraped()).toBe(false)
+  })
+
+  it('learns them in mercator and applies them on the switch to globe', async () => {
+    const { state, emit, isDraped } = await addLayer({ globe: false })
+    expect(isDraped()).toBe(true)
+
+    state.globe = true
+    emit('projectionchange')
+    expect(isDraped()).toBe(false)
+  })
+
+  it('stays draped for good on a Mapbox older than 3.32', async () => {
+    // Without the public matrices the direct path has nothing to project
+    // with, so the layer keeps the draped tiles (pole holes and all).
+    const { isDraped, prerender, emit } = await addLayer({
       globe: true,
       zoom: 0,
-      mapboxInternals: false,
+      provider: 'mapbox-legacy',
     })
+    expect(isDraped()).toBe(true)
+
+    prerender()
+    emit('move')
+    expect(isDraped()).toBe(true)
+  })
+})
+
+describe('MapLibre never takes the Mapbox direct path', () => {
+  it('stays draped on a globe map', async () => {
+    // MapLibre has no draping API, so renderToTile is inert there — but the
+    // render parameters are also the discriminator: MapLibre never passes
+    // them, which keeps the Mapbox-specific ECEF program off a MapLibre map.
+    const { isDraped, prerender, emit } = await addLayer({
+      globe: true,
+      zoom: 0,
+      provider: 'maplibre',
+    })
+    expect(isDraped()).toBe(true)
+
+    prerender()
+    emit('move')
     expect(isDraped()).toBe(true)
   })
 
   it('stays draped in mercator too', async () => {
     const { isDraped } = await addLayer({
       globe: false,
-      mapboxInternals: false,
+      provider: 'maplibre',
     })
     expect(isDraped()).toBe(true)
   })

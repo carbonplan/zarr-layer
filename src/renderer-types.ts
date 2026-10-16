@@ -28,8 +28,9 @@ export interface MapboxParams {
   transition: number
   /** True when this frame uses the direct globe path instead of draped tiles. */
   directGlobePathActive?: boolean
-  /** Internal Mapbox globe matrix needed for direct custom-layer ECEF depth parity. */
-  expandedFarZMercatorMatrix?: number[] | Float32Array | Float64Array
+  /** Globe world (ECEF) to clip for the direct globe path: Mapbox's public
+   *  projection matrix with an infinite far plane, times its view matrix. */
+  ecefClipMatrix?: Float32Array
 }
 
 /**

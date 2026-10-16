@@ -391,14 +391,15 @@ export function applyProjectionUniforms(
     case 'mapbox':
     case 'mapbox-proj4':
     case 'mapbox-ecef': {
-      // Mapbox's public custom-layer matrix uses the standard far plane, but
-      // the direct globe ECEF path needs the expanded-far variant to match
-      // the globe surface depth contract. Tile rendering still uses the tile matrix.
+      // The direct globe ECEF path projects globe-world vertices with the
+      // infinite-far view-projection built from Mapbox's public render
+      // parameters; the custom-layer matrix expects mercator input and a
+      // finite far plane. Tile rendering still uses the tile matrix.
       const mapboxMatrix =
         shaderProgram.projectionMode === 'mapbox-ecef' &&
         !isGlobeTileRender &&
-        mapbox?.expandedFarZMercatorMatrix
-          ? mapbox.expandedFarZMercatorMatrix
+        mapbox?.ecefClipMatrix
+          ? mapbox.ecefClipMatrix
           : matrix
       setMatrix4(shaderProgram.matrixLoc, mapboxMatrix)
       setMatrix4(
