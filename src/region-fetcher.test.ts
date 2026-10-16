@@ -188,6 +188,7 @@ async function makeHarness(
   const invalidate = vi.fn()
   const createRegionGeometry = vi.fn()
   const hideSpinner = vi.fn()
+  const releaseRegionTextures = vi.fn()
 
   // fetchRegions runs synchronously up to its pre-flight staleness check, so
   // `show()` is the one hook a test can use to simulate a level or selector
@@ -223,6 +224,7 @@ async function makeHarness(
     getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
     computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
     createRegionGeometry,
+    releaseRegionTextures,
     invalidate,
   }
 
@@ -234,6 +236,7 @@ async function makeHarness(
     invalidate,
     createRegionGeometry,
     hideSpinner,
+    releaseRegionTextures,
     releaseReads,
     chunkReads,
     setLevel: (next: LevelRuntime | null) => {
@@ -605,6 +608,50 @@ describe('RegionFetcher', () => {
       }
     })
 
+    it('frees the textures of data it drops', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const { fetcher, cache, setSelectorVersion, releaseRegionTextures } =
+          await makeHarness({ failReads: topRight })
+        const region = createRegionState(0, 1, 0, false, 0)
+        region.data = new Float32Array(8)
+        cache.set(region.key, region)
+
+        setSelectorVersion(1)
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        expect(releaseRegionTextures).toHaveBeenCalledWith(region)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('is not recorded by a request a level reload superseded', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const harness = await makeHarness({
+          gateReads: true,
+          failReads: topRight,
+        })
+        const { fetcher, cache, releaseReads, chunkReads, setLevel, getLevel } =
+          harness
+        const batch = fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        await untilReading(chunkReads)
+        // The reload commits a new runtime for the same level and forgets
+        // failures; the old read then rejects.
+        cache.clearFailures()
+        setLevel({ ...getLevel()! })
+        releaseReads()
+        await batch
+
+        const region = cache.get(makeRegionKey(0, 1, 0))!
+        expect(region.failedSelectorVersion).toBeNull()
+        expect(region.loading).toBe(false)
+        expect(harness.releaseRegionTextures).not.toHaveBeenCalled()
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
     it('is cleared by the next attempt', async () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
@@ -686,6 +733,7 @@ describe('RegionFetcher', () => {
       getRegionBounds: () => ({ xMin: 0, xMax: 1, yMin: 0, yMax: 1 }),
       computeRegionMercatorBounds: () => ({ x0: 0, y0: 0, x1: 1, y1: 1 }),
       createRegionGeometry: vi.fn(),
+      releaseRegionTextures: vi.fn(),
       invalidate: vi.fn(),
     })
     return { fetcher, cache }

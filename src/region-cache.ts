@@ -135,6 +135,23 @@ export function isRegionGpuReady(
   return region.textureUploaded
 }
 
+/**
+ * Free the region's textures and stop counting their bytes. Geometry buffers
+ * stay: the mesh does not depend on the data that was dropped.
+ */
+export function releaseRegionTextures(
+  gl: WebGL2RenderingContext | WebGLRenderingContext,
+  region: RegionState
+): void {
+  if (region.texture) gl.deleteTexture(region.texture)
+  if (region.bandTexture) gl.deleteTexture(region.bandTexture)
+  region.texture = null
+  region.textureUploaded = false
+  region.bandTexture = null
+  region.bandTextureKey = null
+  region.bandTextureBytes = 0
+}
+
 export function disposeRegion(
   gl: WebGL2RenderingContext | WebGLRenderingContext,
   region: RegionState

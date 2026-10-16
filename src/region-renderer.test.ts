@@ -3,6 +3,7 @@ import { RegionRenderer } from './region-renderer'
 import {
   createRegionState,
   makeRegionKey,
+  regionByteLength,
   type RegionCache,
 } from './region-cache'
 import { ZarrStore } from './zarr-store'
@@ -816,6 +817,30 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     renderer.update(map, gl)
     await settle(renderer)
     expect(readsOf(chunkReads)).toBe(2)
+  })
+
+  it('frees the textures of an uploaded region whose refetch fails', async () => {
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: (key) => key.endsWith('/c/0/0/0') }
+    )
+    // Region (0, 0) was fetched and drawn under the first selector.
+    const region = seedFallbackRegion(renderer, { levelIndex: 0 })
+    const texture = region.texture!
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(chunkReads.filter((k) => k.endsWith('/c/0/0/0'))).toHaveLength(0)
+
+    await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    expect(region.failedSelectorVersion).toBe(1)
+    expect(gl.deleteTexture).toHaveBeenCalledWith(texture)
+    expect(region.texture).toBeNull()
+    expect(regionByteLength(region)).toBe(0)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
   })
 
   it('does not hold fallback coverage on screen forever', async () => {

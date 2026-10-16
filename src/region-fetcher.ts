@@ -169,6 +169,8 @@ export type RegionFetcherContext = {
     regionY: number,
     region: RegionState
   ) => void
+  /** Free a region's GPU textures once the data they hold is dropped. */
+  releaseRegionTextures: (region: RegionState) => void
   invalidate: () => void
 }
 
@@ -314,7 +316,8 @@ export class RegionFetcher {
     regionY: number,
     snapshot: LevelSnapshot
   ): Promise<void> {
-    if ((this.context.getActiveLevel()?.index ?? -1) !== snapshot.index) {
+    const levelAtStart = this.context.getActiveLevel()
+    if ((levelAtStart?.index ?? -1) !== snapshot.index) {
       return
     }
 
@@ -602,8 +605,17 @@ export class RegionFetcher {
         // The failure is final under this selector: the region is not
         // requested again until something starts a fresh attempt, and any
         // data it held under an earlier selector is dropped so it draws
-        // nothing rather than the wrong selection.
+        // nothing rather than the wrong selection. A request that was
+        // cancelled or superseded (every level commit is a new runtime
+        // object, and a reload clears failures) must not record one: its
+        // outcome belongs to an attempt nobody is waiting on.
+        const superseded =
+          controller.signal.aborted ||
+          this.context.isRemoved() ||
+          this.context.getActiveLevel() !== levelAtStart ||
+          this.context.regionCache.get(key) !== region
         if (
+          !superseded &&
           region.requestId === requestId &&
           fetchSelectorVersion >= region.selectorVersion
         ) {
@@ -612,6 +624,7 @@ export class RegionFetcher {
           region.bandData.clear()
           region.bandTextureKey = null
           region.textureUploaded = false
+          this.context.releaseRegionTextures(region)
         }
       }
     } finally {

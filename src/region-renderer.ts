@@ -67,6 +67,7 @@ import {
   isRegionFailed,
   isRegionGpuReady,
   makeRegionKey,
+  releaseRegionTextures,
 } from './region-cache'
 import { bandFormatForDtype, type BandFormat } from './band-format'
 import { RegionFetcher } from './region-fetcher'
@@ -886,6 +887,10 @@ export class RegionRenderer {
         this.computeRegionMercatorBounds(bounds),
       createRegionGeometry: (regionX, regionY, region) =>
         this.createRegionGeometry(regionX, regionY, region),
+      // Textures exist only once a frame has run, and every frame caches gl.
+      releaseRegionTextures: (region) => {
+        if (this.cachedGl) releaseRegionTextures(this.cachedGl, region)
+      },
       invalidate: this.invalidate,
     })
     await fetcher.fetchRegions(regions)
