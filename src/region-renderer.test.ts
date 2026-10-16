@@ -499,22 +499,21 @@ describe('RegionRenderer', () => {
     expect(states[0].bandTexture).toBe(fallback.bandTexture)
   })
 
-  it('holds other-level eviction protection until the level is drawable', async () => {
+  it('releases other-level eviction protection once the level can be drawn', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
     const fallback = seedFallbackRegion(renderer)
     const cache = seam(renderer).regionCache
 
-    // Regions are fetched but never drawn, so the level can't be shown yet and
-    // its fallback has to stay protected — eviction here is unrecoverable.
-    renderer.update(map, gl)
-    expect(cache.isProtected(fallback.key)).toBe(true)
-
-    // Once a frame uploads them, the level stands on its own.
-    drawn(renderer, gl)
+    // Regions are fetched but not yet drawn. Protection is judged on what
+    // the render plan will draw, uploading as it would, so the level stands
+    // on its own at once and the fallback no tile shows is released.
     renderer.update(map, gl)
     expect(cache.isProtected(fallback.key)).toBe(false)
+    const states = drawn(renderer, gl)
+    expect(states).toHaveLength(4)
+    expect(states.every((state) => state.levelIndex === 0)).toBe(true)
   })
 
   it('evicts on a settled viewport once fetched bytes have landed', async () => {
@@ -548,6 +547,7 @@ describe('RegionRenderer', () => {
 
     // The layer switches to the band-sampling shader, which never reads the
     // main texture, so the interleaved copy stops being built.
+    gl.createTexture.mockClear()
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
     await settle(renderer)

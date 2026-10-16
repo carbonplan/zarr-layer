@@ -645,8 +645,8 @@ describe('per-tile level selection', () => {
     // the same subset would be requested for ever. It targets the finest
     // coarser level that fits instead, and is shown from it once loaded.
     const { renderer, map, gl } = await rendererAtZoom(1)
-    // Lon -135..-112.5, lat 0..21.9: some 150 level-1 regions, 45 level-0.
-    const wide: TileRequest = { tileId: { z: 4, x: 2, y: 7 }, zoom: 1 }
+    // Lon -135..-90, lat 0..41: some 480 level-1 regions, 120 level-0.
+    const wide: TileRequest = { tileId: { z: 3, x: 1, y: 3 }, zoom: 1 }
 
     renderer.setCoveringTiles([wide])
     renderer.update(map, gl)
@@ -735,6 +735,52 @@ describe('per-tile level selection', () => {
       { tileId: southEdge, zoom: 1, poles: true },
     ])
     expect(Math.max(...rowsOf())).toBe(127)
+  })
+
+  it('tiles the viewport itself without a cover, so levels never overlap', async () => {
+    // Mapbox without terrain gives no cover. Zooming in mid-load, partial
+    // fine data and the coarse fallback must not both draw whole over the
+    // same pixels; the viewport is tiled at the map zoom instead and each
+    // tile shows one level, so no box of one level overlaps another's.
+    const { renderer, gl } = await rendererAtZoom(0)
+    renderer.setCoveringTiles(null)
+    renderer.update(viewportAt(0), gl)
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+
+    const fine = mapAt(100, -20, 105, -15, 6)
+    renderer.update(fine, gl)
+    await waitForActive(renderer, 1)
+    renderer.update(fine, gl)
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    const fineKeys = [...seam(renderer).wantedKeys]
+    expect(fineKeys.length).toBeGreaterThan(1)
+    cache.delete(fineKeys[0])
+    renderer.update(fine, gl)
+
+    const draws = seam(renderer).plannedDraws(gl)
+    const levels = new Set(draws.map((d) => d.region.levelIndex))
+    expect(levels).toEqual(new Set([0, 1]))
+    // Boxes are float32 deltas from each region's own anchor, so a shared
+    // edge lands within a few 1e-9 of itself across regions.
+    const eps = 1e-6
+    const overlaps = (a: Box, b: Box) =>
+      a.x0 < b.x1 - eps &&
+      a.x1 > b.x0 + eps &&
+      a.y0 < b.y1 - eps &&
+      a.y1 > b.y0 + eps
+    for (const a of draws) {
+      for (const b of draws) {
+        if (a.region.levelIndex === b.region.levelIndex) continue
+        for (const boxA of absoluteBoxes(a)) {
+          for (const boxB of absoluteBoxes(b)) {
+            expect(overlaps(boxA, boxB)).toBe(false)
+          }
+        }
+      }
+    }
+    await settle(renderer)
   })
 
   it('falls back to the viewport at the active level without a tile cover', async () => {

@@ -33,7 +33,11 @@ import type {
   ResolutionLevel,
 } from './types'
 import { ZarrStore } from './zarr-store'
-import { type MercatorBounds, type XYLimits } from './map-utils'
+import {
+  latToMercatorNorm,
+  type MercatorBounds,
+  type XYLimits,
+} from './map-utils'
 import { getBands } from './zarr-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
 import { renderTile, type TileRenderOptions } from './tile-renderer'
@@ -58,7 +62,6 @@ import {
   getRegionBounds,
   getRegionSize,
   getRegionsInBounds,
-  getVisibleRegions,
   selectLevelForZoom,
   type RegionCoordinate,
 } from './region-math'
@@ -120,6 +123,16 @@ export interface TileRequest {
  * nearest tiles first.
  */
 const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
+
+/**
+ * Fewest tiles a cover synthesised for the viewport splits it into; the
+ * coarsest zoom reaching that gives at most four times as many.
+ */
+const MIN_VIEWPORT_TILES = 16
+const MAX_VIEWPORT_TILE_ZOOM = 24
+
+/** Degrees a tile is shrunk by when deciding which regions it shows. */
+const TILE_EDGE_INSET = 1e-7
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 const requestKey = (tile: TileRequest) =>
@@ -210,6 +223,9 @@ export class RegionRenderer {
   private pendingLevels: Set<number> = new Set()
   // The map's own tile cover for the frame, when the map exposes it.
   private coveringTiles: TileRequest[] | null = null
+  // A cover made from the viewport when the map gives none and no draped
+  // hook is drawing tiles, so that path plans per tile as well.
+  private syntheticCover: TileRequest[] | null = null
   // Tiles the draped render hooks were asked to draw, which on terrain reach
   // past the sea-level cover. Kept in two generations keyed by the layer's
   // terrain revision: a revision change redraws every visible tile, so the
@@ -501,18 +517,6 @@ export class RegionRenderer {
     this.regionCache.evict(gl)
   }
 
-  private getVisibleRegions(
-    map: MapLike
-  ): Array<{ regionX: number; regionY: number }> {
-    return getVisibleRegions({
-      map,
-      xyLimits: this.xyLimits,
-      levelMeta: this.activeLevel,
-      projection: this.projection,
-      latIsAscending: this.latIsAscending,
-    })
-  }
-
   /**
    * Create a region key that includes level index for unified caching.
    */
@@ -623,8 +627,17 @@ export class RegionRenderer {
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
+    // Shrunk by a hair: region overlap is edge-inclusive, and a region whose
+    // edge lies on the tile's edge shows nothing in it. Owning it would make
+    // the tile fetch it and wait on it for nothing.
+    const b = getTileLonLatBounds(tileId, { toPoles })
     const regions = getRegionsInBounds({
-      bounds: getTileLonLatBounds(tileId, { toPoles }),
+      bounds: {
+        west: b.west + TILE_EDGE_INSET,
+        south: b.south + TILE_EDGE_INSET,
+        east: b.east - TILE_EDGE_INSET,
+        north: b.north - TILE_EDGE_INSET,
+      },
       xyLimits: this.xyLimits,
       levelMeta,
       projection: this.projection,
@@ -635,19 +648,77 @@ export class RegionRenderer {
   }
 
   /**
-   * The regions to want this update, per level. With a tile cover, each tile
+   * A tile cover for the viewport when the map gives none (Mapbox without
+   * terrain): the coarsest tiles that split the viewport into at least
+   * MIN_VIEWPORT_TILES, so they overshoot it by little whatever its extent,
+   * each read at the map zoom, nearest the centre first. Empty without map
+   * bounds.
+   */
+  private viewportTiles(map: MapLike): TileRequest[] {
+    const bounds = map.getBounds?.()?.toArray?.()
+    if (!bounds) return []
+    const [[west, south], [east, north]] = bounds
+    const zoom = map.getZoom?.() ?? 0
+    const center = map.getCenter?.() ?? {
+      lng: (west + east) / 2,
+      lat: (south + north) / 2,
+    }
+    const wrapLon = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180
+    const range = (from: number, to: number) =>
+      Array.from({ length: Math.max(0, to - from) }, (_, i) => from + i)
+    for (let z = 0; z <= MAX_VIEWPORT_TILE_ZOOM; z++) {
+      const n = 2 ** z
+      const clamp = (v: number) => Math.min(n - 1, Math.max(0, Math.floor(v)))
+      const y0 = clamp(latToMercatorNorm(north) * n)
+      const y1 = clamp(latToMercatorNorm(south) * n)
+      let columns: number[]
+      if (east - west >= 360) {
+        columns = range(0, n)
+      } else {
+        const x0 = clamp(((wrapLon(west) + 180) / 360) * n)
+        const x1 = clamp(((wrapLon(east) + 180) / 360) * n)
+        columns =
+          x1 >= x0 ? range(x0, x1 + 1) : [...range(x0, n), ...range(0, x1 + 1)]
+      }
+      if (
+        columns.length * (y1 - y0 + 1) < MIN_VIEWPORT_TILES &&
+        z < MAX_VIEWPORT_TILE_ZOOM
+      ) {
+        continue
+      }
+      const tiles: Array<{ tile: TileRequest; d: number }> = []
+      for (const x of columns) {
+        for (let y = y0; y <= y1; y++) {
+          const tileId = { z, x, y }
+          const b = getTileLonLatBounds(tileId)
+          const dLon = wrapLon((b.west + b.east) / 2 - center.lng)
+          const dLat = (b.south + b.north) / 2 - center.lat
+          tiles.push({
+            tile: { tileId, zoom, poles: this.isGlobeProjection },
+            d: dLon * dLon + dLat * dLat,
+          })
+        }
+      }
+      return tiles.sort((a, b) => a.d - b.d).map(({ tile }) => tile)
+    }
+    return []
+  }
+
+  /**
+   * The regions to want this update, per level. Each tile of the cover
    * reads the level matching its zoom; a level not yet open is opened for
-   * the next update. Without one (Mapbox without terrain), the viewport is
-   * read at the active level.
+   * the next update. Without a cover from the map or a draped hook (Mapbox
+   * without terrain), the viewport is tiled here instead.
    */
   private selectWantedRegions(map: MapLike): Map<number, RegionCoordinate[]> {
     const wanted = new Map<number, RegionCoordinate[]>()
     this.pendingLevels = new Set()
-    const tiles = this.requestedTiles()
+    this.syntheticCover = null
+    let tiles = this.requestedTiles()
     if (tiles.length === 0) {
-      const active = this.activeLevel
-      if (active) wanted.set(active.index, this.getVisibleRegions(map))
-      return wanted
+      tiles = this.viewportTiles(map)
+      if (tiles.length === 0) return wanted
+      this.syntheticCover = tiles
     }
     const perTile: Array<{
       levelIndex: number
@@ -850,7 +921,7 @@ export class RegionRenderer {
     }
     return {
       tile,
-      regions: this.fallbackRegions(tile, drawable),
+      regions: this.fallbackRegions(tile, levelIndex, drawable),
       ready: false,
     }
   }
@@ -858,12 +929,14 @@ export class RegionRenderer {
   /**
    * Regions of the one cached level to show in a tile whose own level is
    * not ready: the finest level with drawable data under the whole tile,
-   * or failing that the level covering most of it, its own included. Polar
-   * tiles on the globe reach the pole, where region bounds clamp to the
-   * Mercator limit.
+   * or failing that the level covering most of it. Its own level counts
+   * too, through the regions being promoted (wanted) rather than whatever
+   * of it the cache still holds. Polar tiles on the globe reach the pole,
+   * where region bounds clamp to the Mercator limit.
    */
   private fallbackRegions(
     tile: TileRequest,
+    ownLevel: number,
     drawable: (region: RegionState) => boolean
   ): RegionState[] {
     const tileBounds = tileClipBounds(tile)
@@ -871,6 +944,9 @@ export class RegionRenderer {
     for (const region of this.regionCache.values()) {
       const bounds = region.mercatorBounds
       if (!bounds) continue
+      if (region.levelIndex === ownLevel && !this.wantedKeys.has(region.key)) {
+        continue
+      }
       if (!boundsIntersect(bounds, tileBounds) || !drawable(region)) continue
       const list = byLevel.get(region.levelIndex)
       if (list) list.push(region)
@@ -939,7 +1015,9 @@ export class RegionRenderer {
     gl: WebGL2RenderingContext,
     worldOffsets: number[] = [0]
   ): RegionDraw[] {
-    const tiles = this.coveringTiles
+    const tiles = this.coveringTiles?.length
+      ? this.coveringTiles
+      : this.syntheticCover
     if (!tiles || tiles.length === 0) {
       return this.getLoadedRegions(gl).map((region) => ({
         region,
@@ -1236,6 +1314,7 @@ export class RegionRenderer {
     this.wantedRegions = new Map()
     this.wantedKeys = new Set()
     this.pendingLevels = new Set()
+    this.syntheticCover = null
     this.lastViewportHash = ''
   }
 
@@ -1264,7 +1343,7 @@ export class RegionRenderer {
     // is released at once. An empty result without a cover is a transient
     // state (map bounds or transformer unavailable), so keep the previous
     // set rather than unprotect regions that are still rendered.
-    const tiles = this.requestedTiles()
+    const tiles = this.syntheticCover ?? this.requestedTiles()
     if (tiles.length > 0) {
       const drawable = this.drawableWith(gl)
       const retained = new Set<string>()
