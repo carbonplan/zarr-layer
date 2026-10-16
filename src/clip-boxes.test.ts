@@ -94,6 +94,25 @@ describe('tileClipPasses', () => {
     })
   })
 
+  it('matches a tile only in the world copy it is drawn in', () => {
+    // The map may cover copies at different zooms; a tile of one copy must
+    // not clip the region's draw in another, or two owners would show.
+    const mesh = { x0: 0.2, y0: 0.2, x1: 0.6, y1: 0.5 }
+    const west = { tileId: { z: 3, x: 2, y: 2 }, wrap: -1 }
+    const bounds = getTileBounds(west.tileId)
+
+    expect(tileClipPasses(mesh, [west], 0)).toHaveLength(0)
+    const [pass] = tileClipPasses(mesh, [west], -1)
+    expectBox(absolute(pass, mesh)[0], bounds)
+
+    // A tile of every copy follows the draw instead.
+    const every = { tileId: { z: 3, x: 2, y: 2 } }
+    for (const offset of [-1, 0, 1]) {
+      const [p] = tileClipPasses(mesh, [every], offset)
+      expectBox(absolute(p, mesh)[0], bounds)
+    }
+  })
+
   it('keeps shared edges exact at high zoom', () => {
     // At zoom 20 a tile is 2^-20 of the world. The vertex shader's absolute
     // position carries the region anchor as a float32 uniform, which near

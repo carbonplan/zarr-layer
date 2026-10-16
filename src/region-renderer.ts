@@ -106,6 +106,11 @@ export interface TileRequest {
   zoom: number
   /** Extend a polar edge tile to the pole: the globe draws there. */
   poles?: boolean
+  /**
+   * The world copy the tile is drawn in. The map may cover copies at
+   * different zooms, so ownership is per copy; undefined means every copy.
+   */
+  wrap?: number
 }
 
 /**
@@ -117,6 +122,8 @@ export interface TileRequest {
 const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
+const requestKey = (tile: TileRequest) =>
+  `${tileKey(tile.tileId)}@${tile.wrap ?? 'all'}`
 
 /** What one map tile shows. */
 interface TileDraw {
@@ -130,8 +137,8 @@ interface TileDraw {
 /** A region to draw on the direct path, clipped to the tiles that show it. */
 interface RegionDraw {
   region: RegionState
-  /** One draw per pass; null draws the region whole. */
-  clipPasses: Float32Array[] | null
+  /** One draw per pass; null draws the region whole at every offset. */
+  clipPasses: Array<{ worldOffset: number; boxes: Float32Array }> | null
 }
 
 export class RegionRenderer {
@@ -596,7 +603,7 @@ export class RegionRenderer {
   private requestedTiles(): TileRequest[] {
     const byKey = new Map<string, TileRequest>()
     const add = (tile: TileRequest) => {
-      const key = tileKey(tile.tileId)
+      const key = requestKey(tile)
       if (!byKey.has(key)) byKey.set(key, tile)
     }
     for (const tile of this.coveringTiles ?? []) add(tile)
@@ -887,12 +894,16 @@ export class RegionRenderer {
   }
 
   /**
-   * The regions to draw on the direct path. With a tile cover, each tile
-   * shows one level and each region is clipped to the tiles that show it,
-   * so every pixel shows exactly one level whatever the layer opacity.
-   * Without one, the wanted regions are drawn whole over any fallbacks.
+   * The regions to draw on the direct path, for the world offsets drawn.
+   * With a tile cover, each tile shows one level and each region is
+   * clipped to the tiles that show it, per world copy, so every pixel shows
+   * exactly one level whatever the layer opacity. Without one, the wanted
+   * regions are drawn whole over any fallbacks.
    */
-  private plannedDraws(gl: WebGL2RenderingContext): RegionDraw[] {
+  private plannedDraws(
+    gl: WebGL2RenderingContext,
+    worldOffsets: number[] = [0]
+  ): RegionDraw[] {
     const tiles = this.coveringTiles
     if (!tiles || tiles.length === 0) {
       return this.getLoadedRegions(gl).map((region) => ({
@@ -901,9 +912,17 @@ export class RegionRenderer {
       }))
     }
     const drawable = this.drawableWith(gl)
+    const plans = new Map<string, TileDraw>()
     const owners = new Map<string, { region: RegionState; tiles: ClipTile[] }>()
     for (const tile of tiles) {
-      for (const region of this.planTile(tile, drawable).regions) {
+      // Copies of one tile show the same thing; plan it once.
+      const planKey = `${tileKey(tile.tileId)}:${tile.zoom}`
+      let plan = plans.get(planKey)
+      if (!plan) {
+        plan = this.planTile(tile, drawable)
+        plans.set(planKey, plan)
+      }
+      for (const region of plan.regions) {
         let entry = owners.get(region.key)
         if (!entry) {
           entry = { region, tiles: [] }
@@ -915,8 +934,17 @@ export class RegionRenderer {
     const draws: RegionDraw[] = []
     for (const { region, tiles } of owners.values()) {
       // A tile that only touches the region's edge owns it without showing
-      // any of it; a region no tile shows is not drawn.
-      const clipPasses = tileClipPasses(region.meshBounds!, tiles)
+      // any of it; a region no tile shows in a copy is not drawn there.
+      const clipPasses: Array<{ worldOffset: number; boxes: Float32Array }> = []
+      for (const worldOffset of worldOffsets) {
+        for (const boxes of tileClipPasses(
+          region.meshBounds!,
+          tiles,
+          worldOffset
+        )) {
+          clipPasses.push({ worldOffset, boxes })
+        }
+      }
       if (clipPasses.length > 0) draws.push({ region, clipPasses })
     }
     return draws.sort(
@@ -1525,14 +1553,25 @@ export class RegionRenderer {
     // Set up band texture uniforms once per frame
     setupBandTextureUniforms(gl, shaderProgram)
 
-    for (const { region, clipPasses } of this.plannedDraws(gl)) {
+    for (const { region, clipPasses } of this.plannedDraws(gl, worldOffsets)) {
       const renderable = this.regionToRenderable(region)
-      for (const clipBoxes of clipPasses ?? [undefined]) {
+      if (!clipPasses) {
         renderRegion(
           gl,
           shaderProgram,
-          { ...renderable, clipBoxes },
+          renderable,
           worldOffsets,
+          customShaderConfig,
+          eyeMatrix
+        )
+        continue
+      }
+      for (const { worldOffset, boxes } of clipPasses) {
+        renderRegion(
+          gl,
+          shaderProgram,
+          { ...renderable, clipBoxes: boxes },
+          [worldOffset],
           customShaderConfig,
           eyeMatrix
         )

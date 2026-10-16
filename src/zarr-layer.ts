@@ -873,10 +873,11 @@ export class ZarrLayer {
     const poles = this.isGlobeProjection() && !map.getTerrain?.()
     return map
       .coveringTiles({ tileSize: COVERING_TILE_SIZE })
-      .map(({ canonical }) => ({
+      .map(({ canonical, wrap }) => ({
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
         poles,
+        wrap: wrap ?? 0,
       }))
   }
 

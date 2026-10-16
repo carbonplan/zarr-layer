@@ -317,8 +317,8 @@ describe('per-tile levels', () => {
     layer.prerender(gl, {})
 
     expect(setCoveringTiles).toHaveBeenCalledWith([
-      { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5, poles: false },
-      { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5, poles: false },
+      { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5, poles: false, wrap: 0 },
+      { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5, poles: false, wrap: 0 },
     ])
   })
 

@@ -75,7 +75,10 @@ const mapAt = (
 /** A small viewport in the southern Indian Ocean. */
 const viewportAt = (zoom: number) => mapAt(100, -20, 105, -15, zoom)
 
-type Draw = { region: RegionState; clipPasses: Float32Array[] | null }
+type Draw = {
+  region: RegionState
+  clipPasses: Array<{ worldOffset: number; boxes: Float32Array }> | null
+}
 type Seam = {
   regionCache: RegionCache
   wantedRegions: Map<number, RegionCoordinate[]>
@@ -84,7 +87,7 @@ type Seam = {
   levelLoader: LevelLoader
   activeLevel: { index: number } | null
   getLoadedRegions(gl: WebGL2RenderingContext): RegionState[]
-  plannedDraws(gl: WebGL2RenderingContext): Draw[]
+  plannedDraws(gl: WebGL2RenderingContext, worldOffsets?: number[]): Draw[]
   planTile(
     tile: TileRequest,
     drawable: (region: RegionState) => boolean
@@ -103,19 +106,24 @@ const failLevel = (renderer: RegionRenderer, levelIndex: number) =>
 
 type Box = { x0: number; y0: number; x1: number; y1: number }
 
-/** A draw's clip boxes back in absolute Mercator. */
-const absoluteBoxes = (draw: Draw): Box[] => {
+/**
+ * A draw's clip boxes back in absolute Mercator of the base world, for the
+ * passes drawn at one world offset.
+ */
+const absoluteBoxes = (draw: Draw, worldOffset = 0): Box[] => {
   const mesh = draw.region.meshBounds!
   const ax = (mesh.x0 + mesh.x1) / 2
   const ay = (mesh.y0 + mesh.y1) / 2
   const boxes: Box[] = []
   for (const pass of draw.clipPasses ?? []) {
-    for (let i = 0; i < pass.length; i += 4) {
+    if (pass.worldOffset !== worldOffset) continue
+    const p = pass.boxes
+    for (let i = 0; i < p.length; i += 4) {
       boxes.push({
-        x0: pass[i] + ax,
-        y0: pass[i + 1] + ay,
-        x1: pass[i + 2] + ax,
-        y1: pass[i + 3] + ay,
+        x0: p[i] + ax,
+        y0: p[i + 1] + ay,
+        x1: p[i + 2] + ax,
+        y1: p[i + 3] + ay,
       })
     }
   }
@@ -459,6 +467,37 @@ describe('per-tile level selection', () => {
       const boxes = absoluteBoxes(draw)
       expect(boxes).toHaveLength(1)
       expect(sameBox(boxes[0], getTileBounds(tile.tileId))).toBe(true)
+    }
+  })
+
+  it('owns tiles per world copy when copies are covered at different zooms', async () => {
+    // A pitched low-zoom view covers one world copy coarsely and the next
+    // finely: here the far tile in the base copy and, inside its footprint,
+    // the near tile in the copy to the west. Each copy keeps one owner per
+    // point: the far tile's regions are drawn only in the base copy and the
+    // near tile's only in the west copy, never both over the same pixels.
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    const base = { ...FAR, wrap: 0 }
+    const west = { ...NEAR, wrap: -1 }
+    await updateWithCover(renderer, map, gl, [base, west])
+    await settle(renderer)
+
+    const draws = seam(renderer).plannedDraws(gl, [-1, 0])
+    expect(draws.some((d) => d.region.levelIndex === 0)).toBe(true)
+    expect(draws.some((d) => d.region.levelIndex === 1)).toBe(true)
+    for (const draw of draws) {
+      const offsets = [...new Set(draw.clipPasses!.map((p) => p.worldOffset))]
+      if (draw.region.levelIndex === 0) {
+        expect(offsets).toEqual([0])
+        expect(
+          sameBox(absoluteBoxes(draw, 0)[0], getTileBounds(FAR.tileId))
+        ).toBe(true)
+      } else {
+        expect(offsets).toEqual([-1])
+        expect(
+          sameBox(absoluteBoxes(draw, -1)[0], getTileBounds(NEAR.tileId))
+        ).toBe(true)
+      }
     }
   })
 

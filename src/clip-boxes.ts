@@ -20,6 +20,11 @@ export interface ClipTile {
   tileId: TileId
   /** Extend a polar edge tile to the pole: the globe draws there. */
   poles?: boolean
+  /**
+   * The world copy the tile is drawn in, as the map's cover numbers them;
+   * undefined stands for every copy.
+   */
+  wrap?: number
 }
 
 interface Box {
@@ -78,26 +83,33 @@ function mergeRows(boxes: Box[]): Box[] {
 }
 
 /**
- * Clip boxes for one region, split into passes of at most MAX_CLIP_BOXES.
- * Each pass draws the region once; together they show it in every owning
- * tile. A tile is matched against the mesh in each world copy the mesh can
- * reach, so a region unwrapped past the antimeridian meets the tiles on the
- * far side. Returns no passes when no tile touches the mesh.
+ * Clip boxes for one draw of a region at a world offset, split into passes
+ * of at most MAX_CLIP_BOXES. Each pass draws the region once; together they
+ * show it in every owning tile. A tile is matched in the world copy it is
+ * drawn in, so copies the map covers at different zooms keep one owner per
+ * point each; a tile of every copy is matched in the copy drawn and its
+ * neighbours, so a region unwrapped past the antimeridian meets the tiles
+ * on the far side. Returns no passes when no tile touches the mesh.
  */
 export function tileClipPasses(
   mesh: MeshMercatorBounds,
-  tiles: ClipTile[]
+  tiles: ClipTile[],
+  worldOffset = 0
 ): Float32Array[] {
   const anchorX = (mesh.x0 + mesh.x1) / 2
   const anchorY = (mesh.y0 + mesh.y1) / 2
   const boxes: Box[] = []
   for (const tile of tiles) {
     const bounds = tileClipBounds(tile)
-    for (let copy = -1; copy <= 1; copy++) {
+    const copies =
+      tile.wrap === undefined
+        ? [worldOffset - 1, worldOffset, worldOffset + 1]
+        : [tile.wrap]
+    for (const copy of copies) {
       const box = {
-        x0: bounds.x0 + copy,
+        x0: bounds.x0 + copy - worldOffset,
         y0: bounds.y0,
-        x1: bounds.x1 + copy,
+        x1: bounds.x1 + copy - worldOffset,
         y1: bounds.y1,
       }
       if (overlaps(box, mesh)) boxes.push(box)
