@@ -7,7 +7,7 @@ import {
   splitBands,
   type RegionFetcherContext,
 } from './region-fetcher'
-import { RegionCache, makeRegionKey } from './region-cache'
+import { RegionCache, createRegionState, makeRegionKey } from './region-cache'
 import { createProjectionContext } from './projection-utils'
 import {
   createRequestCanceller,
@@ -114,6 +114,8 @@ async function makeHarness(
     dtype?: ArraySpec['dtype']
     fillValue?: number
     bandTextures?: boolean
+    /** Chunk reads whose key passes this throw, as a failing server would. */
+    failReads?: (key: string) => boolean
     /** Band count of a (band, lat, lon) array, with these bands selected. */
     bands?: {
       count: number
@@ -143,6 +145,9 @@ async function makeHarness(
       if (key.includes('/c/')) {
         chunkReads.push(key)
         if (opts.gateReads) await readsReleased
+        if (opts.failReads?.(key)) {
+          throw new Error('Unexpected response status 500')
+        }
       }
       return memory.get(key)
     },
@@ -182,6 +187,7 @@ async function makeHarness(
   const requestCanceller = createRequestCanceller()
   const invalidate = vi.fn()
   const createRegionGeometry = vi.fn()
+  const hideSpinner = vi.fn()
 
   // fetchRegions runs synchronously up to its pre-flight staleness check, so
   // `show()` is the one hook a test can use to simulate a level or selector
@@ -204,7 +210,7 @@ async function makeHarness(
     requestCanceller,
     loadingDebouncer: {
       show: () => onBatchStart(),
-      hide: () => {},
+      hide: hideSpinner,
     },
     getActiveLevel: () => level,
     getSelectorVersion: () => selectorVersion,
@@ -227,6 +233,7 @@ async function makeHarness(
     requestCanceller,
     invalidate,
     createRegionGeometry,
+    hideSpinner,
     releaseReads,
     chunkReads,
     setLevel: (next: LevelRuntime | null) => {
@@ -509,6 +516,114 @@ describe('RegionFetcher', () => {
     setLevel(null)
     await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
     expect(cache.size).toBe(0)
+  })
+
+  describe('a read that fails', () => {
+    const topRight = (key: string) => key.endsWith('/c/0/1')
+
+    it('marks the region failed under the selector and loads the rest', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const { fetcher, cache, invalidate, hideSpinner, setSelectorVersion } =
+          await makeHarness({ failReads: topRight })
+        setSelectorVersion(3)
+        await fetcher.fetchRegions([
+          { regionX: 0, regionY: 0 },
+          { regionX: 1, regionY: 0 },
+        ])
+
+        const failed = cache.get(makeRegionKey(0, 1, 0))!
+        expect(failed.failedSelectorVersion).toBe(3)
+        expect(failed.data).toBeNull()
+        expect(failed.loading).toBe(false)
+        expect(failed.requestId).toBeNull()
+        expect(errorSpy).toHaveBeenCalledTimes(1)
+
+        const loaded = cache.get(makeRegionKey(0, 0, 0))!
+        expect(loaded.failedSelectorVersion).toBeNull()
+        expect(Array.from(loaded.data!)).toEqual(chunkData(0, 0))
+        // The batch settles the spinner and repaints once.
+        expect(hideSpinner).toHaveBeenCalled()
+        expect(invalidate).toHaveBeenCalledTimes(2)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('settles the spinner and repaints once when every read fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const { fetcher, invalidate, hideSpinner } = await makeHarness({
+          failReads: () => true,
+        })
+        await fetcher.fetchRegions([
+          { regionX: 0, regionY: 0 },
+          { regionX: 1, regionY: 0 },
+        ])
+        expect(hideSpinner).toHaveBeenCalledTimes(1)
+        expect(invalidate).toHaveBeenCalledTimes(1)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('is not what an abort is', async () => {
+      const { fetcher, cache, requestCanceller, releaseReads, chunkReads } =
+        await makeHarness({ gateReads: true })
+      const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await untilReading(chunkReads)
+      cancelAllRequests(requestCanceller)
+      releaseReads()
+      await batch
+
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      expect(region.failedSelectorVersion).toBeNull()
+      expect(region.loading).toBe(false)
+    })
+
+    it('drops data the region held under an earlier selector', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const { fetcher, cache, setSelectorVersion } = await makeHarness({
+          failReads: topRight,
+        })
+        // Fetched under selector 0 (seeded: a successful read of this chunk
+        // would be served from the chunk cache on the refetch).
+        const region = createRegionState(0, 1, 0, false, 0)
+        region.data = new Float32Array(8)
+        region.bandData.set('temperature', region.data)
+        cache.set(region.key, region)
+
+        setSelectorVersion(1)
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        // Stale data would draw the previous selection as if it were this one.
+        expect(region.data).toBeNull()
+        expect(region.bandData.size).toBe(0)
+        expect(region.failedSelectorVersion).toBe(1)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('is cleared by the next attempt', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        let failing = true
+        const { fetcher, cache } = await makeHarness({
+          failReads: (key) => failing && topRight(key),
+        })
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        const region = cache.get(makeRegionKey(0, 1, 0))!
+        expect(region.failedSelectorVersion).toBe(0)
+
+        failing = false
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        expect(region.failedSelectorVersion).toBeNull()
+        expect(Array.from(region.data!)).toEqual(chunkData(0, 1))
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
   })
 
   // 2-time x 4-lat x 8-lon ramp: value = t*32 + y*8 + x. Selecting both time

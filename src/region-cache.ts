@@ -47,6 +47,7 @@ export function createRegionState(
     height: 0,
     loading: false,
     requestId: null,
+    failedSelectorVersion: null,
     channels: 1,
     texture: null,
     textureUploaded: false,
@@ -81,6 +82,17 @@ export function hasRegionData(region: RegionState): boolean {
   return (
     !!region.data || region.bandData.size > 0 || region.bandTextureKey !== null
   )
+}
+
+/**
+ * The region's fetch failed under this selector. It is left alone until the
+ * selector changes, the level is reloaded, or the entry leaves the cache.
+ */
+export function isRegionFailed(
+  region: RegionState,
+  selectorVersion: number
+): boolean {
+  return region.failedSelectorVersion === selectorVersion
 }
 
 /**
@@ -161,6 +173,13 @@ export class RegionCache {
   }
   isProtected(key: string): boolean {
     return this.protectedKeys.has(key)
+  }
+
+  /** Let every failed region be requested again. */
+  clearFailures(): void {
+    for (const region of this.regions.values()) {
+      region.failedSelectorVersion = null
+    }
   }
 
   rebuildProtection(

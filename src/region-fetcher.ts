@@ -342,6 +342,7 @@ export class RegionFetcher {
     }
     region.loading = true
     region.requestId = requestId
+    region.failedSelectorVersion = null
 
     const [regionH, regionW] = snapshot.regionSize
 
@@ -598,6 +599,20 @@ export class RegionFetcher {
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
         console.error(`[fetchRegion] Error fetching region ${key}:`, err)
+        // The failure is final under this selector: the region is not
+        // requested again until something starts a fresh attempt, and any
+        // data it held under an earlier selector is dropped so it draws
+        // nothing rather than the wrong selection.
+        if (
+          region.requestId === requestId &&
+          fetchSelectorVersion >= region.selectorVersion
+        ) {
+          region.failedSelectorVersion = fetchSelectorVersion
+          region.data = null
+          region.bandData.clear()
+          region.bandTextureKey = null
+          region.textureUploaded = false
+        }
       }
     } finally {
       // Only clear flags if this request still owns the region — a newer
