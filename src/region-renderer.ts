@@ -36,7 +36,7 @@ import { ZarrStore } from './zarr-store'
 import { type MercatorBounds, type XYLimits } from './map-utils'
 import { getBands } from './zarr-utils'
 import type { ZarrRenderer, ShaderProgram } from './zarr-renderer'
-import { renderMapboxTile } from './mapbox-tile-renderer'
+import { renderTile, type TileRenderOptions } from './tile-renderer'
 import {
   createProjectionContext,
   type ProjectionContext,
@@ -1102,11 +1102,13 @@ export class RegionRenderer {
   renderToTile(
     renderer: ZarrRenderer,
     tileId: TileId,
-    context: RenderContext
+    context: RenderContext,
+    options: TileRenderOptions
   ): boolean {
-    // This method is only used for draped Mapbox rendering. The direct
-    // ECEF path disables renderToTile at the layer level.
-    return renderMapboxTile({
+    // Draped rendering only. The direct Mapbox ECEF path disables
+    // renderToTile at the layer level.
+    return renderTile({
+      ...options,
       renderer,
       tileId,
       context: {

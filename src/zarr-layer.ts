@@ -32,7 +32,7 @@ import type {
   TransformRequest,
   OnAuthError,
 } from './types'
-import type { RenderContext } from './renderer-types'
+import type { RenderContext, TileId } from './renderer-types'
 import { RegionRenderer } from './region-renderer'
 import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
@@ -48,6 +48,10 @@ import {
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
 import { ZarrLayerNotReadyError } from './errors'
+
+/** MapLibre's terrain tile ID. `wrap` is the world copy, which draws the
+ *  same content as every other copy, so only `canonical` is used. */
+type TerrainTileID = { canonical: TileId; wrap?: number }
 
 /** Scale-mismatch ratio beyond which a locked fixedDataScale is re-derived
  *  from the clim and cached tiles are re-normalized. Conservative: float32
@@ -149,6 +153,9 @@ export class ZarrLayer {
   private renderer: ZarrRenderer | null = null
   private regionRenderer: RegionRenderer | null = null
   private tileNeedsRender: boolean = true
+  /** MapLibre redraws its terrain tiles when this changes (see
+   *  `renderToTerrainTile`). Bumped whenever the drawn content changes. */
+  terrainTileRevision: number = 0
 
   private projectionChangeHandler: (() => void) | null = null
   private mapRemoveHandler: (() => void) | null = null
@@ -626,6 +633,7 @@ export class ZarrLayer {
 
     this.invalidate = () => {
       this.tileNeedsRender = true
+      this.terrainTileRevision++
       if (map.triggerRepaint) map.triggerRepaint()
     }
 
@@ -942,10 +950,54 @@ export class ZarrLayer {
     const isGlobe = this.syncProjectionState()
     this.regionRenderer.update(this.map, this.gl)
 
-    const colormapTexture = this.colormap.ensureTexture(this.gl)
+    this.tileNeedsRender = this.regionRenderer.renderToTile(
+      this.renderer,
+      tileId,
+      this.tileRenderContext(this.gl, isGlobe),
+      { northUp: false }
+    )
+  }
 
-    const context: RenderContext = {
-      gl: this.gl,
+  /**
+   * MapLibre's experimental terrain hook (maplibre-gl >= 6.13), called in
+   * place of `render` while terrain is on. MapLibre drapes the tile over the
+   * terrain (and the globe) itself, so the tile is always drawn as a flat
+   * Mercator tile. MapLibre still calls `prerender` each frame, which drives
+   * region fetching; a tile drawn before its data arrived is redrawn once the
+   * load bumps `terrainTileRevision`.
+   */
+  renderToTerrainTile(
+    _gl: WebGL2RenderingContext | WebGLRenderingContext,
+    { tileID }: { tileID: TerrainTileID }
+  ) {
+    if (
+      this.isRemoved ||
+      !this.renderer ||
+      !this.gl ||
+      !this.regionRenderer ||
+      !this.map
+    ) {
+      return
+    }
+
+    if (!this.isZoomInRange()) {
+      return
+    }
+
+    this.regionRenderer.renderToTile(
+      this.renderer,
+      tileID.canonical,
+      this.tileRenderContext(this.gl, false),
+      { northUp: true }
+    )
+  }
+
+  private tileRenderContext(
+    gl: WebGL2RenderingContext,
+    isGlobe: boolean
+  ): RenderContext {
+    return {
+      gl,
       matrix: new Float32Array(16),
       uniforms: {
         clim: this.clim,
@@ -955,17 +1007,11 @@ export class ZarrLayer {
         offset: this.offset,
         fixedDataScale: this.fixedDataScale,
       },
-      colormapTexture,
+      colormapTexture: this.colormap.ensureTexture(gl),
       worldOffsets: [0],
       customShaderConfig: this.customShaderConfig || undefined,
       isGlobe,
     }
-
-    this.tileNeedsRender = this.regionRenderer.renderToTile(
-      this.renderer,
-      tileId,
-      context
-    )
   }
 
   // Mapbox specific custom layer method required to trigger rerender on eg dataset update.

@@ -1,59 +1,63 @@
 /**
- * @module mapbox-tile-renderer
+ * @module tile-renderer
  *
- * Specialized rendering for Mapbox GL JS tile API (renderToTile).
- * This is fundamentally different from MapLibre which uses projectTile().
- *
- * Mapbox's renderToTile() asks the custom layer to render individual tiles
- * to offscreen textures, requiring:
- * - Tile-specific transformation matrix (not camera matrix)
- * - Per-region projection handling (the unified region renderer drapes each
- *   loaded region onto the requested Mapbox tile).
+ * Rendering for the per-tile draping APIs: Mapbox's renderToTile and
+ * MapLibre's renderToTerrainTile. Both ask the custom layer to draw one tile
+ * into an offscreen texture, which needs:
+ * - A tile-specific transformation matrix (not the camera matrix)
+ * - Per-region projection handling (each loaded region is draped onto the
+ *   requested tile).
  */
 
 import type { ZarrRenderer } from './zarr-renderer'
 import type { RenderContext, TileId, RegionRenderState } from './renderer-types'
 import { setupBandTextureUniforms } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
-import {
-  MAPBOX_IDENTITY_MATRIX,
-  createMapboxTileMatrix,
-  getMapboxTileBounds,
-  boundsIntersect,
-} from './mapbox-utils'
+import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
+import { createTileMatrix, getTileBounds, boundsIntersect } from './tile-utils'
 
 // ============================================================================
 // Main Rendering Functions
 // ============================================================================
 
-interface MapboxTileRenderParams {
+export interface TileRenderOptions {
+  /**
+   * True when the tile framebuffer puts the tile's north edge at clip y = 1
+   * (MapLibre terrain tiles). Mapbox's renderToTile puts it at clip y = -1.
+   */
+  northUp: boolean
+}
+
+interface TileRenderParams extends TileRenderOptions {
   renderer: ZarrRenderer
   tileId: TileId
   context: RenderContext
-  /** Loaded regions to drape onto the requested Mapbox tile. */
+  /** Loaded regions to drape onto the requested tile. */
   regions: RegionRenderState[]
 }
 
 /**
- * Renders Zarr data to a Mapbox globe tile by draping each loaded region that
- * overlaps the requested tile. Returns true if more data is needed (a region
+ * Renders Zarr data to a map tile by draping each loaded region that overlaps
+ * the requested tile. Returns true if more data is needed (a region
  * intersecting the tile has not finished loading), false otherwise.
  */
-export function renderMapboxTile({
+export function renderTile({
   renderer,
   tileId,
   context,
   regions,
-}: MapboxTileRenderParams): boolean {
+  northUp,
+}: TileRenderParams): boolean {
   if (regions.length === 0) return true // Still loading
 
-  const tileBounds = getMapboxTileBounds(tileId)
+  const tileBounds = getTileBounds(tileId)
 
-  const tileMatrix = createMapboxTileMatrix(
+  const tileMatrix = createTileMatrix(
     tileBounds.x0,
     tileBounds.y0,
     tileBounds.x1,
-    tileBounds.y1
+    tileBounds.y1,
+    northUp
   )
 
   const { colormapTexture, uniforms, customShaderConfig } = context
@@ -71,7 +75,7 @@ export function renderMapboxTile({
   const shaderProgram = renderer.getProgram(
     context.shaderData,
     customShaderConfig,
-    true, // useMapbox - always true for Mapbox tile rendering
+    true, // useMapbox - always true for tile rendering
     useWgs84
   )
   renderer.gl.useProgram(shaderProgram.program)
@@ -87,7 +91,7 @@ export function renderMapboxTile({
       transition: isGlobe ? 0 : 1, // 0 = globe, 1 = mercator (blended)
     },
     tileMatrix,
-    true // useMapbox
+    true // tile render
   )
 
   setupBandTextureUniforms(renderer.gl, shaderProgram)
@@ -116,7 +120,7 @@ export function renderMapboxTile({
       renderer.gl,
       shaderProgram,
       renderable,
-      [0], // Globe tiles don't need world wrapping
+      [0], // Tiles don't need world wrapping
       customShaderConfig,
       useWgs84 ? tileMatrix : null
     )

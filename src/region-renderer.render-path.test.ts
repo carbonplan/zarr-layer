@@ -364,6 +364,85 @@ describe('Mapbox render path', () => {
   })
 })
 
+describe('tile render path', () => {
+  /**
+   * Draws tile z=1 x=0 y=0 (the north-west quarter of the world) and reads
+   * back what reached applyCommonUniforms: the Mapbox-style params, the tile
+   * matrix, and the tile-render flag.
+   */
+  async function tile(
+    northUp: boolean,
+    { isGlobe = false, contextIsGlobe = false } = {}
+  ) {
+    const renderer = await makeRenderer()
+    seedRegion(renderer)
+    renderer.onProjectionChange(isGlobe)
+
+    const gl = createRecordingGl()
+    const stub = stubRenderer(gl)
+    const context: RenderContext = {
+      gl,
+      matrix: new Float32Array(16),
+      uniforms,
+      colormapTexture: {} as WebGLTexture,
+      worldOffsets: [0],
+      isGlobe: contextIsGlobe,
+    }
+    const tileId = { z: 1, x: 0, y: 0 }
+    // The first pass uploads the seeded region; the second draws it.
+    renderer.renderToTile(stub.renderer, tileId, context, { northUp })
+    renderer.renderToTile(stub.renderer, tileId, context, { northUp })
+
+    const calls = vi.mocked(stub.renderer.applyCommonUniforms).mock.calls
+    const [, , , , , mapbox, matrix, tileRender] = calls[calls.length - 1]
+    return { mapbox, matrix: matrix as Float32Array, tileRender, stub }
+  }
+
+  const project = (m: Float32Array, x: number, y: number) => [
+    m[0] * x + m[12],
+    m[5] * y + m[13],
+  ]
+  // South-west and north-east corners of tile z=1 x=0 y=0 in Mercator.
+  const southWest: [number, number] = [0, 0.5]
+  const northEast: [number, number] = [0.5, 0]
+
+  it('maps the south-west corner to (-1, -1) for a north-up tile', async () => {
+    // MapLibre's terrain tile convention.
+    const { matrix } = await tile(true)
+    expect(project(matrix, ...southWest)).toEqual([-1, -1])
+    expect(project(matrix, ...northEast)).toEqual([1, 1])
+  })
+
+  it('maps the north edge to clip y = -1 for a north-down tile', async () => {
+    // Mapbox's renderToTile convention.
+    const { matrix } = await tile(false)
+    expect(project(matrix, ...southWest)).toEqual([-1, 1])
+    expect(project(matrix, ...northEast)).toEqual([1, -1])
+  })
+
+  it('draws a flat Mercator tile on the globe when the context says so', async () => {
+    // MapLibre drapes terrain tiles onto its globe itself, so the tile must
+    // not carry the globe blend even while the map projection is globe.
+    const { mapbox, tileRender, stub } = await tile(true, {
+      isGlobe: true,
+      contextIsGlobe: false,
+    })
+    expect(mapbox?.transition).toBe(1)
+    expect(mapbox?.projection.name).toBe('mercator')
+    expect(tileRender).toBe(true)
+    expect(stub.mode()).toBe('mapbox-proj4')
+  })
+
+  it('keeps the globe blend for a Mapbox globe tile', async () => {
+    const { mapbox } = await tile(false, {
+      isGlobe: true,
+      contextIsGlobe: true,
+    })
+    expect(mapbox?.transition).toBe(0)
+    expect(mapbox?.projection.name).toBe('globe')
+  })
+})
+
 describe('per-region anchor across world copies', () => {
   it('recomputes the anchor for each world copy', async () => {
     // A wrapped copy has to anchor on its own origin; reusing the unwrapped
