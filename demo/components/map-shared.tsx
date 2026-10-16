@@ -86,6 +86,8 @@ export interface MapConfig {
   ) => MapInstance
   setProjection: (map: MapInstance, globeProjection: boolean) => void
   getLayerBeforeId: (map: MapInstance) => string | undefined
+  /** Id of the raster-dem source the terrain toggle drapes onto. */
+  terrainSource: string
 }
 
 const mapLibreConfig: MapConfig = {
@@ -113,6 +115,17 @@ const mapLibreConfig: MapConfig = {
             attribution:
               '<a href="https://overturemaps.org/">Overture Maps</a>, <a href="https://protomaps.com">Protomaps</a>, © <a href="https://openstreetmap.org">OpenStreetMap</a>',
           },
+          'terrain-dem': {
+            type: 'raster-dem',
+            tiles: [
+              'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+            ],
+            encoding: 'terrarium',
+            tileSize: 256,
+            maxzoom: 15,
+            attribution:
+              '<a href="https://registry.opendata.aws/terrain-tiles/">Terrain Tiles</a>',
+          },
         },
         layers: layers('protomaps', mapLibreTheme, { lang: 'en' }),
       },
@@ -126,6 +139,7 @@ const mapLibreConfig: MapConfig = {
     )
   },
   getLayerBeforeId: () => 'landuse_pedestrian',
+  terrainSource: 'terrain-dem',
 }
 
 const mapboxConfig: MapConfig = {
@@ -162,6 +176,7 @@ const mapboxConfig: MapConfig = {
     const styleLayers = (map as mapboxgl.Map).getStyle().layers
     return styleLayers?.find((layer) => layer.type === 'symbol')?.id
   },
+  terrainSource: 'mapbox-dem',
 }
 
 export const getMapConfig = (provider: MapProvider): MapConfig => {
@@ -433,20 +448,18 @@ export const Map = () => {
     mapConfig.setProjection(map, globeProjection)
   }, [map, isMapLoaded, globeProjection])
 
-  // Toggle terrain (Mapbox only - MapLibre doesn't support terrain draping for custom layers)
   useEffect(() => {
-    if (!map || !isMapLoaded || mapProvider !== 'mapbox') return
-    const mapboxMap = map as mapboxgl.Map
+    if (!map || !isMapLoaded) return
     try {
       if (terrainEnabled) {
-        mapboxMap.setTerrain({ source: 'mapbox-dem', exaggeration: 1.5 })
+        map.setTerrain({ source: mapConfig.terrainSource, exaggeration: 1.5 })
       } else {
-        mapboxMap.setTerrain(null)
+        map.setTerrain(null)
       }
     } catch (e) {
       console.warn('Error toggling terrain:', e)
     }
-  }, [map, isMapLoaded, terrainEnabled, mapProvider])
+  }, [map, isMapLoaded, terrainEnabled, mapConfig])
 
   useMapLayer(map, isMapLoaded)
 
