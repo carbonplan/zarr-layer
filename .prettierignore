@@ -5,3 +5,4 @@ dist/
 package-lock.json
 demo/node_modules/
 demo/.next/
+demo/next-env.d.ts
