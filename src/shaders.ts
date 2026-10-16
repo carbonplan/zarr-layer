@@ -65,7 +65,30 @@ in vec2 vertex;
 
 out vec2 pix_coord;
 out vec2 v_mercatorPos;
-out vec2 v_wgs84Pos;`
+out vec2 v_wgs84Pos;
+out vec2 v_clipPos;`
+
+/** Most regions of finer levels one draw can be clipped against. */
+export const MAX_CLIP_BOXES = 32
+
+/**
+ * Fragment-side clip against finer data drawn over this region, so every
+ * pixel shows exactly one level. Boxes are normalized Mercator (x0, y0, x1,
+ * y1); the position is wrapped back into the base world copy.
+ */
+const UNIFORMS_CLIP = `
+uniform vec4 u_clip_boxes[${MAX_CLIP_BOXES}];
+uniform int u_clip_count;`
+
+const FRAGMENT_CLIP = `
+  vec2 clipPos = vec2(fract(v_clipPos.x), v_clipPos.y);
+  for (int i = 0; i < ${MAX_CLIP_BOXES}; i++) {
+    if (i >= u_clip_count) break;
+    vec4 box = u_clip_boxes[i];
+    if (clipPos.x >= box.x && clipPos.x < box.z && clipPos.y >= box.y && clipPos.y < box.w) {
+      discard;
+    }
+  }`
 
 /** Scale handling (shared by all shaders) */
 const SCALE_HANDLING = `
@@ -354,8 +377,8 @@ export function createVertexShader(options: VertexShaderOptions): string {
     ? '  v_wgs84Pos = vec2(normLon, normLat);'
     : '  v_wgs84Pos = vec2(0.0);'
   const mercatorPosAssignment = isMapboxDirectEcef
-    ? '  v_mercatorPos = vec2(0.0);'
-    : '  v_mercatorPos = merc;'
+    ? '  v_mercatorPos = vec2(0.0);\n  v_clipPos = vec2(mercX, mercY);'
+    : '  v_mercatorPos = merc;\n  v_clipPos = merc;'
 
   // Compose final shader
   return `#version 300 es
@@ -458,16 +481,19 @@ uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D tex;
 uniform sampler2D cmap;
+${UNIFORMS_CLIP}
 
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
 in vec2 v_wgs84Pos;
+in vec2 v_clipPos;
 out vec4 color;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
 
 void main() {
+${FRAGMENT_CLIP}
 ${FRAGMENT_SHADER_REPROJECT}
   float texVal = texture(tex, sample_coord).r;
 
@@ -617,6 +643,7 @@ uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
 uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D colormap;
+${UNIFORMS_CLIP}
 
 uniform ${samplerType} ${BAND_SAMPLER};
 ${customUniformDecls}
@@ -625,12 +652,14 @@ ${extraUniformsDecl}
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
 in vec2 v_wgs84Pos;
+in vec2 v_clipPos;
 out vec4 fragColor;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
 ${native ? NATIVE_BAND_READ : ''}
 void main() {
+${FRAGMENT_CLIP}
 ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}
 ${bandAliases}

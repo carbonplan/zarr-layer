@@ -114,6 +114,7 @@ export function renderTile({
       indexBuffer: region.indexBuffer,
       meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,
+      clipBoxes: region.clipBoxes,
     }
 
     const rendered = renderRegion(

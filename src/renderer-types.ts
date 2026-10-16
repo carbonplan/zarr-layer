@@ -94,4 +94,6 @@ export interface RegionRenderState {
   indexCount: number
   /** Normalized-Mercator bounds for reconstructing region-local mesh positions */
   meshBounds: MeshMercatorBounds
+  /** Boxes of finer data drawn over this region, see RenderableRegion */
+  clipBoxes?: Float32Array
 }
