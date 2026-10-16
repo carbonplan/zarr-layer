@@ -388,10 +388,8 @@ describe('tile render path', () => {
       worldOffsets: [0],
       isGlobe: contextIsGlobe,
     }
-    const tileId = { z: 1, x: 0, y: 0 }
-    // The first pass uploads the seeded region; the second draws it.
-    renderer.renderToTile(stub.renderer, tileId, context, { northUp })
-    renderer.renderToTile(stub.renderer, tileId, context, { northUp })
+    const tile = { tileId: { z: 1, x: 0, y: 0 }, zoom: 1 }
+    renderer.renderToTile(stub.renderer, tile, context, { northUp })
 
     const calls = vi.mocked(stub.renderer.applyCommonUniforms).mock.calls
     const [, , , , , mapbox, matrix, tileRender] = calls[calls.length - 1]

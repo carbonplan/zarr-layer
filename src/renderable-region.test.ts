@@ -113,9 +113,9 @@ describe('renderRegion band transforms', () => {
 })
 
 describe('renderRegion clip boxes', () => {
-  it('uploads the finer-data boxes a region is clipped against', () => {
-    // Each pixel shows exactly one level: a region drawn under finer data
-    // discards its fragments inside the finer regions' bounds.
+  it('uploads the tile boxes a region is clipped to', () => {
+    // Each pixel shows exactly one level: a region keeps only the fragments
+    // inside the tiles that show its level.
     const gl = createRecordingGl()
     const clipped = region(null)
     clipped.clipBoxes = new Float32Array([0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1])
@@ -129,7 +129,7 @@ describe('renderRegion clip boxes', () => {
     ).toEqual(['u_clip_boxes', [0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1]])
   })
 
-  it('clears the count for a region drawn on top', () => {
+  it('clears the count for a region drawn whole', () => {
     const gl = createRecordingGl()
     renderRegion(gl, program, region(null), [0], config)
 

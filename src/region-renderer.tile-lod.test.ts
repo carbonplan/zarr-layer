@@ -75,6 +75,7 @@ const mapAt = (
 /** A small viewport in the southern Indian Ocean. */
 const viewportAt = (zoom: number) => mapAt(100, -20, 105, -15, zoom)
 
+type Draw = { region: RegionState; clipPasses: Float32Array[] | null }
 type Seam = {
   regionCache: RegionCache
   wantedRegions: Map<number, RegionCoordinate[]>
@@ -83,10 +84,42 @@ type Seam = {
   levelLoader: LevelLoader
   activeLevel: { index: number } | null
   getLoadedRegions(gl: WebGL2RenderingContext): RegionState[]
-  clipBoxesFor(regions: RegionState[]): Map<string, Float32Array>
+  plannedDraws(gl: WebGL2RenderingContext): Draw[]
+  planTile(
+    tile: TileRequest,
+    drawable: (region: RegionState) => boolean
+  ): { regions: RegionState[]; ready: boolean }
   wantedCovered(): boolean
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
+
+type Box = { x0: number; y0: number; x1: number; y1: number }
+
+/** A draw's clip boxes back in absolute Mercator. */
+const absoluteBoxes = (draw: Draw): Box[] => {
+  const mesh = draw.region.meshBounds!
+  const ax = (mesh.x0 + mesh.x1) / 2
+  const ay = (mesh.y0 + mesh.y1) / 2
+  const boxes: Box[] = []
+  for (const pass of draw.clipPasses ?? []) {
+    for (let i = 0; i < pass.length; i += 4) {
+      boxes.push({
+        x0: pass[i] + ax,
+        y0: pass[i + 1] + ay,
+        x1: pass[i + 2] + ax,
+        y1: pass[i + 3] + ay,
+      })
+    }
+  }
+  return boxes
+}
+
+/** Boxes are uploaded as float32, so match them loosely. */
+const sameBox = (a: Box, b: Box) =>
+  Math.abs(a.x0 - b.x0) < 1e-6 &&
+  Math.abs(a.y0 - b.y0) < 1e-6 &&
+  Math.abs(a.x1 - b.x1) < 1e-6 &&
+  Math.abs(a.y1 - b.y1) < 1e-6
 
 const wantedAt = (renderer: RegionRenderer, levelIndex: number) =>
   (seam(renderer).wantedRegions.get(levelIndex) ?? [])
@@ -213,6 +246,13 @@ async function updateWithCover(
 const NEAR: TileRequest = { tileId: { z: 6, x: 8, y: 20 }, zoom: 1 }
 const NEAR_EAST: TileRequest = { tileId: { z: 6, x: 9, y: 20 }, zoom: 1 }
 const FAR: TileRequest = { tileId: { z: 5, x: 4, y: 10 }, zoom: 0 }
+// The zoom-5 tile east of FAR (lon -123.75..-112.5), clear of NEAR, and a
+// zoom-6 tile inside it.
+const FAR_EAST: TileRequest = { tileId: { z: 5, x: 5, y: 10 }, zoom: 0 }
+const NEAR_IN_FAR_EAST: TileRequest = {
+  tileId: { z: 6, x: 10, y: 20 },
+  zoom: 1,
+}
 
 describe('per-tile level selection', () => {
   it('reads each tile from the level matching its zoom', async () => {
@@ -336,7 +376,6 @@ describe('per-tile level selection', () => {
     // be drawn.
     const { renderer, gl } = await rendererAtZoom(0)
     const coarse = viewportAt(0)
-    const FAR_EAST: TileRequest = { tileId: { z: 5, x: 5, y: 10 }, zoom: 0 }
     await updateWithCover(renderer, coarse, gl, [FAR, FAR_EAST])
     await settle(renderer)
     const cache = seam(renderer).regionCache
@@ -396,41 +435,120 @@ describe('per-tile level selection', () => {
     expect(seam(renderer).wantedCovered()).toBe(true)
   })
 
-  it('clips coarse regions where finer data draws over them', async () => {
+  it('clips each region to the tiles that show its level', async () => {
+    // A fine tile beside a far one. Every pixel shows one level, so each
+    // region is drawn only inside the tile reading its level, whatever the
+    // region's own outline: the box is the tile's exact Mercator rectangle.
     const { renderer, map, gl } = await rendererAtZoom(1)
-    await updateWithCover(renderer, map, gl, [NEAR, FAR])
+    await updateWithCover(renderer, map, gl, [NEAR, FAR_EAST])
     await settle(renderer)
 
-    const drawn = seam(renderer).getLoadedRegions(gl)
-    const clips = seam(renderer).clipBoxesFor(drawn)
-    const fine = drawn.filter((r) => r.levelIndex === 1)
-    const coarse = drawn.filter((r) => r.levelIndex === 0)
-    for (const region of fine) expect(clips.has(region.key)).toBe(false)
-    const clippedCoarse = coarse.filter((r) => clips.has(r.key))
-    expect(clippedCoarse.length).toBeGreaterThan(0)
-    for (const region of clippedCoarse) {
-      const boxes = clips.get(region.key)!
-      expect(boxes.length % 4).toBe(0)
-      for (let i = 0; i < boxes.length; i += 4) {
-        const box = {
-          x0: boxes[i],
-          y0: boxes[i + 1],
-          x1: boxes[i + 2],
-          y1: boxes[i + 3],
-        }
-        expect(boundsIntersect(box, region.mercatorBounds!)).toBe(true)
-        // A box is one row of finer regions merged along x. Boxes are
-        // uploaded as float32, so match the finer bounds loosely.
-        const near = (a: number, b: number) => Math.abs(a - b) < 1e-6
-        const row = fine.filter(
-          (f) =>
-            near(f.mercatorBounds!.y0, box.y0) &&
-            near(f.mercatorBounds!.y1, box.y1)
-        )
-        expect(row.some((f) => near(f.mercatorBounds!.x0, box.x0))).toBe(true)
-        expect(row.some((f) => near(f.mercatorBounds!.x1, box.x1))).toBe(true)
-      }
+    const draws = seam(renderer).plannedDraws(gl)
+    expect(draws.some((d) => d.region.levelIndex === 0)).toBe(true)
+    expect(draws.some((d) => d.region.levelIndex === 1)).toBe(true)
+    for (const draw of draws) {
+      const tile = draw.region.levelIndex === 1 ? NEAR : FAR_EAST
+      const boxes = absoluteBoxes(draw)
+      expect(boxes).toHaveLength(1)
+      expect(sameBox(boxes[0], getTileBounds(tile.tileId))).toBe(true)
     }
+  })
+
+  it('shows a tile from one complete level rather than a partial mix', async () => {
+    // Zoom in over a coarse tile. Until every fine region under the near
+    // tile is drawable, the tile shows the coarse data it already has,
+    // clipped to the tile, and nothing of the fine level; the coarse
+    // regions stay protected meanwhile.
+    const { renderer, gl } = await rendererAtZoom(0)
+    await updateWithCover(renderer, viewportAt(0), gl, [FAR_EAST])
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+
+    const fine = viewportAt(1)
+    renderer.setCoveringTiles([NEAR_IN_FAR_EAST])
+    renderer.update(fine, gl)
+    await waitForActive(renderer, 1)
+    renderer.update(fine, gl)
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    const fineKeys = [...seam(renderer).wantedKeys]
+    expect(fineKeys.every((k) => k.startsWith('1:'))).toBe(true)
+    cache.delete(fineKeys[0])
+    renderer.update(fine, gl)
+
+    const draws = seam(renderer).plannedDraws(gl)
+    expect(draws.length).toBeGreaterThan(0)
+    expect(draws.every((d) => d.region.levelIndex === 0)).toBe(true)
+    const tileBounds = getTileBounds(NEAR_IN_FAR_EAST.tileId)
+    for (const draw of draws) {
+      expect(cache.isProtected(draw.region.key)).toBe(true)
+      expect(sameBox(absoluteBoxes(draw)[0], tileBounds)).toBe(true)
+    }
+    await settle(renderer)
+  })
+
+  it('shows what a tile has of its own level when no other level covers it', async () => {
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    await updateWithCover(renderer, map, gl, [NEAR])
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    // Regions the tile shows some of: wanted regions that only touch its
+    // edge are never drawn.
+    const tileBounds = getTileBounds(NEAR.tileId)
+    const shown = [...seam(renderer).wantedKeys].filter((key) => {
+      const m = cache.get(key)!.meshBounds!
+      return (
+        m.x0 < tileBounds.x1 &&
+        m.x1 > tileBounds.x0 &&
+        m.y0 < tileBounds.y1 &&
+        m.y1 > tileBounds.y0
+      )
+    })
+    expect(shown.length).toBeGreaterThan(1)
+    cache.delete(shown[0])
+
+    const draws = seam(renderer).plannedDraws(gl)
+    expect(draws.map((d) => d.region.key).sort()).toEqual(shown.slice(1).sort())
+  })
+
+  it('keeps a polar region as the fallback of a polar tile on the globe', async () => {
+    // Row 127 of level 1 lies wholly beyond the Mercator limit, so its
+    // Mercator bounds clamp to zero height at y = 1. The globe draws the
+    // tile to the pole, so while the tile's level changes the region must
+    // still be shown and kept there, inside a box that reaches the pole.
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    const polar: TileRequest = {
+      tileId: { z: 4, x: 0, y: 15 },
+      zoom: 1,
+      poles: true,
+    }
+    await updateWithCover(renderer, map, gl, [polar])
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+    const cache = seam(renderer).regionCache
+    // Columns 0..7 lie inside the tile; column 8 only touches its edge.
+    const polarKeys = [...cache.values()]
+      .filter((r) => r.levelIndex === 1 && r.regionY === 127 && r.regionX < 8)
+      .map((r) => r.key)
+    expect(polarKeys.length).toBeGreaterThan(0)
+
+    // The tile now reads level 0, which is still opening.
+    renderer.setCoveringTiles([{ ...polar, zoom: 0 }])
+    renderer.update(map, gl)
+    expect(seam(renderer).pendingLevels.has(0)).toBe(true)
+    for (const key of polarKeys) expect(cache.isProtected(key)).toBe(true)
+    const draws = seam(renderer).plannedDraws(gl)
+    const polarDraw = draws.find((d) => polarKeys.includes(d.region.key))
+    expect(polarDraw).toBeDefined()
+    expect(absoluteBoxes(polarDraw!)[0].y1).toBeGreaterThan(1)
+
+    // Once level 0 is drawn there, the level-1 regions are released.
+    await waitForRuntime(renderer, 0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+    renderer.update(map, gl)
+    for (const key of polarKeys) expect(cache.isProtected(key)).toBe(false)
   })
 
   it('extends polar edge tiles to the pole when asked', async () => {

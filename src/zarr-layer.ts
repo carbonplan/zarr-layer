@@ -1023,15 +1023,13 @@ export class ZarrLayer {
     this.configureMapboxRenderPath()
 
     const isGlobe = this.syncProjectionState()
-    this.regionRenderer.noteDrawnTile(
-      { tileId, zoom: this.tileZoom(tileId.z, COVERING_TILE_SIZE) },
-      this.terrainTileRevision
-    )
+    const tile = { tileId, zoom: this.tileZoom(tileId.z, COVERING_TILE_SIZE) }
+    this.regionRenderer.noteDrawnTile(tile, this.terrainTileRevision)
     this.regionRenderer.update(this.map, this.gl)
 
     this.tileNeedsRender = this.regionRenderer.renderToTile(
       this.renderer,
-      tileId,
+      tile,
       this.tileRenderContext(this.gl, isGlobe),
       { northUp: false }
     )
@@ -1063,11 +1061,12 @@ export class ZarrLayer {
       return
     }
 
+    const tile = {
+      tileId: tileID.canonical,
+      zoom: this.tileZoom(tileID.canonical.z, this.terrainTileSize()),
+    }
     const needsFetch = this.regionRenderer.noteDrawnTile(
-      {
-        tileId: tileID.canonical,
-        zoom: this.tileZoom(tileID.canonical.z, this.terrainTileSize()),
-      },
+      tile,
       this.terrainTileRevision
     )
     // MapLibre ran `prerender` before drawing this tile and schedules no
@@ -1076,7 +1075,7 @@ export class ZarrLayer {
     if (needsFetch) this.map.triggerRepaint?.()
     this.regionRenderer.renderToTile(
       this.renderer,
-      tileID.canonical,
+      tile,
       this.tileRenderContext(this.gl, false),
       { northUp: true }
     )

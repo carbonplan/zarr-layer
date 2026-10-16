@@ -32,14 +32,15 @@ interface TileRenderParams extends TileRenderOptions {
   renderer: ZarrRenderer
   tileId: TileId
   context: RenderContext
-  /** Loaded regions to drape onto the requested tile. */
+  /** Regions to drape onto the requested tile, all GPU-ready. */
   regions: RegionRenderState[]
 }
 
 /**
- * Renders Zarr data to a map tile by draping each loaded region that overlaps
- * the requested tile. Returns true if more data is needed (a region
- * intersecting the tile has not finished loading), false otherwise.
+ * Renders Zarr data to a map tile by draping each region that overlaps the
+ * requested tile. The tile framebuffer bounds the draw, so no fragment clip
+ * is needed. Returns true if a region failed to draw and the tile needs
+ * drawing again.
  */
 export function renderTile({
   renderer,
@@ -48,8 +49,6 @@ export function renderTile({
   regions,
   northUp,
 }: TileRenderParams): boolean {
-  if (regions.length === 0) return true // Still loading
-
   const tileBounds = getTileBounds(tileId)
 
   const tileMatrix = createTileMatrix(
@@ -114,7 +113,6 @@ export function renderTile({
       indexBuffer: region.indexBuffer,
       meshBounds: region.meshBounds,
       latIsAscending: region.latIsAscending,
-      clipBoxes: region.clipBoxes,
     }
 
     const rendered = renderRegion(
@@ -132,6 +130,5 @@ export function renderTile({
     }
   }
 
-  // Return true if any region still needs data (triggers re-render when loaded)
   return needsMoreData
 }

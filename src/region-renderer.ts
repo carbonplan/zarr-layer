@@ -62,12 +62,8 @@ import {
   selectLevelForZoom,
   type RegionCoordinate,
 } from './region-math'
-import {
-  boundsIntersect,
-  getTileBounds,
-  getTileLonLatBounds,
-} from './tile-utils'
-import { MAX_CLIP_BOXES } from './shaders'
+import { boundsIntersect, getTileLonLatBounds } from './tile-utils'
+import { tileClipBounds, tileClipPasses, type ClipTile } from './clip-boxes'
 import {
   MAX_CACHED_REGIONS,
   RegionCache,
@@ -122,34 +118,20 @@ const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 
-/**
- * Merge boxes that share a row (same y extent) and touch along x into one,
- * so a block of n by m finer regions costs m clip boxes rather than n by m.
- */
-function mergeRows(boxes: MercatorBounds[]): number[][] {
-  const rows = new Map<string, MercatorBounds[]>()
-  for (const box of boxes) {
-    const row = `${box.y0}:${box.y1}`
-    const list = rows.get(row)
-    if (list) list.push(box)
-    else rows.set(row, [box])
-  }
-  const merged: number[][] = []
-  for (const list of rows.values()) {
-    list.sort((a, b) => a.x0 - b.x0)
-    let current = [list[0].x0, list[0].y0, list[0].x1, list[0].y1]
-    for (let i = 1; i < list.length; i++) {
-      const box = list[i]
-      if (box.x0 <= current[2] + 1e-9) {
-        current[2] = Math.max(current[2], box.x1)
-      } else {
-        merged.push(current)
-        current = [box.x0, box.y0, box.x1, box.y1]
-      }
-    }
-    merged.push(current)
-  }
-  return merged
+/** What one map tile shows. */
+interface TileDraw {
+  tile: TileRequest
+  /** The regions, all of one level and all drawable. */
+  regions: RegionState[]
+  /** Whether they are the tile's own level, complete. */
+  ready: boolean
+}
+
+/** A region to draw on the direct path, clipped to the tiles that show it. */
+interface RegionDraw {
+  region: RegionState
+  /** One draw per pass; null draws the region whole. */
+  clipPasses: Float32Array[] | null
 }
 
 export class RegionRenderer {
@@ -219,7 +201,6 @@ export class RegionRenderer {
   // Levels tiles asked for that are still opening, and those tiles: part
   // of the view has no regions to want yet, so it is not covered.
   private pendingLevels: Set<number> = new Set()
-  private pendingTiles: TileId[] = []
   // The map's own tile cover for the frame, when the map exposes it.
   private coveringTiles: TileRequest[] | null = null
   // Tiles the draped render hooks were asked to draw, which on terrain reach
@@ -626,7 +607,7 @@ export class RegionRenderer {
   /** Regions of a level under a tile; the tile grid and levels never move. */
   private tileRegions(
     levelIndex: number,
-    runtime: LevelRuntime,
+    levelMeta: LevelMeta,
     tileId: TileId,
     toPoles = false
   ): RegionCoordinate[] {
@@ -637,7 +618,7 @@ export class RegionRenderer {
     const regions = getRegionsInBounds({
       bounds: getTileLonLatBounds(tileId, { toPoles }),
       xyLimits: this.xyLimits,
-      levelMeta: runtime,
+      levelMeta,
       projection: this.projection,
       latIsAscending: this.latIsAscending,
     })
@@ -654,7 +635,6 @@ export class RegionRenderer {
   private selectWantedRegions(map: MapLike): Map<number, RegionCoordinate[]> {
     const wanted = new Map<number, RegionCoordinate[]>()
     this.pendingLevels = new Set()
-    this.pendingTiles = []
     const tiles = this.requestedTiles()
     if (tiles.length === 0) {
       const active = this.activeLevel
@@ -673,7 +653,6 @@ export class RegionRenderer {
       if (!runtime) {
         void this.levelLoader.ensureRuntime(levelIndex)
         this.pendingLevels.add(levelIndex)
-        this.pendingTiles.push(tile.tileId)
         continue
       }
       const regions = this.tileRegions(
@@ -742,9 +721,9 @@ export class RegionRenderer {
   }
 
   /**
-   * Areas (normalized Mercator) still waiting for wanted data: wanted regions
-   * not yet drawable, and tiles whose level is still opening. Fallbacks
-   * overlapping them are kept until the replacement can be drawn.
+   * Areas (normalized Mercator) of wanted regions not yet drawable. Without
+   * a tile cover, fallbacks overlapping them are kept until the replacement
+   * can be drawn.
    */
   private pendingAreas(): Array<{
     x0: number
@@ -773,43 +752,153 @@ export class RegionRenderer {
         )
       }
     }
-    for (const tileId of this.pendingTiles) areas.push(getTileBounds(tileId))
     return areas
   }
 
   /**
-   * For each drawn region, the bounds of finer regions drawn after it that
-   * overlap it, as fragment clip boxes: each pixel then shows exactly one
-   * level, the finest drawn there, whatever the layer opacity. More than
-   * MAX_CLIP_BOXES overlaps keep the largest.
+   * What one tile shows: its own level once every region under it is
+   * drawable, else the one cached level that serves it best meanwhile.
+   * `fallbackDrawable` may be looser than `drawable` when judging what to
+   * keep rather than what to draw.
    */
-  private clipBoxesFor(regions: RegionState[]): Map<string, Float32Array> {
-    const clips = new Map<string, Float32Array>()
-    for (let i = 0; i < regions.length; i++) {
-      const region = regions[i]
+  private planTile(
+    tile: TileRequest,
+    drawable: (region: RegionState) => boolean,
+    fallbackDrawable = drawable
+  ): TileDraw {
+    const levelIndex = this.selectLevelForZoom(tile.zoom)
+    const runtime = this.levelLoader.runtime(levelIndex)
+    if (runtime) {
+      const regions: RegionState[] = []
+      let ready = true
+      const own = this.tileRegions(levelIndex, runtime, tile.tileId, tile.poles)
+      for (const { regionX, regionY } of own) {
+        const cached = this.regionCache.get(
+          this.makeRegionKey(levelIndex, regionX, regionY)
+        )
+        if (cached && drawable(cached)) regions.push(cached)
+        else ready = false
+      }
+      if (ready) return { tile, regions, ready }
+    }
+    return {
+      tile,
+      regions: this.fallbackRegions(tile, fallbackDrawable),
+      ready: false,
+    }
+  }
+
+  /**
+   * Regions of the one cached level to show in a tile whose own level is
+   * not ready: the finest level with drawable data under the whole tile,
+   * or failing that the level covering most of it, its own included. Polar
+   * tiles on the globe reach the pole, where region bounds clamp to the
+   * Mercator limit.
+   */
+  private fallbackRegions(
+    tile: TileRequest,
+    drawable: (region: RegionState) => boolean
+  ): RegionState[] {
+    const tileBounds = tileClipBounds(tile)
+    const byLevel = new Map<number, RegionState[]>()
+    for (const region of this.regionCache.values()) {
       const bounds = region.mercatorBounds
       if (!bounds) continue
-      const width = this.levelWidth(region.levelIndex)
-      const finer: MercatorBounds[] = []
-      for (let j = i + 1; j < regions.length; j++) {
-        const fb = regions[j].mercatorBounds
-        if (!fb || this.levelWidth(regions[j].levelIndex) <= width) continue
-        if (boundsIntersect(bounds, fb)) finer.push(fb)
-      }
-      if (finer.length === 0) continue
-      const boxes = mergeRows(finer).map((box) => ({
-        box,
-        area:
-          (Math.min(bounds.x1, box[2]) - Math.max(bounds.x0, box[0])) *
-          (Math.min(bounds.y1, box[3]) - Math.max(bounds.y0, box[1])),
-      }))
-      if (boxes.length > MAX_CLIP_BOXES) {
-        boxes.sort((a, b) => b.area - a.area)
-        boxes.length = MAX_CLIP_BOXES
-      }
-      clips.set(region.key, new Float32Array(boxes.flatMap((b) => b.box)))
+      if (!boundsIntersect(bounds, tileBounds) || !drawable(region)) continue
+      const list = byLevel.get(region.levelIndex)
+      if (list) list.push(region)
+      else byLevel.set(region.levelIndex, [region])
     }
-    return clips
+    let best: RegionState[] = []
+    let bestComplete = false
+    let bestCovered = -1
+    let bestWidth = -1
+    for (const [levelIndex, regions] of byLevel) {
+      const keys = new Set(regions.map((region) => region.key))
+      const meta = regions[0].levelMeta
+      const complete =
+        !!meta &&
+        this.tileRegions(levelIndex, meta, tile.tileId, tile.poles).every(
+          ({ regionX, regionY }) =>
+            keys.has(this.makeRegionKey(levelIndex, regionX, regionY))
+        )
+      let covered = 0
+      for (const { mercatorBounds: b } of regions) {
+        covered +=
+          Math.max(
+            0,
+            Math.min(b!.x1, tileBounds.x1) - Math.max(b!.x0, tileBounds.x0)
+          ) *
+          Math.max(
+            0,
+            Math.min(b!.y1, tileBounds.y1) - Math.max(b!.y0, tileBounds.y0)
+          )
+      }
+      const width = this.levelWidth(levelIndex)
+      const better = complete
+        ? !bestComplete || width > bestWidth
+        : !bestComplete &&
+          (covered > bestCovered ||
+            (covered === bestCovered && width > bestWidth))
+      if (better) {
+        best = regions
+        bestComplete = complete
+        bestCovered = covered
+        bestWidth = width
+      }
+    }
+    return best
+  }
+
+  /** Regions drawable now, uploading what is CPU-ready on demand. */
+  private drawableWith(
+    gl: WebGL2RenderingContext
+  ): (region: RegionState) => boolean {
+    const requiredBands = this.requiredBands()
+    const bandFormat = this.bandFormat()
+    return (region) =>
+      isRegionCpuReady(region) &&
+      ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
+  }
+
+  /**
+   * The regions to draw on the direct path. With a tile cover, each tile
+   * shows one level and each region is clipped to the tiles that show it,
+   * so every pixel shows exactly one level whatever the layer opacity.
+   * Without one, the wanted regions are drawn whole over any fallbacks.
+   */
+  private plannedDraws(gl: WebGL2RenderingContext): RegionDraw[] {
+    const tiles = this.coveringTiles
+    if (!tiles || tiles.length === 0) {
+      return this.getLoadedRegions(gl).map((region) => ({
+        region,
+        clipPasses: null,
+      }))
+    }
+    const drawable = this.drawableWith(gl)
+    const owners = new Map<string, { region: RegionState; tiles: ClipTile[] }>()
+    for (const tile of tiles) {
+      for (const region of this.planTile(tile, drawable).regions) {
+        let entry = owners.get(region.key)
+        if (!entry) {
+          entry = { region, tiles: [] }
+          owners.set(region.key, entry)
+        }
+        entry.tiles.push(tile)
+      }
+    }
+    const draws: RegionDraw[] = []
+    for (const { region, tiles } of owners.values()) {
+      // A tile that only touches the region's edge owns it without showing
+      // any of it; a region no tile shows is not drawn.
+      const clipPasses = tileClipPasses(region.meshBounds!, tiles)
+      if (clipPasses.length > 0) draws.push({ region, clipPasses })
+    }
+    return draws.sort(
+      (a, b) =>
+        this.levelWidth(a.region.levelIndex) -
+        this.levelWidth(b.region.levelIndex)
+    )
   }
 
   /** Pixel width of a level, the order coarse-to-fine drawing sorts by. */
@@ -844,26 +933,22 @@ export class RegionRenderer {
   }
 
   /**
-   * Get drawable regions: the wanted regions plus fallbacks if needed, which
-   * are regions no longer wanted but still protected, kept from before a
-   * level or tile change until what is wanted can be drawn in full. Uploads
-   * the wanted regions first so coverage is judged on what can actually be
-   * drawn — regions that displace their fallbacks and then fail to upload
-   * would leave the viewport blank. Every returned region is GPU-ready, and
-   * coarser levels come first so finer data draws over them where both exist.
+   * Drawable regions without a tile cover: the wanted regions plus fallbacks
+   * if needed, which are regions no longer wanted but still protected, kept
+   * from before a level change until what is wanted can be drawn in full.
+   * Uploads the wanted regions first so coverage is judged on what can
+   * actually be drawn — regions that displace their fallbacks and then fail
+   * to upload would leave the viewport blank. Every returned region is
+   * GPU-ready, and coarser levels come first so finer data draws over them
+   * where both exist.
    */
   private getLoadedRegions(gl: WebGL2RenderingContext): RegionState[] {
-    const requiredBands = this.requiredBands()
-    const bandFormat = this.bandFormat()
-    const drawable = (region: RegionState | undefined): region is RegionState =>
-      !!region &&
-      isRegionCpuReady(region) &&
-      ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
+    const drawable = this.drawableWith(gl)
 
     const wanted: RegionState[] = []
     for (const key of this.wantedKeys) {
       const region = this.regionCache.get(key)
-      if (drawable(region)) wanted.push(region)
+      if (region && drawable(region)) wanted.push(region)
     }
 
     const regions = wanted
@@ -1063,7 +1148,6 @@ export class RegionRenderer {
     this.wantedRegions = new Map()
     this.wantedKeys = new Set()
     this.pendingLevels = new Set()
-    this.pendingTiles = []
     this.lastViewportHash = ''
   }
 
@@ -1083,13 +1167,31 @@ export class RegionRenderer {
     this.wantedKeys = wantedKeys
 
     // Rebuild eviction protection from what is wanted, plus regions kept as
-    // fallbacks: ones no longer wanted whose area is still waiting for its
-    // replacement to become drawable. A region whose area is already
-    // replaced, or wanted elsewhere, is released at once. An empty result
-    // with nothing pending is a transient state (map bounds or transformer
+    // fallbacks: with a tile cover, the regions each tile shows while its
+    // own level is not ready; without one, regions no longer wanted whose
+    // area is still waiting for its replacement to become drawable. A
+    // fallback no tile shows any more is released at once. An empty result
+    // without a cover is a transient state (map bounds or transformer
     // unavailable), so keep the previous set rather than unprotect regions
     // that are still rendered.
-    if (wantedKeys.size > 0 || this.pendingTiles.length > 0) {
+    const tiles = this.requestedTiles()
+    if (tiles.length > 0) {
+      const requiredBands = this.requiredBands()
+      const bandFormat = this.bandFormat()
+      const retained = new Set<string>()
+      for (const tile of tiles) {
+        const draw = this.planTile(
+          tile,
+          (region) => isRegionGpuReady(region, requiredBands, bandFormat),
+          isRegionCpuReady
+        )
+        if (draw.ready) continue
+        for (const region of draw.regions) retained.add(region.key)
+      }
+      this.regionCache.rebuildProtection(wantedKeys, {
+        retain: (key) => retained.has(key),
+      })
+    } else if (wantedKeys.size > 0) {
       const pending = this.wantedCovered() ? [] : this.pendingAreas()
       this.regionCache.rebuildProtection(wantedKeys, {
         retain: (key) => {
@@ -1398,36 +1500,38 @@ export class RegionRenderer {
     // Set up band texture uniforms once per frame
     setupBandTextureUniforms(gl, shaderProgram)
 
-    // Render each loaded region using unified path
-    const regions = this.getLoadedRegions(gl)
-    const clips = this.clipBoxesFor(regions)
-    for (const region of regions) {
-      renderRegion(
-        gl,
-        shaderProgram,
-        {
-          ...this.regionToRenderable(region),
-          clipBoxes: clips.get(region.key),
-        },
-        worldOffsets,
-        customShaderConfig,
-        eyeMatrix
-      )
+    for (const { region, clipPasses } of this.plannedDraws(gl)) {
+      const renderable = this.regionToRenderable(region)
+      for (const clipBoxes of clipPasses ?? [undefined]) {
+        renderRegion(
+          gl,
+          shaderProgram,
+          { ...renderable, clipBoxes },
+          worldOffsets,
+          customShaderConfig,
+          eyeMatrix
+        )
+      }
     }
   }
 
+  /**
+   * Draw one draped tile: the regions of its own level once complete, a
+   * fallback level until then. Returns true when the tile should be drawn
+   * again, because its level is not ready or a region failed to draw.
+   */
   renderToTile(
     renderer: ZarrRenderer,
-    tileId: TileId,
+    tile: TileRequest,
     context: RenderContext,
     options: TileRenderOptions
   ): boolean {
-    // Draped rendering only. The direct Mapbox ECEF path disables
-    // renderToTile at the layer level.
-    return renderTile({
+    if (!(this.activeLevel?.regionSize ?? null)) return true
+    const draw = this.planTile(tile, this.drawableWith(renderer.gl))
+    const needsRedraw = renderTile({
       ...options,
       renderer,
-      tileId,
+      tileId: tile.tileId,
       context: {
         ...context,
         uniforms: this.getUniformsForRender(context.uniforms),
@@ -1435,8 +1539,9 @@ export class RegionRenderer {
           context.customShaderConfig
         ),
       },
-      regions: this.getRegionStates(renderer.gl),
+      regions: draw.regions.map((region) => this.toRenderState(region)),
     })
+    return needsRedraw || !draw.ready
   }
 
   onProjectionChange(isGlobe: boolean): void {
@@ -1444,18 +1549,9 @@ export class RegionRenderer {
     this.isGlobeProjection = isGlobe
   }
 
-  /**
-   * Get render states for all loaded regions (for multi-region rendering).
-   * Includes previous level regions as fallback during level transitions.
-   */
-  private getRegionStates(gl: WebGL2RenderingContext): RegionRenderState[] {
-    if (!(this.activeLevel?.regionSize ?? null)) {
-      return []
-    }
-
-    const regions = this.getLoadedRegions(gl)
-    const clips = this.clipBoxesFor(regions)
-    return regions.map((region) => ({
+  /** A drawable region's render state for the tile render path. */
+  private toRenderState(region: RegionState): RegionRenderState {
+    return {
       texture: region.texture,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
@@ -1469,8 +1565,7 @@ export class RegionRenderer {
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
-      clipBoxes: clips.get(region.key),
-    }))
+    }
   }
 
   dispose(gl: WebGL2RenderingContext | WebGLRenderingContext): void {

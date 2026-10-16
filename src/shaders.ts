@@ -68,26 +68,36 @@ out vec2 v_mercatorPos;
 out vec2 v_wgs84Pos;
 out vec2 v_clipPos;`
 
-/** Most boxes of finer data one draw can be clipped against. */
-export const MAX_CLIP_BOXES = 64
+/**
+ * Most clip boxes one draw holds; each costs one fragment uniform vector. A
+ * region owned by more tiles is drawn in several passes.
+ */
+export const MAX_CLIP_BOXES = 32
 
 /**
- * Fragment-side clip against finer data drawn over this region, so every
- * pixel shows exactly one level. Boxes are normalized Mercator (x0, y0, x1,
- * y1); the position is wrapped back into the base world copy.
+ * Fragment-side clip to the map tiles that show this region's level, so
+ * every pixel shows exactly one level. Boxes are (x0, y0, x1, y1) in
+ * normalized Mercator relative to the region's mesh anchor, matching the
+ * region-local delta the vertex shader carries: the compare never touches
+ * an absolute float32 coordinate, so shared tile edges stay exact at any
+ * zoom. No boxes means no clipping.
  */
 const UNIFORMS_CLIP = `
 uniform vec4 u_clip_boxes[${MAX_CLIP_BOXES}];
 uniform int u_clip_count;`
 
 const FRAGMENT_CLIP = `
-  vec2 clipPos = vec2(fract(v_clipPos.x), v_clipPos.y);
-  for (int i = 0; i < ${MAX_CLIP_BOXES}; i++) {
-    if (i >= u_clip_count) break;
-    vec4 box = u_clip_boxes[i];
-    if (clipPos.x >= box.x && clipPos.x < box.z && clipPos.y >= box.y && clipPos.y < box.w) {
-      discard;
+  if (u_clip_count > 0) {
+    bool inside = false;
+    for (int i = 0; i < ${MAX_CLIP_BOXES}; i++) {
+      if (i >= u_clip_count) break;
+      vec4 box = u_clip_boxes[i];
+      if (v_clipPos.x >= box.x && v_clipPos.x < box.z && v_clipPos.y >= box.y && v_clipPos.y < box.w) {
+        inside = true;
+        break;
+      }
     }
+    if (!inside) discard;
   }`
 
 /** Scale handling (shared by all shaders) */
@@ -97,7 +107,8 @@ const SCALE_HANDLING = `
 
 /** Transform vertex from local space to normalized Mercator coordinates */
 const VERTEX_TO_MERCATOR = `
-  vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);`
+  vec2 mercDelta = vec2(vertex.x * sx, -vertex.y * sy);
+  vec2 merc = mercDelta + vec2(shift_x + u_worldXOffset, shift_y);`
 
 /**
  * Source-projected FLAT path, eye-coords (render-relative-to-eye) decomposition.
@@ -194,8 +205,9 @@ ${flatEndpoint}
  * (mercY outside [0,1]) reconstruct their true latitude → poles preserved.
  */
 const VERTEX_WGS84_TO_ECEF = `
-  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
-  float mercY = vertex.y * sy + shift_y;
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  float mercX = mercDelta.x + shift_x + u_worldXOffset;
+  float mercY = mercDelta.y + shift_y;
 
   float lonRad = (mercX - 0.5) * 2.0 * PI;
   float latRad = mercatorYToLatRad(mercY);
@@ -216,8 +228,9 @@ const VERTEX_WGS84_TO_ECEF = `
  * merc→lat inversion as VERTEX_WGS84_TO_ECEF (see there).
  */
 const VERTEX_WGS84_TO_ECEF_MAPBOX = `
-  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
-  float mercY = vertex.y * sy + shift_y;
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  float mercX = mercDelta.x + shift_x + u_worldXOffset;
+  float mercY = mercDelta.y + shift_y;
 
   float lonRad = (mercX - 0.5) * 2.0 * PI;
   float latRad = mercatorYToLatRad(mercY);
@@ -377,8 +390,8 @@ export function createVertexShader(options: VertexShaderOptions): string {
     ? '  v_wgs84Pos = vec2(normLon, normLat);'
     : '  v_wgs84Pos = vec2(0.0);'
   const mercatorPosAssignment = isMapboxDirectEcef
-    ? '  v_mercatorPos = vec2(0.0);\n  v_clipPos = vec2(mercX, mercY);'
-    : '  v_mercatorPos = merc;\n  v_clipPos = merc;'
+    ? '  v_mercatorPos = vec2(0.0);'
+    : '  v_mercatorPos = merc;'
 
   // Compose final shader
   return `#version 300 es
@@ -394,6 +407,7 @@ ${SCALE_HANDLING}
 ${coordTransform}
 ${projectionOutput}
   pix_coord = pix_coord_in;
+  v_clipPos = mercDelta;
 ${mercatorPosAssignment}
 ${wgs84PosAssignment}
 }

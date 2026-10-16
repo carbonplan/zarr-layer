@@ -199,8 +199,8 @@ describe('renderToTerrainTile', () => {
     layer.renderToTerrainTile(gl, terrainTile({ z: 3, x: 2, y: 5 }))
 
     expect(renderToTile).toHaveBeenCalledTimes(1)
-    const [, tileId, context, options] = renderToTile.mock.calls[0]
-    expect(tileId).toEqual({ z: 3, x: 2, y: 5 })
+    const [, tile, context, options] = renderToTile.mock.calls[0]
+    expect(tile.tileId).toEqual({ z: 3, x: 2, y: 5 })
     expect(options).toEqual({ northUp: true })
     expect(context.worldOffsets).toEqual([0])
   })
@@ -211,7 +211,7 @@ describe('renderToTerrainTile', () => {
     layer.renderToTerrainTile(gl, terrainTile({ z: 1, x: 0, y: 0 }, -1))
     layer.renderToTerrainTile(gl, terrainTile({ z: 1, x: 0, y: 0 }, 1))
 
-    const tileIds = renderToTile.mock.calls.map(([, tileId]) => tileId)
+    const tileIds = renderToTile.mock.calls.map(([, tile]) => tile.tileId)
     expect(tileIds).toEqual([
       { z: 1, x: 0, y: 0 },
       { z: 1, x: 0, y: 0 },
@@ -465,8 +465,8 @@ describe('Mapbox renderToTile', () => {
 
     layer.renderToTile(gl, { z: 2, x: 1, y: 1 })
 
-    const [, tileId, , options] = renderToTile.mock.calls[0]
-    expect(tileId).toEqual({ z: 2, x: 1, y: 1 })
+    const [, tile, , options] = renderToTile.mock.calls[0]
+    expect(tile).toEqual({ tileId: { z: 2, x: 1, y: 1 }, zoom: 2 })
     expect(options).toEqual({ northUp: false })
     expect(layer.shouldRerenderTiles()).toBe(true)
     expect(layer.shouldRerenderTiles()).toBe(false)

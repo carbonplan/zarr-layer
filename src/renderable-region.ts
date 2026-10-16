@@ -45,9 +45,10 @@ export interface RenderableRegion {
   // Scale/offset/fill for raw integer bands; null when bands are float
   bandTransform: BandTransform | null
 
-  // Normalized-Mercator boxes (x0, y0, x1, y1, ...) of finer data drawn over
-  // this region; fragments inside them are discarded so each pixel shows
-  // exactly one level. At most MAX_CLIP_BOXES boxes.
+  // Boxes (x0, y0, x1, y1, ...) of the map tiles that show this region, in
+  // normalized Mercator relative to the mesh anchor; fragments outside every
+  // box are discarded so each pixel shows exactly one level. At most
+  // MAX_CLIP_BOXES boxes; none means no clipping.
   clipBoxes?: Float32Array
 }
 

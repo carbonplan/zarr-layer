@@ -38,7 +38,7 @@ Where these attributes are absent the layer falls back to what it always did: re
 
 ### Multiscales
 
-High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. On MapLibre the level is chosen per map tile, the way the map's own raster sources work: in a pitched view, tiles near the camera read a fine level and tiles towards the horizon read coarser ones, so distant areas load less data and still show something. Untilted views read a single level, as does Mapbox without terrain, which exposes no public tile cover. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. On MapLibre the level is chosen per map tile, the way the map's own raster sources work: in a pitched view, tiles near the camera read a fine level and tiles towards the horizon read coarser ones, so distant areas load less data and still show something. Each tile shows exactly one level, its own once that has loaded under the whole tile and the best cached one until then, and each region is drawn only inside the tiles showing its level, so a translucent layer never doubles up where levels meet. Untilted views read a single level, as does Mapbox without terrain, which exposes no public tile cover. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## globe rendering and polar coverage
 
@@ -251,7 +251,7 @@ const layer = new ZarrLayer({
 layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
 ```
 
-Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile.
+Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile. The layer's own uniforms include the 33 vectors of its per-tile level clipping (32 clip boxes and their count), so budget a long array against what remains.
 
 ### NDVI example
 
