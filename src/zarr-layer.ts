@@ -302,9 +302,11 @@ export class ZarrLayer {
     // Mapbox caches each draped batch's texture and reuses it while the
     // source tiles are unchanged, so after the layer leaves or joins a batch
     // the cached texture still shows the old membership: stale draped pixels
-    // under the direct draw one way, a one-frame gap the other. It polls
-    // shouldRerenderTiles() on every visible custom layer, draped or not, and
-    // a true answer drops the whole cache before the next frame is batched.
+    // under the direct draw one way, a one-frame gap the other. Right after
+    // batching, Mapbox asks visible custom layers (draped or not, stopping at
+    // the first yes) whether they need a re-drape via shouldRerenderTiles(),
+    // and a yes drops the whole cache for that frame. A hidden layer keeps
+    // the flag until it is visible again.
     this.tileNeedsRender = true
     this.map?.triggerRepaint?.()
   }

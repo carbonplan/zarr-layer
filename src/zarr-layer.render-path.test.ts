@@ -204,24 +204,27 @@ async function addLayer(
   /**
    * The texture Mapbox caches for the draped batch this layer shares with
    * the basemap. It is reused frame to frame while the source tiles are
-   * unchanged; the only thing that drops it is a visible custom layer
-   * answering shouldRerenderTiles() with true, which Mapbox asks every custom
-   * layer, draped or not, right after batching.
+   * unchanged. Right after batching Mapbox asks visible custom layers, draped
+   * or not, whether they want a re-drape (shouldRerenderTiles(), stopping at
+   * the first yes); a yes drops the cache and disables caching for that
+   * frame, so the batch is drawn into temporary buffers and only the next
+   * frame's draw is cached again.
    */
   let drapedCache: { holdsLayer: boolean } | null = null
 
   /**
    * One Mapbox frame, in the order the painter runs it: the layer is sorted
    * into draped batches first (reading `renderToTile` once), the cache is
-   * dropped if the layer asks for a re-drape, then prerender runs in the
-   * offscreen pass, then the translucent pass either drapes the batch (from
-   * cache when it has one, otherwise tile by tile) or calls render. drawCustom
-   * re-reads `renderToTile` for each tile, so a layer that loses it mid-frame
-   * silently stops drawing.
+   * consulted as above, then prerender runs in the offscreen pass, then the
+   * translucent pass either drapes the batch (from cache when it has one,
+   * otherwise tile by tile) or calls render. drawCustom re-reads
+   * `renderToTile` for each tile, so a layer that loses it mid-frame silently
+   * stops drawing.
    */
   const frameLike = (tiles = 3) => {
     const draped = isDraped()
-    if (layer.shouldRerenderTiles()) drapedCache = null
+    const cachingDisabled = layer.shouldRerenderTiles()
+    if (cachingDisabled) drapedCache = null
     prerender()
     let tilesDrawn = 0
     let tilesSkipped = 0
@@ -236,10 +239,10 @@ async function addLayer(
             tilesSkipped++
           }
         }
-        drapedCache = { holdsLayer: tilesDrawn > 0 }
+        if (!cachingDisabled) drapedCache = { holdsLayer: tilesDrawn > 0 }
       }
     } else {
-      drapedCache ??= { holdsLayer: false }
+      if (!cachingDisabled) drapedCache ??= { holdsLayer: false }
       render()
       rendered = true
     }
