@@ -419,17 +419,16 @@ describe('per-tile level selection', () => {
           y1: boxes[i + 3],
         }
         expect(boundsIntersect(box, region.mercatorBounds!)).toBe(true)
-        // Boxes are uploaded as float32, so match the finer bounds loosely.
+        // A box is one row of finer regions merged along x. Boxes are
+        // uploaded as float32, so match the finer bounds loosely.
         const near = (a: number, b: number) => Math.abs(a - b) < 1e-6
-        expect(
-          fine.some(
-            (f) =>
-              near(f.mercatorBounds!.x0, box.x0) &&
-              near(f.mercatorBounds!.y0, box.y0) &&
-              near(f.mercatorBounds!.x1, box.x1) &&
-              near(f.mercatorBounds!.y1, box.y1)
-          )
-        ).toBe(true)
+        const row = fine.filter(
+          (f) =>
+            near(f.mercatorBounds!.y0, box.y0) &&
+            near(f.mercatorBounds!.y1, box.y1)
+        )
+        expect(row.some((f) => near(f.mercatorBounds!.x0, box.x0))).toBe(true)
+        expect(row.some((f) => near(f.mercatorBounds!.x1, box.x1))).toBe(true)
       }
     }
   })

@@ -68,8 +68,8 @@ out vec2 v_mercatorPos;
 out vec2 v_wgs84Pos;
 out vec2 v_clipPos;`
 
-/** Most regions of finer levels one draw can be clipped against. */
-export const MAX_CLIP_BOXES = 32
+/** Most boxes of finer data one draw can be clipped against. */
+export const MAX_CLIP_BOXES = 64
 
 /**
  * Fragment-side clip against finer data drawn over this region, so every

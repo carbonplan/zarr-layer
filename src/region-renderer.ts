@@ -122,6 +122,36 @@ const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 
+/**
+ * Merge boxes that share a row (same y extent) and touch along x into one,
+ * so a block of n by m finer regions costs m clip boxes rather than n by m.
+ */
+function mergeRows(boxes: MercatorBounds[]): number[][] {
+  const rows = new Map<string, MercatorBounds[]>()
+  for (const box of boxes) {
+    const row = `${box.y0}:${box.y1}`
+    const list = rows.get(row)
+    if (list) list.push(box)
+    else rows.set(row, [box])
+  }
+  const merged: number[][] = []
+  for (const list of rows.values()) {
+    list.sort((a, b) => a.x0 - b.x0)
+    let current = [list[0].x0, list[0].y0, list[0].x1, list[0].y1]
+    for (let i = 1; i < list.length; i++) {
+      const box = list[i]
+      if (box.x0 <= current[2] + 1e-9) {
+        current[2] = Math.max(current[2], box.x1)
+      } else {
+        merged.push(current)
+        current = [box.x0, box.y0, box.x1, box.y1]
+      }
+    }
+    merged.push(current)
+  }
+  return merged
+}
+
 export class RegionRenderer {
   isMultiscale: boolean = false
 
@@ -760,23 +790,24 @@ export class RegionRenderer {
       const bounds = region.mercatorBounds
       if (!bounds) continue
       const width = this.levelWidth(region.levelIndex)
-      const overlaps: Array<{ box: number[]; area: number }> = []
+      const finer: MercatorBounds[] = []
       for (let j = i + 1; j < regions.length; j++) {
-        const finer = regions[j]
-        const fb = finer.mercatorBounds
-        if (!fb || this.levelWidth(finer.levelIndex) <= width) continue
-        if (!boundsIntersect(bounds, fb)) continue
-        const area =
-          (Math.min(bounds.x1, fb.x1) - Math.max(bounds.x0, fb.x0)) *
-          (Math.min(bounds.y1, fb.y1) - Math.max(bounds.y0, fb.y0))
-        overlaps.push({ box: [fb.x0, fb.y0, fb.x1, fb.y1], area })
+        const fb = regions[j].mercatorBounds
+        if (!fb || this.levelWidth(regions[j].levelIndex) <= width) continue
+        if (boundsIntersect(bounds, fb)) finer.push(fb)
       }
-      if (overlaps.length === 0) continue
-      if (overlaps.length > MAX_CLIP_BOXES) {
-        overlaps.sort((a, b) => b.area - a.area)
-        overlaps.length = MAX_CLIP_BOXES
+      if (finer.length === 0) continue
+      const boxes = mergeRows(finer).map((box) => ({
+        box,
+        area:
+          (Math.min(bounds.x1, box[2]) - Math.max(bounds.x0, box[0])) *
+          (Math.min(bounds.y1, box[3]) - Math.max(bounds.y0, box[1])),
+      }))
+      if (boxes.length > MAX_CLIP_BOXES) {
+        boxes.sort((a, b) => b.area - a.area)
+        boxes.length = MAX_CLIP_BOXES
       }
-      clips.set(region.key, new Float32Array(overlaps.flatMap((o) => o.box)))
+      clips.set(region.key, new Float32Array(boxes.flatMap((b) => b.box)))
     }
     return clips
   }
