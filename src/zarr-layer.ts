@@ -33,7 +33,7 @@ import type {
   OnAuthError,
 } from './types'
 import type { RenderContext, TileId } from './renderer-types'
-import { RegionRenderer } from './region-renderer'
+import { RegionRenderer, type TileRequest } from './region-renderer'
 import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
   computeWorldOffsets,
@@ -52,6 +52,10 @@ import { ZarrLayerNotReadyError } from './errors'
 /** MapLibre's terrain tile ID. `wrap` is the world copy, which draws the
  *  same content as every other copy, so only `canonical` is used. */
 type TerrainTileID = { canonical: TileId; wrap?: number }
+
+/** Screen pixels per tile when asking the map for its tile cover, and the
+ *  size draped tiles are assumed to have when the map does not say. */
+const COVERING_TILE_SIZE = 512
 
 /** Scale-mismatch ratio beyond which a locked fixedDataScale is re-derived
  *  from the clim and cached tiles are re-normalized. Conservative: float32
@@ -842,7 +846,58 @@ export class ZarrLayer {
     if (!inRange) return
 
     this.syncProjectionState()
+    const cover = this.coveringTiles()
+    // MapLibre calls the terrain hook only while terrain is on; once it is
+    // off, the tiles it asked for last are no longer being drawn. Mapbox
+    // keeps calling renderToTile for draped tiles, so its tiles age out
+    // through the revision generations instead.
+    if (cover && !this.map.getTerrain?.()) this.regionRenderer.clearDrawnTiles()
+    this.regionRenderer.setCoveringTiles(cover)
     this.regionRenderer.update(this.map, this.gl)
+  }
+
+  /**
+   * The tiles the map draws this frame, each with the map zoom its pixel
+   * density matches, when the map exposes its tile cover (MapLibre does).
+   * Tilted, the cover reaches lower zooms towards the horizon, so the layer
+   * reads coarser levels there than at the center.
+   */
+  private coveringTiles(): TileRequest[] | null {
+    const map = this.map
+    if (!map?.coveringTiles) return null
+    return map
+      .coveringTiles({ tileSize: COVERING_TILE_SIZE })
+      .map(({ canonical }) => ({
+        tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
+        zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
+      }))
+  }
+
+  /**
+   * The map zoom whose pixel density a tile of this size matches. The map
+   * picks tile zoom floor(zoom + log2(512 / tileSize)) at the center, so the
+   * fractional part of the map zoom is carried over: a center tile maps back
+   * onto the map zoom itself, and a tile k zooms coarser onto zoom - k.
+   */
+  private tileZoom(z: number, tileSize: number): number {
+    const zoom = this.map?.getZoom?.() ?? z
+    const shift = Math.log2(512 / tileSize)
+    const target = zoom + shift
+    return z - shift + (target - Math.floor(target))
+  }
+
+  /** Tile size of the terrain source the map drapes onto, in pixels. */
+  private terrainTileSize(): number {
+    const terrain = this.map?.getTerrain?.() as
+      | { source?: string }
+      | null
+      | undefined
+    const source = terrain?.source
+      ? (this.map?.getSource?.(terrain.source) as
+          | { tileSize?: number }
+          | undefined)
+      : undefined
+    return source?.tileSize ?? COVERING_TILE_SIZE
   }
 
   render(
@@ -958,6 +1013,10 @@ export class ZarrLayer {
     this.configureMapboxRenderPath()
 
     const isGlobe = this.syncProjectionState()
+    this.regionRenderer.noteDrawnTile(
+      { tileId, zoom: this.tileZoom(tileId.z, COVERING_TILE_SIZE) },
+      this.terrainTileRevision
+    )
     this.regionRenderer.update(this.map, this.gl)
 
     this.tileNeedsRender = this.regionRenderer.renderToTile(
@@ -994,6 +1053,17 @@ export class ZarrLayer {
       return
     }
 
+    const needsFetch = this.regionRenderer.noteDrawnTile(
+      {
+        tileId: tileID.canonical,
+        zoom: this.tileZoom(tileID.canonical.z, this.terrainTileSize()),
+      },
+      this.terrainTileRevision
+    )
+    // MapLibre ran `prerender` before drawing this tile and schedules no
+    // frame after a tile redraw, so ask for one to fetch what the tile
+    // lacks. The revision stays put: that frame only needs the update.
+    if (needsFetch) this.map.triggerRepaint?.()
     this.regionRenderer.renderToTile(
       this.renderer,
       tileID.canonical,

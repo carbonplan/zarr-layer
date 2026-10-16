@@ -50,22 +50,52 @@ function gatedStore() {
   }
 }
 
-function fakeMap({ globe = false, zoom = 0 } = {}) {
-  const state = { globe, zoom }
+type Canonical = { z: number; x: number; y: number }
+type Bounds = [[number, number], [number, number]]
+const WORLD: Bounds = [
+  [-180, -85],
+  [180, 85],
+]
+/** A viewport inside the south-east region only. */
+const SOUTH_EAST: Bounds = [
+  [100, -80],
+  [170, -10],
+]
+
+function fakeMap({
+  globe = false,
+  zoom = 0,
+  terrain = true,
+  terrainTileSize,
+  cover,
+  bounds = WORLD,
+}: {
+  globe?: boolean
+  zoom?: number
+  terrain?: boolean
+  terrainTileSize?: number
+  cover?: Canonical[]
+  bounds?: Bounds
+} = {}) {
+  const state = { globe, zoom, terrain }
   const repaints: number[] = []
   const holder: { layer: ZarrLayer | null } = { layer: null }
 
   const map = {
     getProjection: () => ({ type: state.globe ? 'globe' : 'mercator' }),
-    getTerrain: () => ({ source: 'dem' }),
+    getTerrain: () => (state.terrain ? { source: 'dem' } : null),
+    getSource: (id: string) =>
+      id === 'dem' && terrainTileSize
+        ? { tileSize: terrainTileSize }
+        : undefined,
+    ...(cover
+      ? { coveringTiles: () => cover.map((canonical) => ({ canonical })) }
+      : {}),
     getZoom: () => state.zoom,
     getBounds: () => ({
-      getWest: () => -180,
-      getEast: () => 180,
-      toArray: () => [
-        [-180, -85],
-        [180, 85],
-      ],
+      getWest: () => bounds[0][0],
+      getEast: () => bounds[1][0],
+      toArray: () => bounds,
     }),
     getRenderWorldCopies: () => true,
     // Records the revision MapLibre would read when it handles the repaint.
@@ -80,7 +110,10 @@ function fakeMap({ globe = false, zoom = 0 } = {}) {
 }
 
 type Seam = { regionRenderer: RegionRenderer }
-type RendererInternals = { regionCache: RegionCache }
+type RendererInternals = {
+  regionCache: RegionCache
+  drawnTiles: Map<string, unknown>
+}
 
 /** Hop the macrotask queue until the condition holds. */
 async function waitFor(condition: () => boolean): Promise<void> {
@@ -90,7 +123,7 @@ async function waitFor(condition: () => boolean): Promise<void> {
 }
 
 async function addLayer(
-  mapOptions: { globe?: boolean; zoom?: number } = {},
+  mapOptions: Parameters<typeof fakeMap>[0] = {},
   layerOptions: {
     maxzoom?: number
     store?: { get(key: string): Promise<Uint8Array | undefined> }
@@ -139,7 +172,17 @@ async function addLayer(
       return true
     })
 
-  return { layer, gl, map, state, repaints, renderToTile, settled }
+  return {
+    layer,
+    gl,
+    map,
+    state,
+    repaints,
+    renderToTile,
+    regionRenderer,
+    internals,
+    settled,
+  }
 }
 
 const terrainTile = (
@@ -254,6 +297,79 @@ describe('terrainTileRevision', () => {
     expect(map.triggerRepaint).toHaveBeenCalled()
     layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
     expect(renderToTile.mock.results[1].value).toBe(false)
+  })
+})
+
+describe('per-tile levels', () => {
+  it('hands the map tile cover to the renderer with each tile at its zoom', async () => {
+    // A tile at the center zoom maps back onto the map zoom itself; a tile
+    // k zooms coarser maps onto zoom - k.
+    const { layer, gl, regionRenderer } = await addLayer({
+      zoom: 3.5,
+      terrain: false,
+      cover: [
+        { z: 3, x: 1, y: 1 },
+        { z: 1, x: 0, y: 0 },
+      ],
+    })
+    const setCoveringTiles = vi.spyOn(regionRenderer, 'setCoveringTiles')
+
+    layer.prerender(gl, {})
+
+    expect(setCoveringTiles).toHaveBeenCalledWith([
+      { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5 },
+      { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5 },
+    ])
+  })
+
+  it('maps terrain tiles through the terrain source tile size', async () => {
+    // A 256-pixel DEM source is covered one zoom deeper than a 512-pixel
+    // one, so its tiles map one zoom coarser back onto the map zoom.
+    const { layer, gl, regionRenderer } = await addLayer({
+      zoom: 3.5,
+      terrainTileSize: 256,
+    })
+    const noteDrawnTile = vi.spyOn(regionRenderer, 'noteDrawnTile')
+
+    layer.renderToTerrainTile(gl, terrainTile({ z: 4, x: 2, y: 3 }))
+
+    expect(noteDrawnTile).toHaveBeenCalledWith(
+      { tileId: { z: 4, x: 2, y: 3 }, zoom: 3.5 },
+      layer.terrainTileRevision
+    )
+  })
+
+  it('asks for a frame when a drawn tile needs regions, and not otherwise', async () => {
+    // MapLibre runs prerender before it draws tiles and schedules nothing
+    // after a tile redraw, so a draw that lacks data requests the frame
+    // whose prerender fetches it. The viewport covers the south-east region
+    // only; the zoom-3 tile (1, 1) lies inside the north-west one.
+    const { layer, gl, map, settled } = await addLayer({ bounds: SOUTH_EAST })
+    await settled()
+    vi.mocked(map.triggerRepaint!).mockClear()
+
+    layer.renderToTerrainTile(gl, terrainTile({ z: 3, x: 1, y: 1 }))
+    expect(map.triggerRepaint).toHaveBeenCalledTimes(1)
+
+    // The frame MapLibre schedules for that request.
+    layer.prerender(gl, {})
+    await settled()
+    vi.mocked(map.triggerRepaint!).mockClear()
+    layer.renderToTerrainTile(gl, terrainTile({ z: 3, x: 1, y: 1 }))
+    expect(map.triggerRepaint).not.toHaveBeenCalled()
+  })
+
+  it('forgets hook tiles once MapLibre terrain is off', async () => {
+    const { layer, gl, state, internals } = await addLayer({
+      cover: [{ z: 0, x: 0, y: 0 }],
+    })
+    layer.renderToTerrainTile(gl, terrainTile(WORLD_TILE))
+    expect(internals.drawnTiles.size).toBe(1)
+
+    state.terrain = false
+    layer.prerender(gl, {})
+
+    expect(internals.drawnTiles.size).toBe(0)
   })
 })
 

@@ -199,13 +199,24 @@ export class RegionCache {
     }
   }
 
+  /**
+   * Protect `visibleKeys`, plus previously protected keys that match none of
+   * the `retainKeysNotMatching` prefixes (an empty prefix matches every key,
+   * so `''` retains nothing).
+   */
   rebuildProtection(
     visibleKeys: Iterable<string>,
-    { retainKeysNotMatching }: { retainKeysNotMatching: string }
+    { retainKeysNotMatching }: { retainKeysNotMatching: string | string[] }
   ): void {
+    const prefixes =
+      typeof retainKeysNotMatching === 'string'
+        ? [retainKeysNotMatching]
+        : retainKeysNotMatching
     const nextProtected = new Set(visibleKeys)
     for (const key of this.protectedKeys) {
-      if (!key.startsWith(retainKeysNotMatching)) nextProtected.add(key)
+      if (!prefixes.some((prefix) => key.startsWith(prefix))) {
+        nextProtected.add(key)
+      }
     }
     this.protectedKeys = nextProtected
   }

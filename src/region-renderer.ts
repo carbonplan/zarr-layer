@@ -57,10 +57,14 @@ import {
   computeRegionMercatorBounds,
   getRegionBounds,
   getRegionSize,
+  getRegionsInBounds,
   getVisibleRegions,
   selectLevelForZoom,
+  type RegionCoordinate,
 } from './region-math'
+import { getTileLonLatBounds } from './tile-utils'
 import {
+  MAX_CACHED_REGIONS,
   RegionCache,
   hasRegionData,
   isRegionCpuReady,
@@ -94,6 +98,22 @@ import {
   setupBandTextureUniforms,
 } from './render-helpers'
 import { renderRegion, type RenderableRegion } from './renderable-region'
+
+/** A tile the map draws, with the map zoom its pixel density matches. */
+export interface TileRequest {
+  tileId: TileId
+  zoom: number
+}
+
+/**
+ * Regions one update may want in total. A dataset with no coarser level maps
+ * a far tile onto many regions of its only level; wanting more than the
+ * cache can hold would only make it thrash, so selection stops there,
+ * nearest tiles first.
+ */
+const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
+
+const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 
 export class RegionRenderer {
   isMultiscale: boolean = false
@@ -154,8 +174,22 @@ export class RegionRenderer {
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
   private regionCache = new RegionCache()
-  private lastVisibleRegions: Array<{ regionX: number; regionY: number }> = [] // Last computed visible regions
-  private lastVisibleRegionsLevel: number = -1 // Level index that lastVisibleRegions corresponds to
+  // Regions wanted by the last update, per level: fetched, protected and
+  // drawn. Each tile the map draws reads the level matching its zoom, so
+  // a pitched view wants coarser levels in the distance than near the camera.
+  private wantedRegions: Map<number, RegionCoordinate[]> = new Map()
+  private wantedKeys: Set<string> = new Set()
+  // The map's own tile cover for the frame, when the map exposes it.
+  private coveringTiles: TileRequest[] | null = null
+  // Tiles the draped render hooks were asked to draw, which on terrain reach
+  // past the sea-level cover. Kept in two generations keyed by the layer's
+  // terrain revision: a revision change redraws every visible tile, so the
+  // current generation refills with the whole visible set while the previous
+  // one still covers tiles drawn since. Older tiles drop out.
+  private drawnTiles: Map<string, TileRequest> = new Map()
+  private previousDrawnTiles: Map<string, TileRequest> = new Map()
+  private drawnTilesRevision: number | null = null
+  private tileRegionsMemo: Map<string, RegionCoordinate[]> = new Map()
   private lastViewportHash: string = ''
   private selectorVersion: number = 0 // Incremented on selector change to track stale regions
 
@@ -475,31 +509,148 @@ export class RegionRenderer {
   }
 
   /**
-   * Check if current level fully covers the visible viewport.
-   * Returns true only if every visible region is drawable right now — the
-   * decision releases the previous level's fallbacks, both from the render
-   * list and from eviction protection, so CPU-side readiness isn't enough.
+   * Whether every wanted region is drawable right now. The decision releases
+   * the fallbacks, both from the render list and from eviction protection,
+   * so CPU-side readiness isn't enough.
    */
-  private currentLevelCoversViewport(): boolean {
-    // If visible regions are stale (from different level), we can't know coverage
-    if (this.lastVisibleRegionsLevel !== (this.activeLevel?.index ?? -1)) {
-      return false
-    }
-    const levelIndex = this.activeLevel?.index ?? -1
-    for (const { regionX, regionY } of this.lastVisibleRegions) {
-      const key = this.makeRegionKey(levelIndex, regionX, regionY)
+  private wantedCovered(): boolean {
+    if (this.wantedKeys.size === 0) return false
+    const requiredBands = this.requiredBands()
+    const bandFormat = this.bandFormat()
+    for (const key of this.wantedKeys) {
       const region = this.regionCache.get(key)
       // A failed region is settled: nothing more will arrive for it, so it
       // must not hold the previous level's fallbacks on screen forever.
       if (region && isRegionFailed(region, this.selectorVersion)) continue
-      if (
-        !region ||
-        !isRegionGpuReady(region, this.requiredBands(), this.bandFormat())
-      ) {
+      if (!region || !isRegionGpuReady(region, requiredBands, bandFormat)) {
         return false
       }
     }
-    return this.lastVisibleRegions.length > 0
+    return true
+  }
+
+  /** The map's tile cover for this frame, or null when it has none to give. */
+  setCoveringTiles(tiles: TileRequest[] | null): void {
+    this.coveringTiles = tiles
+  }
+
+  /**
+   * Record a tile a draped render hook was asked to draw, so the next update
+   * wants the regions under it at the level matching its zoom. `revision` is
+   * the layer's terrain revision at draw time; a new revision starts a new
+   * generation. Returns true when the tile needs regions that are neither
+   * loaded nor queued, so the caller can ask for a frame: the map runs the
+   * update before it draws tiles, and schedules nothing after a tile redraw.
+   */
+  noteDrawnTile(tile: TileRequest, revision: number): boolean {
+    if (revision !== this.drawnTilesRevision) {
+      this.previousDrawnTiles = this.drawnTiles
+      this.drawnTiles = new Map()
+      this.drawnTilesRevision = revision
+    }
+    const key = tileKey(tile.tileId)
+    this.previousDrawnTiles.delete(key)
+    this.drawnTiles.set(key, tile)
+
+    const levelIndex = this.selectLevelForZoom(tile.zoom)
+    const runtime = this.levelLoader.runtime(levelIndex)
+    if (!runtime) return true
+    return this.tileRegions(levelIndex, runtime, tile.tileId).some((region) => {
+      const cached = this.regionCache.get(
+        this.makeRegionKey(levelIndex, region.regionX, region.regionY)
+      )
+      return !cached || (!hasRegionData(cached) && !cached.loading)
+    })
+  }
+
+  clearDrawnTiles(): void {
+    this.drawnTiles = new Map()
+    this.previousDrawnTiles = new Map()
+    this.drawnTilesRevision = null
+  }
+
+  /** Every tile the map is drawing, most detailed (nearest) first. */
+  private requestedTiles(): TileRequest[] {
+    const byKey = new Map<string, TileRequest>()
+    const add = (tile: TileRequest) => {
+      const key = tileKey(tile.tileId)
+      if (!byKey.has(key)) byKey.set(key, tile)
+    }
+    for (const tile of this.coveringTiles ?? []) add(tile)
+    for (const tile of this.drawnTiles.values()) add(tile)
+    for (const tile of this.previousDrawnTiles.values()) add(tile)
+    return [...byKey.values()].sort((a, b) => b.zoom - a.zoom)
+  }
+
+  /** Regions of a level under a tile; the tile grid and levels never move. */
+  private tileRegions(
+    levelIndex: number,
+    runtime: LevelRuntime,
+    tileId: TileId
+  ): RegionCoordinate[] {
+    const key = `${levelIndex}:${tileKey(tileId)}`
+    const memo = this.tileRegionsMemo.get(key)
+    if (memo) return memo
+    if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
+    const regions = getRegionsInBounds({
+      bounds: getTileLonLatBounds(tileId),
+      xyLimits: this.xyLimits,
+      levelMeta: runtime,
+      projection: this.projection,
+      latIsAscending: this.latIsAscending,
+    })
+    this.tileRegionsMemo.set(key, regions)
+    return regions
+  }
+
+  /**
+   * The regions to want this update, per level. With a tile cover, each tile
+   * reads the level matching its zoom; a level not yet open is opened for
+   * the next update. Without one (Mapbox without terrain), the viewport is
+   * read at the active level.
+   */
+  private selectWantedRegions(map: MapLike): Map<number, RegionCoordinate[]> {
+    const wanted = new Map<number, RegionCoordinate[]>()
+    const tiles = this.requestedTiles()
+    if (tiles.length === 0) {
+      const active = this.activeLevel
+      if (active) wanted.set(active.index, this.getVisibleRegions(map))
+      return wanted
+    }
+    const seen = new Set<string>()
+    for (const tile of tiles) {
+      const levelIndex = this.selectLevelForZoom(tile.zoom)
+      const runtime = this.levelLoader.runtime(levelIndex)
+      if (!runtime) {
+        void this.levelLoader.ensureRuntime(levelIndex)
+        continue
+      }
+      for (const region of this.tileRegions(levelIndex, runtime, tile.tileId)) {
+        const key = this.makeRegionKey(
+          levelIndex,
+          region.regionX,
+          region.regionY
+        )
+        if (seen.has(key)) continue
+        if (seen.size >= MAX_WANTED_REGIONS) return wanted
+        seen.add(key)
+        let regions = wanted.get(levelIndex)
+        if (!regions) {
+          regions = []
+          wanted.set(levelIndex, regions)
+        }
+        regions.push(region)
+      }
+    }
+    return wanted
+  }
+
+  /** Pixel width of a level, the order coarse-to-fine drawing sorts by. */
+  private levelWidth(levelIndex: number): number {
+    const runtime = this.levelLoader.runtime(levelIndex)
+    if (runtime) return runtime.width
+    const shape = this.levels[levelIndex]?.shape
+    return shape?.[this.dimIndices.lon?.index ?? shape.length - 1] ?? 0
   }
 
   /**
@@ -526,52 +677,41 @@ export class RegionRenderer {
   }
 
   /**
-   * Get fallback regions from other levels that are protected from eviction.
-   * These were visible before or during level transitions and provide
-   * coverage while the current level loads.
-   */
-  private getProtectedFallbackRegions(): RegionState[] {
-    const fallbacks: RegionState[] = []
-    for (const region of this.regionCache.values()) {
-      if (region.levelIndex === (this.activeLevel?.index ?? -1)) continue
-      if (!isRegionCpuReady(region)) continue
-      // Only include regions that are protected (were visible)
-      if (!this.regionCache.isProtected(region.key)) continue
-      fallbacks.push(region)
-    }
-    return fallbacks
-  }
-
-  /**
-   * Get drawable regions: current level regions plus fallbacks if needed.
-   * Uploads the current level first so coverage is judged on what can actually
-   * be drawn — a level that displaces its fallbacks and then fails to upload
-   * would leave the viewport blank. Every returned region is GPU-ready.
+   * Get drawable regions: the wanted regions plus fallbacks if needed, which
+   * are regions no longer wanted but still protected, kept from before a
+   * level or tile change until what is wanted can be drawn in full. Uploads
+   * the wanted regions first so coverage is judged on what can actually be
+   * drawn — regions that displace their fallbacks and then fail to upload
+   * would leave the viewport blank. Every returned region is GPU-ready, and
+   * coarser levels come first so finer data draws over them where both exist.
    */
   private getLoadedRegions(gl: WebGL2RenderingContext): RegionState[] {
-    const currentLevel = this.activeLevel?.index ?? -1
-    const currentLevelRegions: RegionState[] = []
-
     const requiredBands = this.requiredBands()
     const bandFormat = this.bandFormat()
-    for (const region of this.regionCache.values()) {
-      if (region.levelIndex !== currentLevel) continue
-      if (!isRegionCpuReady(region)) continue
-      if (!ensureRegionGpuResources(gl, region, requiredBands, bandFormat))
-        continue
-      currentLevelRegions.push(region)
+    const drawable = (region: RegionState | undefined): region is RegionState =>
+      !!region &&
+      isRegionCpuReady(region) &&
+      ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
+
+    const wanted: RegionState[] = []
+    for (const key of this.wantedKeys) {
+      const region = this.regionCache.get(key)
+      if (drawable(region)) wanted.push(region)
     }
 
-    if (this.currentLevelCoversViewport()) {
-      return currentLevelRegions
+    const regions = wanted
+    if (!this.wantedCovered()) {
+      const fallbacks: RegionState[] = []
+      for (const region of this.regionCache.values()) {
+        if (this.wantedKeys.has(region.key)) continue
+        if (!this.regionCache.isProtected(region.key)) continue
+        if (drawable(region)) fallbacks.push(region)
+      }
+      regions.unshift(...fallbacks)
     }
-
-    // Render order: fallbacks first (beneath), current level on top
-    const fallbackRegions = this.getProtectedFallbackRegions().filter(
-      (region) =>
-        ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
+    return regions.sort(
+      (a, b) => this.levelWidth(a.levelIndex) - this.levelWidth(b.levelIndex)
     )
-    return [...fallbackRegions, ...currentLevelRegions]
   }
 
   private getRegionBounds(
@@ -753,112 +893,108 @@ export class RegionRenderer {
    * need eviction protection until new level's regions are computed.
    */
   private resetVisibleRegions(): void {
-    this.lastVisibleRegions = []
-    this.lastVisibleRegionsLevel = -1
+    this.wantedRegions = new Map()
+    this.wantedKeys = new Set()
     this.lastViewportHash = ''
   }
 
   /**
-   * Update visible regions based on current viewport.
+   * Update the wanted regions from the map's tile cover (or its viewport)
+   * and fetch, protect and release accordingly.
    */
   private updateVisibleRegions(map: MapLike, gl: WebGL2RenderingContext): void {
-    const visible = this.getVisibleRegions(map)
-    this.lastVisibleRegions = visible
-    this.lastVisibleRegionsLevel = this.activeLevel?.index ?? -1
-    const levelIndex = this.activeLevel?.index ?? -1
+    const wanted = this.selectWantedRegions(map)
+    const wantedKeys = new Set<string>()
+    for (const [levelIndex, regions] of wanted) {
+      for (const { regionX, regionY } of regions) {
+        wantedKeys.add(this.makeRegionKey(levelIndex, regionX, regionY))
+      }
+    }
+    this.wantedRegions = wanted
+    this.wantedKeys = wantedKeys
 
-    const visibleKeys = new Set(
-      visible.map(({ regionX, regionY }) =>
-        this.makeRegionKey(levelIndex, regionX, regionY)
-      )
-    )
-
-    // Rebuild eviction protection from the current viewport: this level's
-    // visible regions, plus other-level regions kept as fallbacks until the
-    // current level covers the viewport. An empty result can be a transient
-    // state (map bounds or transformer unavailable), so keep the previous
-    // set rather than unprotect regions that are still rendered.
-    if (visible.length > 0) {
-      this.regionCache.rebuildProtection(visibleKeys, {
-        retainKeysNotMatching: this.currentLevelCoversViewport()
+    // Rebuild eviction protection from what is wanted, plus regions of other
+    // levels kept as fallbacks until the wanted set can be drawn in full. An
+    // empty result can be a transient state (map bounds or transformer
+    // unavailable, a level still opening), so keep the previous set rather
+    // than unprotect regions that are still rendered.
+    if (wantedKeys.size > 0) {
+      this.regionCache.rebuildProtection(wantedKeys, {
+        retainKeysNotMatching: this.wantedCovered()
           ? ''
-          : `${levelIndex}:`,
+          : [...wanted.keys()].map((levelIndex) => `${levelIndex}:`),
       })
     }
 
-    // Abort in-flight fetches for regions that left the viewport.
+    // Abort in-flight fetches for regions no longer wanted.
     // Only signal abort — the fetch's own catch/finally handles state cleanup.
     for (const [key, region] of this.regionCache) {
-      if (
-        region.loading &&
-        region.levelIndex === levelIndex &&
-        region.requestId !== null &&
-        !visibleKeys.has(key)
-      ) {
+      if (region.loading && region.requestId !== null && !wantedKeys.has(key)) {
         this.requestCanceller.controllers.get(region.requestId)?.abort()
       }
     }
     dropQueuedFetches(
       this.requestCanceller,
-      (fetch) => !visibleKeys.has(fetch.key)
+      (fetch) => !wantedKeys.has(fetch.key)
     )
 
-    // Separate regions into two categories:
+    // Per level, separate regions into two categories:
     // 1. New regions (no data) - viewport change
     // 2. Stale regions (have data, wrong selector) - selector change
-    const newRegions: Array<{ regionX: number; regionY: number }> = []
-    const staleRegions: Array<{ regionX: number; regionY: number }> = []
+    const hashParts: string[] = []
+    let dispatched = false
+    for (const [levelIndex, regions] of wanted) {
+      const newRegions: RegionCoordinate[] = []
+      const staleRegions: RegionCoordinate[] = []
+      for (const { regionX, regionY } of regions) {
+        const key = this.makeRegionKey(levelIndex, regionX, regionY)
+        const cached = this.regionCache.get(key)
 
-    for (const { regionX, regionY } of visible) {
-      const key = this.makeRegionKey(levelIndex, regionX, regionY)
-      const cached = this.regionCache.get(key)
+        // Skip if already loading - when the load completes, invalidate()
+        // triggers another updateVisibleRegions() check to see if refetch is needed
+        if (cached?.loading) {
+          continue
+        }
 
-      // Skip if already loading - when the load completes, invalidate() triggers
-      // another updateVisibleRegions() check to see if refetch is needed
-      if (cached?.loading) {
-        continue
+        if (!cached || !hasRegionData(cached)) {
+          if (cached && isRegionFailed(cached, this.selectorVersion)) continue
+          // No data yet - this is a new region (viewport change)
+          newRegions.push({ regionX, regionY })
+        } else if (cached.selectorVersion !== this.selectorVersion) {
+          // Has data but stale selector - this is a selector change
+          staleRegions.push({ regionX, regionY })
+        }
       }
-
-      if (!cached || !hasRegionData(cached)) {
-        if (cached && isRegionFailed(cached, this.selectorVersion)) continue
-        // No data yet - this is a new region (viewport change)
-        newRegions.push({ regionX, regionY })
-      } else if (cached.selectorVersion !== this.selectorVersion) {
-        // Has data but stale selector - this is a selector change
-        staleRegions.push({ regionX, regionY })
+      hashParts.push(
+        `${levelIndex}:${regions
+          .map((r) => `${r.regionX},${r.regionY}`)
+          .join('|')}`
+      )
+      if (newRegions.length > 0) {
+        this.fetchRegions(newRegions, levelIndex)
+        dispatched = true
+      }
+      if (staleRegions.length > 0) {
+        this.fetchRegions(staleRegions, levelIndex)
+        dispatched = true
       }
     }
 
-    // Check if viewport changed (include selectorVersion and level in hash)
-    const viewportHash = `${levelIndex}:${this.selectorVersion}:${visible
-      .map((r) => `${r.regionX},${r.regionY}`)
-      .join('|')}`
+    // Check if the wanted set changed (include selectorVersion in hash)
+    const viewportHash = `${this.selectorVersion}:${hashParts.join(';')}`
     const viewportChanged = viewportHash !== this.lastViewportHash
     this.lastViewportHash = viewportHash
 
-    // Skip if nothing to fetch. Still evict: fetches started on an earlier
-    // update have since landed, and their bytes count towards the budget.
-    if (
-      newRegions.length === 0 &&
-      staleRegions.length === 0 &&
-      !viewportChanged
-    ) {
-      this.evictOldRegions(gl)
-      return
-    }
-
-    if (newRegions.length > 0) {
-      this.fetchRegions(newRegions, levelIndex)
-    }
-    if (staleRegions.length > 0) {
-      this.fetchRegions(staleRegions, levelIndex)
-    }
-    // Queued regions start nearest the viewport center first.
-    if (visible.length > 1) {
-      const cx = visible.reduce((sum, r) => sum + r.regionX, 0) / visible.length
-      const cy = visible.reduce((sum, r) => sum + r.regionY, 0) / visible.length
+    // Queued regions start nearest the viewport center first, judged on the
+    // active level's regions.
+    const center = this.wantedRegions.get(this.activeLevel?.index ?? -1)
+    if ((dispatched || viewportChanged) && center && center.length > 1) {
+      const cx = center.reduce((sum, r) => sum + r.regionX, 0) / center.length
+      const cy = center.reduce((sum, r) => sum + r.regionY, 0) / center.length
       prioritizeQueuedFetches(this.requestCanceller, cx, cy)
     }
+    // Always evict: fetches started on an earlier update have since landed,
+    // and their bytes count towards the budget.
     this.evictOldRegions(gl)
   }
 
@@ -1212,6 +1348,9 @@ export class RegionRenderer {
         this.requestCanceller.controllers.get(region.requestId)?.abort()
       }
     }
+    // Other levels were opened against the old selector; they reopen on
+    // demand with the new one.
+    this.levelLoader.clearSecondaryRuntimes()
 
     // Rebuild the runtime with the new selector and atomic-swap. Going
     // through `loadLevel` bumps `loadToken`, so any in-flight level load

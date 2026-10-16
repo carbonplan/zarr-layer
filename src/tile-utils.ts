@@ -77,6 +77,29 @@ export function getTileBounds(tileId: TileId): {
 }
 
 /**
+ * Get the WGS84 extent of a tile.
+ *
+ * @param tileId - Tile coordinates (z, x, y)
+ * @returns Bounds in degrees
+ */
+export function getTileLonLatBounds(tileId: TileId): {
+  west: number
+  south: number
+  east: number
+  north: number
+} {
+  const { x0, y0, x1, y1 } = getTileBounds(tileId)
+  const toLat = (y: number) =>
+    (Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180) / Math.PI
+  return {
+    west: x0 * 360 - 180,
+    east: x1 * 360 - 180,
+    north: toLat(y0),
+    south: toLat(y1),
+  }
+}
+
+/**
  * Check if two bounds intersect.
  */
 export function boundsIntersect(

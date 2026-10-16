@@ -203,6 +203,11 @@ export interface MapLike {
   getProjection?(): { type?: unknown; name?: string } | null
   getRenderWorldCopies?(): boolean
   getTerrain?(): unknown
+  getSource?(id: string): unknown
+  /** MapLibre: the tiles covering the view for a tile size in screen pixels. */
+  coveringTiles?(options: {
+    tileSize: number
+  }): Array<{ canonical: { z: number; x: number; y: number } }>
   on?(event: string, handler: (...args: unknown[]) => void): void
   off?(event: string, handler: (...args: unknown[]) => void): void
   triggerRepaint?(): void

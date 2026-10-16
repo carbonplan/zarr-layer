@@ -68,6 +68,13 @@ function getChunkRegionSize(
   return null // No chunking or single chunk
 }
 
+export interface LonLatBounds {
+  west: number
+  south: number
+  east: number
+  north: number
+}
+
 export function getVisibleRegions({
   map,
   xyLimits,
@@ -82,7 +89,32 @@ export function getVisibleRegions({
   latIsAscending: boolean
 }): RegionCoordinate[] {
   const bounds = map.getBounds?.()?.toArray?.()
-  if (!bounds || !xyLimits || !levelMeta) return []
+  if (!bounds) return []
+  const [[west, south], [east, north]] = bounds
+  return getRegionsInBounds({
+    bounds: { west, south, east, north },
+    xyLimits,
+    levelMeta,
+    projection,
+    latIsAscending,
+  })
+}
+
+/** Regions of a level that overlap a WGS84 bounding box. */
+export function getRegionsInBounds({
+  bounds,
+  xyLimits,
+  levelMeta,
+  projection,
+  latIsAscending,
+}: {
+  bounds: LonLatBounds
+  xyLimits: XYLimits | null
+  levelMeta: LevelMeta | null
+  projection: ProjectionContext
+  latIsAscending: boolean
+}): RegionCoordinate[] {
+  if (!xyLimits || !levelMeta) return []
   if (!projection.def || !projection.toWGS84) {
     // No proj4 transformer was set up — either because the CRS isn't
     // one proj4js handles natively and no `proj4` prop was supplied
@@ -92,7 +124,7 @@ export function getVisibleRegions({
     return []
   }
   const { width, height, regionSize } = levelMeta
-  const [[west, south], [east, north]] = bounds
+  const { west, south, east, north } = bounds
   const [regionH, regionW] = regionSize
   // Candidate index math and the verification below must agree on the extent,
   // or a level placed against its own bounds can generate no candidates at all.
