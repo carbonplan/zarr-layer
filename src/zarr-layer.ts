@@ -208,6 +208,7 @@ export class ZarrLayer {
   private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
   private usingDirectMapboxGlobePath: boolean = false
+  private renderPathSwitchPending: boolean = false
   private mapboxRenderParametersSeen: boolean = false
 
   /** Latch whether this map hands the public render parameters (mapbox-gl >=
@@ -232,8 +233,30 @@ export class ZarrLayer {
     return this.mapboxRenderParametersSeen
   }
 
+  /** Mapbox sorts custom layers into draped batches at the start of every
+   *  frame, before prerender/render/renderToTile run, and only re-reads
+   *  `renderToTile` for the next frame. Flipping it from inside a callback
+   *  would leave this frame with a batch that no longer matches the layer and
+   *  nothing drawn, so the switch is applied on a microtask: Mapbox's frame is
+   *  synchronous, so that lands after the frame is drawn and before the next
+   *  one is batched. The decision is re-evaluated when it runs, so a stale
+   *  verdict is never applied. */
   private configureMapboxRenderPath(): void {
-    if (!this.map || !this.regionRenderer) return
+    if (this.renderPathSwitchPending) return
+    if (
+      this.shouldUseMapboxDirectGlobePath() === this.usingDirectMapboxGlobePath
+    )
+      return
+    this.renderPathSwitchPending = true
+    queueMicrotask(() => {
+      this.renderPathSwitchPending = false
+      if (this.isRemoved) return
+      this.applyMapboxRenderPath(this.shouldUseMapboxDirectGlobePath())
+    })
+  }
+
+  private shouldUseMapboxDirectGlobePath(): boolean {
+    if (!this.map || !this.regionRenderer) return false
 
     const resolvedProj4 = this.zarrStore?.proj4 ?? this.proj4
     const resolvedCrs = this.zarrStore?.crs ?? this.crs
@@ -253,30 +276,33 @@ export class ZarrLayer {
     // zoom morph window; that is intentional, and is currently more stable
     // than trying to carry the direct ECEF path through Mapbox's custom-layer
     // transition contract.
-    const shouldUseDirectGlobePath =
+    return (
       this.renderPoles &&
       isEcefEligible &&
       !this.map.getTerrain?.() &&
       isGlobe &&
       this.canUseMapboxDirectGlobePath() &&
       transition <= 1e-3
+    )
+  }
 
-    if (shouldUseDirectGlobePath === this.usingDirectMapboxGlobePath) return
-    this.usingDirectMapboxGlobePath = shouldUseDirectGlobePath
+  private applyMapboxRenderPath(useDirectGlobePath: boolean): void {
+    if (useDirectGlobePath === this.usingDirectMapboxGlobePath) return
+    this.usingDirectMapboxGlobePath = useDirectGlobePath
 
-    if (shouldUseDirectGlobePath) {
+    if (useDirectGlobePath) {
       Object.defineProperty(this, 'renderToTile', {
         value: undefined,
         configurable: true,
         writable: true,
       })
-      this.map.triggerRepaint?.()
+      this.map?.triggerRepaint?.()
     } else if (Object.prototype.hasOwnProperty.call(this, 'renderToTile')) {
       delete (this as { renderToTile?: unknown }).renderToTile
       // Re-entering the draped path requires fresh tile draws; otherwise Mapbox
       // can show a one-frame gap before renderToTile repopulates tile textures.
       this.tileNeedsRender = true
-      this.map.triggerRepaint?.()
+      this.map?.triggerRepaint?.()
     }
   }
 
