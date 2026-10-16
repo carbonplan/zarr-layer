@@ -38,7 +38,7 @@ Where these attributes are absent the layer falls back to what it always did: re
 
 ### Multiscales
 
-High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. On MapLibre the level is chosen per map tile, the way the map's own raster sources work: in a pitched view, tiles near the camera read a fine level and tiles towards the horizon read coarser ones, so distant areas load less data and still show something. Untilted views read a single level, as does Mapbox without terrain, which exposes no public tile cover. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## globe rendering and polar coverage
 
@@ -63,7 +63,7 @@ The layer drapes over 3D terrain on both providers, with no configuration needed
 
 **Mapbox** — Uses Mapbox's `renderToTile` tile draping.
 
-With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers.
+With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom, so a pitched view over terrain gets fine data near the camera and coarse data at the horizon rather than nothing.
 
 ## install
 
