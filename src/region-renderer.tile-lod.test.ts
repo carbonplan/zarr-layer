@@ -93,6 +93,14 @@ type Seam = {
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
 
+/** Latch a level as unresolvable under the current selector. */
+const failLevel = (renderer: RegionRenderer, levelIndex: number) =>
+  (
+    seam(renderer).levelLoader as unknown as {
+      selectorFailedLevels: Set<number>
+    }
+  ).selectorFailedLevels.add(levelIndex)
+
 type Box = { x0: number; y0: number; x1: number; y1: number }
 
 /** A draw's clip boxes back in absolute Mercator. */
@@ -509,6 +517,44 @@ describe('per-tile level selection', () => {
 
     const draws = seam(renderer).plannedDraws(gl)
     expect(draws.map((d) => d.region.key).sort()).toEqual(shown.slice(1).sort())
+  })
+
+  it('reads a tile from the nearest coarser level when its own cannot resolve', async () => {
+    // A level whose selector failed to resolve never opens under this
+    // selector. Waiting on it would hold fallbacks for ever; the tile reads
+    // the coarser level instead and counts as covered once that is drawn.
+    const { renderer, map, gl } = await rendererAtZoom(0)
+    failLevel(renderer, 1)
+
+    renderer.setCoveringTiles([NEAR, FAR])
+    renderer.update(map, gl)
+
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect(seam(renderer).pendingLevels.size).toBe(0)
+    // Level 0 column 8, row 12 lies under NEAR.
+    expect(wantedAt(renderer, 0)).toContain('8,12')
+
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+    renderer.update(map, gl)
+    expect(seam(renderer).wantedCovered()).toBe(true)
+  })
+
+  it('draws nothing for a tile no level can serve', async () => {
+    const { renderer, map, gl } = await rendererAtZoom(0)
+    failLevel(renderer, 0)
+
+    renderer.setCoveringTiles([FAR])
+    renderer.update(map, gl)
+
+    expect(seam(renderer).wantedKeys.size).toBe(0)
+    expect(seam(renderer).pendingLevels.size).toBe(0)
+    expect(renderer.noteDrawnTile(FAR, 1)).toBe(false)
+    expect(seam(renderer).planTile(FAR, () => true)).toEqual({
+      tile: FAR,
+      regions: [],
+      ready: true,
+    })
   })
 
   it('keeps a polar region as the fallback of a polar tile on the globe', async () => {

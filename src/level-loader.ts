@@ -89,6 +89,14 @@ export class LevelLoader {
    * null when the level cannot be had; a load that a selector change
    * overtakes resolves null too, and its result is dropped.
    */
+  /**
+   * Whether the level's selector failed to resolve: it cannot open until
+   * the selector changes, so nothing should wait on it.
+   */
+  levelFailed(levelIndex: number): boolean {
+    return this.selectorFailedLevels.has(levelIndex)
+  }
+
   ensureRuntime(levelIndex: number): Promise<LevelRuntime | null> {
     const existing = this.runtimes.get(levelIndex)
     if (existing) return Promise.resolve(existing)

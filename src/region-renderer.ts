@@ -574,7 +574,8 @@ export class RegionRenderer {
     this.previousDrawnTiles.delete(key)
     this.drawnTiles.set(key, tile)
 
-    const levelIndex = this.selectLevelForZoom(tile.zoom)
+    const levelIndex = this.resolveLevel(tile.zoom)
+    if (levelIndex === null) return false
     const runtime = this.levelLoader.runtime(levelIndex)
     if (!runtime) return true
     return this.tileRegions(levelIndex, runtime, tile.tileId).some((region) => {
@@ -648,7 +649,8 @@ export class RegionRenderer {
     }> = []
     let total = 0
     for (const tile of tiles) {
-      const levelIndex = this.selectLevelForZoom(tile.zoom)
+      const levelIndex = this.resolveLevel(tile.zoom)
+      if (levelIndex === null) continue
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) {
         void this.levelLoader.ensureRuntime(levelIndex)
@@ -756,6 +758,28 @@ export class RegionRenderer {
   }
 
   /**
+   * The level a tile reads: the one its zoom selects or, when that level's
+   * selector failed to resolve, the nearest coarser level that did not.
+   * Null when no level can serve the tile, which then draws nothing.
+   */
+  private resolveLevel(zoom: number): number | null {
+    let levelIndex = this.selectLevelForZoom(zoom)
+    while (this.levelLoader.levelFailed(levelIndex)) {
+      const width = this.levelWidth(levelIndex)
+      let coarser: number | null = null
+      for (let i = 0; i < this.levels.length; i++) {
+        const w = this.levelWidth(i)
+        if (w < width && (coarser === null || w > this.levelWidth(coarser))) {
+          coarser = i
+        }
+      }
+      if (coarser === null) return null
+      levelIndex = coarser
+    }
+    return levelIndex
+  }
+
+  /**
    * What one tile shows: its own level once every region under it is
    * drawable, else the one cached level that serves it best meanwhile.
    * `fallbackDrawable` may be looser than `drawable` when judging what to
@@ -766,7 +790,8 @@ export class RegionRenderer {
     drawable: (region: RegionState) => boolean,
     fallbackDrawable = drawable
   ): TileDraw {
-    const levelIndex = this.selectLevelForZoom(tile.zoom)
+    const levelIndex = this.resolveLevel(tile.zoom)
+    if (levelIndex === null) return { tile, regions: [], ready: true }
     const runtime = this.levelLoader.runtime(levelIndex)
     if (runtime) {
       const regions: RegionState[] = []
