@@ -200,13 +200,19 @@ export class RegionCache {
   }
 
   /**
-   * Protect `visibleKeys`, plus previously protected keys that match none of
-   * the `retainKeysNotMatching` prefixes (an empty prefix matches every key,
-   * so `''` retains nothing).
+   * Protect `visibleKeys`, plus previously protected keys that `retain`
+   * keeps, or, without it, that match none of the `retainKeysNotMatching`
+   * prefixes (an empty prefix matches every key, so `''` retains nothing).
    */
   rebuildProtection(
     visibleKeys: Iterable<string>,
-    { retainKeysNotMatching }: { retainKeysNotMatching: string | string[] }
+    {
+      retainKeysNotMatching = '',
+      retain,
+    }: {
+      retainKeysNotMatching?: string | string[]
+      retain?: (key: string) => boolean
+    }
   ): void {
     const prefixes =
       typeof retainKeysNotMatching === 'string'
@@ -214,9 +220,10 @@ export class RegionCache {
         : retainKeysNotMatching
     const nextProtected = new Set(visibleKeys)
     for (const key of this.protectedKeys) {
-      if (!prefixes.some((prefix) => key.startsWith(prefix))) {
-        nextProtected.add(key)
-      }
+      const keep = retain
+        ? retain(key)
+        : !prefixes.some((prefix) => key.startsWith(prefix))
+      if (keep) nextProtected.add(key)
     }
     this.protectedKeys = nextProtected
   }

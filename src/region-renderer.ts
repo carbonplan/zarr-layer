@@ -62,7 +62,12 @@ import {
   selectLevelForZoom,
   type RegionCoordinate,
 } from './region-math'
-import { getTileLonLatBounds } from './tile-utils'
+import {
+  boundsIntersect,
+  getTileBounds,
+  getTileLonLatBounds,
+} from './tile-utils'
+import { MAX_CLIP_BOXES } from './shaders'
 import {
   MAX_CACHED_REGIONS,
   RegionCache,
@@ -103,6 +108,8 @@ import { renderRegion, type RenderableRegion } from './renderable-region'
 export interface TileRequest {
   tileId: TileId
   zoom: number
+  /** Extend a polar edge tile to the pole: the globe draws there. */
+  poles?: boolean
 }
 
 /**
@@ -179,6 +186,10 @@ export class RegionRenderer {
   // a pitched view wants coarser levels in the distance than near the camera.
   private wantedRegions: Map<number, RegionCoordinate[]> = new Map()
   private wantedKeys: Set<string> = new Set()
+  // Levels tiles asked for that are still opening, and those tiles: part
+  // of the view has no regions to want yet, so it is not covered.
+  private pendingLevels: Set<number> = new Set()
+  private pendingTiles: TileId[] = []
   // The map's own tile cover for the frame, when the map exposes it.
   private coveringTiles: TileRequest[] | null = null
   // Tiles the draped render hooks were asked to draw, which on terrain reach
@@ -514,7 +525,7 @@ export class RegionRenderer {
    * so CPU-side readiness isn't enough.
    */
   private wantedCovered(): boolean {
-    if (this.wantedKeys.size === 0) return false
+    if (this.wantedKeys.size === 0 || this.pendingLevels.size > 0) return false
     const requiredBands = this.requiredBands()
     const bandFormat = this.bandFormat()
     for (const key of this.wantedKeys) {
@@ -586,14 +597,15 @@ export class RegionRenderer {
   private tileRegions(
     levelIndex: number,
     runtime: LevelRuntime,
-    tileId: TileId
+    tileId: TileId,
+    toPoles = false
   ): RegionCoordinate[] {
-    const key = `${levelIndex}:${tileKey(tileId)}`
+    const key = `${levelIndex}:${toPoles ? 'p' : 'm'}:${tileKey(tileId)}`
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
     const regions = getRegionsInBounds({
-      bounds: getTileLonLatBounds(tileId),
+      bounds: getTileLonLatBounds(tileId, { toPoles }),
       xyLimits: this.xyLimits,
       levelMeta: runtime,
       projection: this.projection,
@@ -611,21 +623,48 @@ export class RegionRenderer {
    */
   private selectWantedRegions(map: MapLike): Map<number, RegionCoordinate[]> {
     const wanted = new Map<number, RegionCoordinate[]>()
+    this.pendingLevels = new Set()
+    this.pendingTiles = []
     const tiles = this.requestedTiles()
     if (tiles.length === 0) {
       const active = this.activeLevel
       if (active) wanted.set(active.index, this.getVisibleRegions(map))
       return wanted
     }
-    const seen = new Set<string>()
+    const perTile: Array<{
+      levelIndex: number
+      runtime: LevelRuntime
+      regions: RegionCoordinate[]
+    }> = []
+    let total = 0
     for (const tile of tiles) {
       const levelIndex = this.selectLevelForZoom(tile.zoom)
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) {
         void this.levelLoader.ensureRuntime(levelIndex)
+        this.pendingLevels.add(levelIndex)
+        this.pendingTiles.push(tile.tileId)
         continue
       }
-      for (const region of this.tileRegions(levelIndex, runtime, tile.tileId)) {
+      const regions = this.tileRegions(
+        levelIndex,
+        runtime,
+        tile.tileId,
+        tile.poles
+      )
+      perTile.push({ levelIndex, runtime, regions })
+      total += regions.length
+    }
+    // Nearest tiles come first already. When the cap will bite, order each
+    // tile's regions by distance from the map center too, so a single tile
+    // spanning many regions cannot spend the budget on its far corner.
+    const truncating = total > MAX_WANTED_REGIONS
+    const seen = new Set<string>()
+    for (const { levelIndex, runtime, regions } of perTile) {
+      const ordered = truncating
+        ? this.nearestCenterFirst(regions, runtime, map)
+        : regions
+      for (const region of ordered) {
         const key = this.makeRegionKey(
           levelIndex,
           region.regionX,
@@ -634,15 +673,112 @@ export class RegionRenderer {
         if (seen.has(key)) continue
         if (seen.size >= MAX_WANTED_REGIONS) return wanted
         seen.add(key)
-        let regions = wanted.get(levelIndex)
-        if (!regions) {
-          regions = []
-          wanted.set(levelIndex, regions)
+        let list = wanted.get(levelIndex)
+        if (!list) {
+          list = []
+          wanted.set(levelIndex, list)
         }
-        regions.push(region)
+        list.push(region)
       }
     }
     return wanted
+  }
+
+  /** Regions ordered by their distance from the map center, in degrees. */
+  private nearestCenterFirst(
+    regions: RegionCoordinate[],
+    runtime: LevelRuntime,
+    map: MapLike
+  ): RegionCoordinate[] {
+    const center = map.getCenter?.()
+    const bounds = map.getBounds?.()?.toArray?.()
+    const lng = center?.lng ?? (bounds ? (bounds[0][0] + bounds[1][0]) / 2 : 0)
+    const lat = center?.lat ?? (bounds ? (bounds[0][1] + bounds[1][1]) / 2 : 0)
+    const inverse = this.projection.toWGS84?.inverse
+    const distance = (region: RegionCoordinate) => {
+      const b = this.getRegionBounds(region.regionX, region.regionY, runtime)
+      const xMid = (b.xMin + b.xMax) / 2
+      const yMid = (b.yMin + b.yMax) / 2
+      const [lon, latitude] = inverse ? inverse(xMid, yMid) : [xMid, yMid]
+      let dLon = ((lon - lng + 540) % 360) - 180
+      if (!Number.isFinite(dLon)) dLon = 180
+      const dLat = Number.isFinite(latitude) ? latitude - lat : 180
+      return dLon * dLon + dLat * dLat
+    }
+    return regions
+      .map((region) => ({ region, d: distance(region) }))
+      .sort((a, b) => a.d - b.d)
+      .map(({ region }) => region)
+  }
+
+  /**
+   * Areas (normalized Mercator) still waiting for wanted data: wanted regions
+   * not yet drawable, and tiles whose level is still opening. Fallbacks
+   * overlapping them are kept until the replacement can be drawn.
+   */
+  private pendingAreas(): Array<{
+    x0: number
+    y0: number
+    x1: number
+    y1: number
+  }> {
+    const areas: Array<{ x0: number; y0: number; x1: number; y1: number }> = []
+    const requiredBands = this.requiredBands()
+    const bandFormat = this.bandFormat()
+    for (const [levelIndex, regions] of this.wantedRegions) {
+      const runtime = this.levelLoader.runtime(levelIndex)
+      if (!runtime) continue
+      for (const region of regions) {
+        const cached = this.regionCache.get(
+          this.makeRegionKey(levelIndex, region.regionX, region.regionY)
+        )
+        if (cached && isRegionGpuReady(cached, requiredBands, bandFormat)) {
+          continue
+        }
+        areas.push(
+          cached?.mercatorBounds ??
+            this.computeRegionMercatorBounds(
+              this.getRegionBounds(region.regionX, region.regionY, runtime)
+            )
+        )
+      }
+    }
+    for (const tileId of this.pendingTiles) areas.push(getTileBounds(tileId))
+    return areas
+  }
+
+  /**
+   * For each drawn region, the bounds of finer regions drawn after it that
+   * overlap it, as fragment clip boxes: each pixel then shows exactly one
+   * level, the finest drawn there, whatever the layer opacity. More than
+   * MAX_CLIP_BOXES overlaps keep the largest.
+   */
+  private clipBoxesFor(regions: RegionState[]): Map<string, Float32Array> {
+    const clips = new Map<string, Float32Array>()
+    for (let i = 0; i < regions.length; i++) {
+      const region = regions[i]
+      const bounds = region.mercatorBounds
+      if (!bounds) continue
+      const width = this.levelWidth(region.levelIndex)
+      const overlaps: Array<{ box: number[]; area: number }> = []
+      for (let j = i + 1; j < regions.length; j++) {
+        const finer = regions[j]
+        const fb = finer.mercatorBounds
+        if (!fb || this.levelWidth(finer.levelIndex) <= width) continue
+        if (!boundsIntersect(bounds, fb)) continue
+        const area =
+          (Math.min(bounds.x1, fb.x1) - Math.max(bounds.x0, fb.x0)) *
+          (Math.min(bounds.y1, fb.y1) - Math.max(bounds.y0, fb.y0))
+        overlaps.push({ box: [fb.x0, fb.y0, fb.x1, fb.y1], area })
+      }
+      if (overlaps.length === 0) continue
+      if (overlaps.length > MAX_CLIP_BOXES) {
+        overlaps.sort((a, b) => b.area - a.area)
+        overlaps.length = MAX_CLIP_BOXES
+      }
+      clips.set(region.key, new Float32Array(overlaps.flatMap((o) => o.box)))
+    }
+    return clips
   }
 
   /** Pixel width of a level, the order coarse-to-fine drawing sorts by. */
@@ -895,6 +1031,8 @@ export class RegionRenderer {
   private resetVisibleRegions(): void {
     this.wantedRegions = new Map()
     this.wantedKeys = new Set()
+    this.pendingLevels = new Set()
+    this.pendingTiles = []
     this.lastViewportHash = ''
   }
 
@@ -913,16 +1051,22 @@ export class RegionRenderer {
     this.wantedRegions = wanted
     this.wantedKeys = wantedKeys
 
-    // Rebuild eviction protection from what is wanted, plus regions of other
-    // levels kept as fallbacks until the wanted set can be drawn in full. An
-    // empty result can be a transient state (map bounds or transformer
-    // unavailable, a level still opening), so keep the previous set rather
-    // than unprotect regions that are still rendered.
-    if (wantedKeys.size > 0) {
+    // Rebuild eviction protection from what is wanted, plus regions kept as
+    // fallbacks: ones no longer wanted whose area is still waiting for its
+    // replacement to become drawable. A region whose area is already
+    // replaced, or wanted elsewhere, is released at once. An empty result
+    // with nothing pending is a transient state (map bounds or transformer
+    // unavailable), so keep the previous set rather than unprotect regions
+    // that are still rendered.
+    if (wantedKeys.size > 0 || this.pendingTiles.length > 0) {
+      const pending = this.wantedCovered() ? [] : this.pendingAreas()
       this.regionCache.rebuildProtection(wantedKeys, {
-        retainKeysNotMatching: this.wantedCovered()
-          ? ''
-          : [...wanted.keys()].map((levelIndex) => `${levelIndex}:`),
+        retain: (key) => {
+          const bounds = this.regionCache.get(key)?.mercatorBounds
+          return (
+            !!bounds && pending.some((area) => boundsIntersect(area, bounds))
+          )
+        },
       })
     }
 
@@ -1224,11 +1368,16 @@ export class RegionRenderer {
     setupBandTextureUniforms(gl, shaderProgram)
 
     // Render each loaded region using unified path
-    for (const region of this.getLoadedRegions(gl)) {
+    const regions = this.getLoadedRegions(gl)
+    const clips = this.clipBoxesFor(regions)
+    for (const region of regions) {
       renderRegion(
         gl,
         shaderProgram,
-        this.regionToRenderable(region),
+        {
+          ...this.regionToRenderable(region),
+          clipBoxes: clips.get(region.key),
+        },
         worldOffsets,
         customShaderConfig,
         eyeMatrix
@@ -1273,7 +1422,9 @@ export class RegionRenderer {
       return []
     }
 
-    return this.getLoadedRegions(gl).map((region) => ({
+    const regions = this.getLoadedRegions(gl)
+    const clips = this.clipBoxesFor(regions)
+    return regions.map((region) => ({
       texture: region.texture,
       vertexBuffer: region.vertexBuffer!,
       pixCoordBuffer: region.pixCoordBuffer!,
@@ -1287,6 +1438,7 @@ export class RegionRenderer {
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,
       latIsAscending: region.latIsAscending,
+      clipBoxes: clips.get(region.key),
     }))
   }
 

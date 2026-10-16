@@ -77,12 +77,17 @@ export function getTileBounds(tileId: TileId): {
 }
 
 /**
- * Get the WGS84 extent of a tile.
+ * Get the WGS84 extent of a tile. Mercator tiles stop at ±85.05°; with
+ * `toPoles`, a tile on the polar edge of the grid extends to ±90°, the way
+ * a globe's cover reaches the poles.
  *
  * @param tileId - Tile coordinates (z, x, y)
  * @returns Bounds in degrees
  */
-export function getTileLonLatBounds(tileId: TileId): {
+export function getTileLonLatBounds(
+  tileId: TileId,
+  { toPoles = false }: { toPoles?: boolean } = {}
+): {
   west: number
   south: number
   east: number
@@ -91,11 +96,12 @@ export function getTileLonLatBounds(tileId: TileId): {
   const { x0, y0, x1, y1 } = getTileBounds(tileId)
   const toLat = (y: number) =>
     (Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180) / Math.PI
+  const lastRow = 2 ** tileId.z - 1
   return {
     west: x0 * 360 - 180,
     east: x1 * 360 - 180,
-    north: toLat(y0),
-    south: toLat(y1),
+    north: toPoles && tileId.y === 0 ? 90 : toLat(y0),
+    south: toPoles && tileId.y === lastRow ? -90 : toLat(y1),
   }
 }
 

@@ -212,6 +212,7 @@ export interface MapLike {
   off?(event: string, handler: (...args: unknown[]) => void): void
   triggerRepaint?(): void
   getBounds?(): BoundsLike | null
+  getCenter?(): { lng: number; lat: number }
   getZoom?(): number
   painter?: { context?: { gl?: unknown } }
   renderer?: { getContext?: () => unknown }
