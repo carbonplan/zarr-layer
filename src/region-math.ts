@@ -107,12 +107,15 @@ export function getRegionsInBounds({
   levelMeta,
   projection,
   latIsAscending,
+  strict = false,
 }: {
   bounds: LonLatBounds
   xyLimits: XYLimits | null
   levelMeta: LevelMeta | null
   projection: ProjectionContext
   latIsAscending: boolean
+  /** Require a positive-width overlap: a region touching an edge is out. */
+  strict?: boolean
 }): RegionCoordinate[] {
   if (!xyLimits || !levelMeta) return []
   if (!projection.def || !projection.toWGS84) {
@@ -191,11 +194,13 @@ export function getRegionsInBounds({
       regSouth = Math.min(regSouth, lat)
       regNorth = Math.max(regNorth, lat)
     }
+    const latOverlaps = strict
+      ? regNorth > south && regSouth < north
+      : regNorth >= south && regSouth <= north
     if (
       hasValid &&
-      lonRangeOverlaps(west, east, regWest, regEast) &&
-      regNorth >= south &&
-      regSouth <= north
+      lonRangeOverlaps(west, east, regWest, regEast, strict) &&
+      latOverlaps
     ) {
       regions.push({ regionX, regionY })
     }

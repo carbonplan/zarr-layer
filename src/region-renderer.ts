@@ -131,9 +131,6 @@ const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 const MIN_VIEWPORT_TILES = 16
 const MAX_VIEWPORT_TILE_ZOOM = 24
 
-/** Degrees a tile is shrunk by when deciding which regions it shows. */
-const TILE_EDGE_INSET = 1e-7
-
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 const requestKey = (tile: TileRequest) =>
   `${tileKey(tile.tileId)}@${tile.wrap ?? 'all'}`
@@ -589,7 +586,7 @@ export class RegionRenderer {
     if (levelIndex === null) return false
     const runtime = this.levelLoader.runtime(levelIndex)
     if (!runtime) return true
-    return this.tileRegions(levelIndex, runtime, tile.tileId).some((region) => {
+    return this.tileRegions(levelIndex, runtime, tile).some((region) => {
       const cached = this.regionCache.get(
         this.makeRegionKey(levelIndex, region.regionX, region.regionY)
       )
@@ -620,28 +617,21 @@ export class RegionRenderer {
   private tileRegions(
     levelIndex: number,
     levelMeta: LevelMeta,
-    tileId: TileId,
-    toPoles = false
+    { tileId, poles }: TileRequest
   ): RegionCoordinate[] {
-    const key = `${levelIndex}:${toPoles ? 'p' : 'm'}:${tileKey(tileId)}`
+    const key = `${levelIndex}:${poles ? 'p' : 'm'}:${tileKey(tileId)}`
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
-    // Shrunk by a hair: region overlap is edge-inclusive, and a region whose
-    // edge lies on the tile's edge shows nothing in it. Owning it would make
-    // the tile fetch it and wait on it for nothing.
-    const b = getTileLonLatBounds(tileId, { toPoles })
+    // Strictly: a region whose edge lies on the tile's edge shows nothing in
+    // it, and owning it would make the tile fetch it and wait on it.
     const regions = getRegionsInBounds({
-      bounds: {
-        west: b.west + TILE_EDGE_INSET,
-        south: b.south + TILE_EDGE_INSET,
-        east: b.east - TILE_EDGE_INSET,
-        north: b.north - TILE_EDGE_INSET,
-      },
+      bounds: getTileLonLatBounds(tileId, { toPoles: poles }),
       xyLimits: this.xyLimits,
       levelMeta,
       projection: this.projection,
       latIsAscending: this.latIsAscending,
+      strict: true,
     })
     this.tileRegionsMemo.set(key, regions)
     return regions
@@ -735,12 +725,7 @@ export class RegionRenderer {
         this.pendingLevels.add(levelIndex)
         continue
       }
-      const regions = this.tileRegions(
-        levelIndex,
-        runtime,
-        tile.tileId,
-        tile.poles
-      )
+      const regions = this.tileRegions(levelIndex, runtime, tile)
       perTile.push({ levelIndex, runtime, regions })
       total += regions.length
     }
@@ -881,12 +866,7 @@ export class RegionRenderer {
     while (levelIndex !== null) {
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) return levelIndex
-      const count = this.tileRegions(
-        levelIndex,
-        runtime,
-        tile.tileId,
-        tile.poles
-      ).length
+      const count = this.tileRegions(levelIndex, runtime, tile).length
       if (count <= MAX_WANTED_REGIONS) return levelIndex
       const coarser = this.usableLevel(this.coarserLevel(levelIndex))
       if (coarser === null) return levelIndex
@@ -909,7 +889,7 @@ export class RegionRenderer {
     if (runtime) {
       const regions: RegionState[] = []
       let ready = true
-      const own = this.tileRegions(levelIndex, runtime, tile.tileId, tile.poles)
+      const own = this.tileRegions(levelIndex, runtime, tile)
       for (const { regionX, regionY } of own) {
         const cached = this.regionCache.get(
           this.makeRegionKey(levelIndex, regionX, regionY)
@@ -961,9 +941,8 @@ export class RegionRenderer {
       const meta = regions[0].levelMeta
       const complete =
         !!meta &&
-        this.tileRegions(levelIndex, meta, tile.tileId, tile.poles).every(
-          ({ regionX, regionY }) =>
-            keys.has(this.makeRegionKey(levelIndex, regionX, regionY))
+        this.tileRegions(levelIndex, meta, tile).every(({ regionX, regionY }) =>
+          keys.has(this.makeRegionKey(levelIndex, regionX, regionY))
         )
       let covered = 0
       for (const { mercatorBounds: b } of regions) {

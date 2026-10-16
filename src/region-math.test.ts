@@ -5,6 +5,7 @@ import {
   getCandidateRegions,
   getRegionBounds,
   getRegionSize,
+  getRegionsInBounds,
   getVisibleRegions,
   longitudeWorldFraction,
   selectLevelForZoom,
@@ -547,6 +548,61 @@ describe('computeRegionMercatorBounds', () => {
     expect(computeRegionMercatorBounds(meters, p3857)).toEqual(
       boundsToMercatorNorm(meters, 'EPSG:3857')
     )
+  })
+})
+
+describe('getRegionsInBounds strict overlap', () => {
+  const projection = createProjectionContext({
+    crs: 'EPSG:4326',
+    proj4def: null,
+    xyLimits: WORLD,
+  })
+  const levelMeta = {
+    width: 360,
+    height: 180,
+    regionSize: [90, 90] as [number, number],
+  }
+  const keysIn = (bounds: {
+    west: number
+    south: number
+    east: number
+    north: number
+  }) =>
+    getRegionsInBounds({
+      bounds,
+      xyLimits: WORLD,
+      levelMeta,
+      projection,
+      latIsAscending: false,
+      strict: true,
+    })
+      .map((r) => `${r.regionX},${r.regionY}`)
+      .sort()
+
+  it('leaves out a region that only touches an edge', () => {
+    // The 90° columns meet at 0°: a box ending exactly there shows nothing
+    // of the column east of it.
+    expect(keysIn({ west: -45, south: -45, east: 0, north: 0 })).toEqual([
+      '1,1',
+    ])
+  })
+
+  it('keeps a region crossing an edge by a hair', () => {
+    // A region reaching 5e-8° past the seam is in: a fixed inset would
+    // have left a sliver nobody draws.
+    expect(keysIn({ west: -45, south: -45, east: 5e-8, north: 0 })).toEqual([
+      '1,1',
+      '2,1',
+    ])
+  })
+
+  it('applies the same rule across the antimeridian', () => {
+    expect(keysIn({ west: 170, south: -45, east: 180, north: 0 })).toEqual([
+      '3,1',
+    ])
+    expect(
+      keysIn({ west: 170, south: -45, east: 180.00000005, north: 0 })
+    ).toEqual(['0,1', '3,1'])
   })
 })
 
