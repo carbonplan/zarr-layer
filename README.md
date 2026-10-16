@@ -44,9 +44,9 @@ High resolution datasets require multiscales. Chunks are loaded based on viewpor
 
 Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For EPSG:4326 and `proj4` datasets:
 
-**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed.
+**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed. The exception is terrain: with terrain enabled the layer is draped as Mercator tiles and the poles show holes (see [terrain](#terrain)).
 
-**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path. Switching between the draped and direct paths relies on undocumented Mapbox behaviour (a custom layer is draped whenever it exposes `renderToTile`), which may change across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with draping the zarr layer over Mapbox terrain — when terrain is enabled the layer always uses the draped tile path.
+**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path. Switching between the draped and direct paths relies on undocumented Mapbox behaviour (a custom layer is draped whenever it exposes `renderToTile`), which may change across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with terrain — when terrain is enabled the layer always uses the draped tile path.
 
 ```ts
 new ZarrLayer({
@@ -54,6 +54,16 @@ new ZarrLayer({
   renderPoles: true, // Mapbox only — MapLibre always renders to the poles
 })
 ```
+
+## terrain
+
+The layer drapes over 3D terrain on both providers, with no configuration needed: enable terrain on the map (`map.setTerrain(...)`) and the layer follows the terrain surface.
+
+**MapLibre** — Uses MapLibre's experimental `renderToTerrainTile` custom-layer hook, which requires maplibre-gl 6.13 or later. On older versions the layer still draws, but flat, without following the terrain.
+
+**Mapbox** — Uses Mapbox's `renderToTile` tile draping.
+
+With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers.
 
 ## install
 
