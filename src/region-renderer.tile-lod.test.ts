@@ -579,6 +579,29 @@ describe('per-tile level selection', () => {
     expect(seam(renderer).wantedCovered()).toBe(true)
   })
 
+  it('keeps fetching the coarser level when the centre level cannot resolve', async () => {
+    // The map zoom selects the failed level. Were that still the desired
+    // level, the update would wait for it to open and never fetch; the
+    // centre resolves to the coarser level instead, with and without a
+    // tile cover.
+    const { renderer, gl } = await rendererAtZoom(0)
+    failLevel(renderer, 1)
+    const fine = viewportAt(1)
+
+    renderer.setCoveringTiles([NEAR])
+    renderer.update(fine, gl)
+    expect(seam(renderer).activeLevel?.index).toBe(0)
+    expect(wantedAt(renderer, 0)).toContain('8,12')
+    await settle(renderer)
+    const cached = seam(renderer).regionCache.get(makeRegionKey(0, 8, 12))
+    expect(cached && hasRegionData(cached)).toBe(true)
+
+    renderer.setCoveringTiles(null)
+    renderer.update(fine, gl)
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect(wantedAt(renderer, 0).length).toBeGreaterThan(0)
+  })
+
   it('draws nothing for a tile no level can serve', async () => {
     const { renderer, map, gl } = await rendererAtZoom(0)
     failLevel(renderer, 0)

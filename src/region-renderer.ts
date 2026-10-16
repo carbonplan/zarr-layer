@@ -1375,7 +1375,11 @@ export class RegionRenderer {
     // Pick target: zoom-selected for multiscale, single level otherwise.
     if (this.isMultiscale && this.levels.length > 0) {
       const mapZoom = map.getZoom?.() ?? 0
-      this.desiredLevelIndex = this.selectLevelForZoom(mapZoom)
+      // A level whose selector failed cannot open, and `update` fetches
+      // nothing until the active level matches the desired one, so the
+      // centre reads the same coarser level its tiles fall back to.
+      this.desiredLevelIndex =
+        this.resolveLevel(mapZoom) ?? this.selectLevelForZoom(mapZoom)
     } else {
       this.desiredLevelIndex = 0
     }
