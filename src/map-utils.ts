@@ -7,6 +7,10 @@
 
 import { MERCATOR_LAT_LIMIT, WEB_MERCATOR_EXTENT } from './constants'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
+import {
+  parseMapboxRenderParameters,
+  type MapboxRenderParameters,
+} from './mapbox-globe-matrix'
 import type { ProjectionData, ShaderData } from './shaders'
 import type { MapLike } from './types'
 
@@ -248,6 +252,8 @@ interface ProjectionResolution {
         projection: { name: string }
         globeToMercatorMatrix: number[] | Float32Array | Float64Array
         transition: number
+        /** Public view/projection matrices; present on mapbox-gl >= 3.32. */
+        renderParameters?: MapboxRenderParameters
       }
     | undefined
 }
@@ -256,7 +262,8 @@ export function resolveProjectionParams(
   params: unknown,
   projection?: { name: string },
   projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
-  projectionToMercatorTransition?: number
+  projectionToMercatorTransition?: number,
+  renderParameters?: unknown
 ): ProjectionResolution {
   type MatrixLike = number[] | Float32Array | Float64Array
   type ProjectionParams = {
@@ -343,6 +350,7 @@ export function resolveProjectionParams(
           typeof projectionToMercatorTransition === 'number'
             ? projectionToMercatorTransition
             : 1, // Default to mercator (transition=1) when not in globe mode
+        renderParameters: parseMapboxRenderParameters(renderParameters),
       }
     : undefined
 
