@@ -296,14 +296,17 @@ export class ZarrLayer {
         configurable: true,
         writable: true,
       })
-      this.map?.triggerRepaint?.()
     } else if (Object.prototype.hasOwnProperty.call(this, 'renderToTile')) {
       delete (this as { renderToTile?: unknown }).renderToTile
-      // Re-entering the draped path requires fresh tile draws; otherwise Mapbox
-      // can show a one-frame gap before renderToTile repopulates tile textures.
-      this.tileNeedsRender = true
-      this.map?.triggerRepaint?.()
     }
+    // Mapbox caches each draped batch's texture and reuses it while the
+    // source tiles are unchanged, so after the layer leaves or joins a batch
+    // the cached texture still shows the old membership: stale draped pixels
+    // under the direct draw one way, a one-frame gap the other. It polls
+    // shouldRerenderTiles() on every visible custom layer, draped or not, and
+    // a true answer drops the whole cache before the next frame is batched.
+    this.tileNeedsRender = true
+    this.map?.triggerRepaint?.()
   }
 
   get fillValue(): number | null {

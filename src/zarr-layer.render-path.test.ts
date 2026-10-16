@@ -202,35 +202,64 @@ async function addLayer(
   const isDraped = () => typeof layer.renderToTile === 'function'
 
   /**
+   * The texture Mapbox caches for the draped batch this layer shares with
+   * the basemap. It is reused frame to frame while the source tiles are
+   * unchanged; the only thing that drops it is a visible custom layer
+   * answering shouldRerenderTiles() with true, which Mapbox asks every custom
+   * layer, draped or not, right after batching.
+   */
+  let drapedCache: { holdsLayer: boolean } | null = null
+
+  /**
    * One Mapbox frame, in the order the painter runs it: the layer is sorted
-   * into draped batches first (reading `renderToTile` once), then prerender
-   * runs in the offscreen pass, then the translucent pass either drapes it
-   * tile by tile or calls render. drawCustom re-reads `renderToTile` for each
-   * tile, so a layer that loses it mid-frame silently stops drawing.
+   * into draped batches first (reading `renderToTile` once), the cache is
+   * dropped if the layer asks for a re-drape, then prerender runs in the
+   * offscreen pass, then the translucent pass either drapes the batch (from
+   * cache when it has one, otherwise tile by tile) or calls render. drawCustom
+   * re-reads `renderToTile` for each tile, so a layer that loses it mid-frame
+   * silently stops drawing.
    */
   const frameLike = (tiles = 3) => {
     const draped = isDraped()
+    if (layer.shouldRerenderTiles()) drapedCache = null
     prerender()
     let tilesDrawn = 0
     let tilesSkipped = 0
     let rendered = false
     if (draped) {
-      for (let i = 0; i < tiles; i++) {
-        if (typeof layer.renderToTile === 'function') {
-          layer.renderToTile(gl, { z: 1, x: i, y: 0 })
-          tilesDrawn++
-        } else {
-          tilesSkipped++
+      if (!drapedCache) {
+        for (let i = 0; i < tiles; i++) {
+          if (typeof layer.renderToTile === 'function') {
+            layer.renderToTile(gl, { z: 1, x: i, y: 0 })
+            tilesDrawn++
+          } else {
+            tilesSkipped++
+          }
         }
+        drapedCache = { holdsLayer: tilesDrawn > 0 }
       }
     } else {
+      drapedCache ??= { holdsLayer: false }
       render()
       rendered = true
     }
     return { draped, tilesDrawn, tilesSkipped, rendered }
   }
 
-  return { layer, map, state, emit, isDraped, prerender, frameLike }
+  /** True when the frame just drawn showed the layer both in the cached
+   *  draped texture and through its own direct draw. */
+  const doubleDrawn = () => !isDraped() && drapedCache?.holdsLayer === true
+
+  return {
+    layer,
+    map,
+    state,
+    emit,
+    isDraped,
+    prerender,
+    frameLike,
+    doubleDrawn,
+  }
 }
 
 /** Let the layer's deferred render-path switch run (it lands on a microtask
@@ -462,6 +491,55 @@ describe('render-path switches never split a Mapbox frame', () => {
       tilesDrawn: 0,
       tilesSkipped: 0,
       rendered: true,
+    })
+  })
+})
+
+describe('switching paths invalidates the shared draped batch cache', () => {
+  // Crossing the zoom-morph threshold changes which path the layer takes but
+  // not the tile coverage, so Mapbox keeps the cached batch texture unless
+  // the layer asks for a re-drape.
+
+  /** Draw draped frames until Mapbox would be serving the batch from cache. */
+  const settleDrapedCache = async (
+    frameLike: () => { draped: boolean; tilesDrawn: number }
+  ) => {
+    for (let i = 0; i < 50; i++) {
+      const frame = frameLike()
+      if (frame.draped && frame.tilesDrawn === 0) return
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    throw new Error('draped cache never settled')
+  }
+
+  it('drops the cached texture that still holds the layer when it goes direct', async () => {
+    const { state, emit, frameLike, doubleDrawn } = await addLayer({
+      globe: true,
+      zoom: 5.5,
+    })
+    await settleDrapedCache(frameLike)
+
+    state.zoom = 4
+    emit('move')
+    await settle()
+    expect(frameLike().rendered).toBe(true)
+    // Otherwise the stale draped pixels sit under the direct draw.
+    expect(doubleDrawn()).toBe(false)
+  })
+
+  it('redraws the batch with the layer when it goes back to draped', async () => {
+    const { state, emit, frameLike } = await addLayer({ globe: true, zoom: 4 })
+    expect(frameLike().rendered).toBe(true)
+
+    state.zoom = 5.5
+    emit('move')
+    await settle()
+    // A reused texture would be the one drawn without the layer: a gap.
+    expect(frameLike()).toEqual({
+      draped: true,
+      tilesDrawn: 3,
+      tilesSkipped: 0,
+      rendered: false,
     })
   })
 })
