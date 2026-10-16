@@ -847,11 +847,14 @@ export class ZarrLayer {
 
     this.syncProjectionState()
     const cover = this.coveringTiles()
-    // MapLibre calls the terrain hook only while terrain is on; once it is
-    // off, the tiles it asked for last are no longer being drawn. Mapbox
-    // keeps calling renderToTile for draped tiles, so its tiles age out
-    // through the revision generations instead.
-    if (cover && !this.map.getTerrain?.()) this.regionRenderer.clearDrawnTiles()
+    // Tiles the draped hooks asked for are only being drawn while the map
+    // drapes the layer: MapLibre with terrain, Mapbox with terrain or on its
+    // draped globe. Off that path the map draws the layer directly and the
+    // tiles would otherwise go on steering selection.
+    const draped =
+      !!this.map.getTerrain?.() ||
+      (!cover && this.isGlobeProjection() && !this.usingDirectMapboxGlobePath)
+    if (!draped) this.regionRenderer.clearDrawnTiles()
     this.regionRenderer.setCoveringTiles(cover)
     this.regionRenderer.update(this.map, this.gl)
   }
@@ -865,11 +868,15 @@ export class ZarrLayer {
   private coveringTiles(): TileRequest[] | null {
     const map = this.map
     if (!map?.coveringTiles) return null
+    // Drawn directly on the globe, the layer reaches the poles, so the
+    // cover's polar edge tiles must too; draped tiles stay Mercator.
+    const poles = this.isGlobeProjection() && !map.getTerrain?.()
     return map
       .coveringTiles({ tileSize: COVERING_TILE_SIZE })
       .map(({ canonical }) => ({
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
+        poles,
       }))
   }
 
@@ -886,7 +893,10 @@ export class ZarrLayer {
     return z - shift + (target - Math.floor(target))
   }
 
-  /** Tile size of the terrain source the map drapes onto, in pixels. */
+  /**
+   * Screen size of the tiles the map covers its terrain with: MapLibre
+   * covers at twice the terrain source's tile size.
+   */
   private terrainTileSize(): number {
     const terrain = this.map?.getTerrain?.() as
       | { source?: string }
@@ -897,7 +907,7 @@ export class ZarrLayer {
           | { tileSize?: number }
           | undefined)
       : undefined
-    return source?.tileSize ?? COVERING_TILE_SIZE
+    return source?.tileSize ? source.tileSize * 2 : COVERING_TILE_SIZE
   }
 
   render(

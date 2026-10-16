@@ -317,26 +317,69 @@ describe('per-tile levels', () => {
     layer.prerender(gl, {})
 
     expect(setCoveringTiles).toHaveBeenCalledWith([
-      { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5 },
-      { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5 },
+      { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5, poles: false },
+      { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5, poles: false },
     ])
   })
 
-  it('maps terrain tiles through the terrain source tile size', async () => {
-    // A 256-pixel DEM source is covered one zoom deeper than a 512-pixel
-    // one, so its tiles map one zoom coarser back onto the map zoom.
+  it('extends the cover to the poles when drawn directly on the globe', async () => {
+    // Drawn on the globe the layer reaches the poles, which Mercator tiles
+    // stop short of; draped terrain tiles stay Mercator.
+    const { layer, gl, state, regionRenderer } = await addLayer({
+      globe: true,
+      terrain: false,
+      cover: [{ z: 1, x: 0, y: 0 }],
+    })
+    const setCoveringTiles = vi.spyOn(regionRenderer, 'setCoveringTiles')
+
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[0][0]?.[0].poles).toBe(true)
+
+    state.terrain = true
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[1][0]?.[0].poles).toBe(false)
+  })
+
+  it('maps terrain tiles through twice the terrain source tile size', async () => {
+    // MapLibre covers its terrain at twice the source's tile size, so with a
+    // 256-pixel DEM the terrain tiles are the 512-pixel cover and a center
+    // tile maps straight back onto the map zoom.
     const { layer, gl, regionRenderer } = await addLayer({
       zoom: 3.5,
       terrainTileSize: 256,
     })
     const noteDrawnTile = vi.spyOn(regionRenderer, 'noteDrawnTile')
 
-    layer.renderToTerrainTile(gl, terrainTile({ z: 4, x: 2, y: 3 }))
+    layer.renderToTerrainTile(gl, terrainTile({ z: 3, x: 2, y: 3 }))
 
     expect(noteDrawnTile).toHaveBeenCalledWith(
-      { tileId: { z: 4, x: 2, y: 3 }, zoom: 3.5 },
+      { tileId: { z: 3, x: 2, y: 3 }, zoom: 3.5 },
       layer.terrainTileRevision
     )
+  })
+
+  it('forgets hook tiles once Mapbox stops draping the layer', async () => {
+    // Mapbox exposes no tile cover; it drapes the layer with terrain and on
+    // its globe, and draws it directly otherwise. Tiles asked for while
+    // draped must not go on steering selection after that.
+    const { layer, gl, state, internals } = await addLayer()
+    layer.renderToTile(gl, { z: 2, x: 1, y: 1 })
+    expect(internals.drawnTiles.size).toBe(1)
+
+    state.terrain = false
+    layer.prerender(gl, {})
+    expect(internals.drawnTiles.size).toBe(0)
+
+    // The draped globe keeps them until the direct globe path takes over.
+    state.globe = true
+    layer.renderToTile(gl, { z: 2, x: 1, y: 1 })
+    layer.prerender(gl, {})
+    expect(internals.drawnTiles.size).toBe(1)
+    ;(
+      layer as unknown as { usingDirectMapboxGlobePath: boolean }
+    ).usingDirectMapboxGlobePath = true
+    layer.prerender(gl, {})
+    expect(internals.drawnTiles.size).toBe(0)
   })
 
   it('asks for a frame when a drawn tile needs regions, and not otherwise', async () => {
