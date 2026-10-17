@@ -116,11 +116,12 @@ export interface TileRequest {
    */
   wrap?: number
   /**
-   * The part of the tile the map shows, for a tile synthesised from the
-   * viewport: regions elsewhere in the tile are not its concern. East may
-   * run past 180 for a viewport that does.
+   * The parts of the tile the map shows, for a tile synthesised from the
+   * viewport: regions elsewhere in the tile are not its concern. Longitudes
+   * follow the viewport's, which may run past ±180; a viewport nearly a
+   * turn wide can meet one tile at both ends, giving two parts.
    */
-  extent?: LonLatBounds
+  extents?: LonLatBounds[]
 }
 
 /**
@@ -141,21 +142,22 @@ const MAX_VIEWPORT_TILE_ZOOM = 24
 const wrapLon = (lon: number) => ((((lon + 180) % 360) + 360) % 360) - 180
 
 /**
- * The part of a tile's longitude range inside a viewport's, which may run
- * past 180 or start west of it; null when none.
+ * The parts of a tile's longitude range inside a viewport's, which may run
+ * past ±180, west to east: one per world copy of the tile the viewport meets.
  */
 function intersectLon(
   tileWest: number,
   tileEast: number,
   west: number,
   east: number
-): [number, number] | null {
-  for (const shift of [0, 360, -360]) {
+): Array<[number, number]> {
+  const parts: Array<[number, number]> = []
+  for (const shift of [-360, 0, 360]) {
     const a = Math.max(tileWest + shift, west)
     const b = Math.min(tileEast + shift, east)
-    if (a < b) return [a, b]
+    if (a < b) parts.push([a, b])
   }
-  return null
+  return parts
 }
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
@@ -644,27 +646,38 @@ export class RegionRenderer {
   private tileRegions(
     levelIndex: number,
     levelMeta: LevelMeta,
-    { tileId, poles, extent }: TileRequest
+    { tileId, poles, extents }: TileRequest
   ): RegionCoordinate[] {
-    const extentKey = extent
-      ? `:${extent.west},${extent.south},${extent.east},${extent.north}`
-      : ''
+    const extentKey = (extents ?? [])
+      .map((e) => `:${e.west},${e.south},${e.east},${e.north}`)
+      .join('')
     const key = `${levelIndex}:${poles ? 'p' : 'm'}:${tileKey(
       tileId
     )}${extentKey}`
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
-    // Strictly: a region whose edge lies on the tile's edge shows nothing in
-    // it, and owning it would make the tile fetch it and wait on it.
-    const regions = getRegionsInBounds({
-      bounds: extent ?? getTileLonLatBounds(tileId, { toPoles: poles }),
-      xyLimits: this.xyLimits,
-      levelMeta,
-      projection: this.projection,
-      latIsAscending: this.latIsAscending,
-      strict: true,
-    })
+    const regions: RegionCoordinate[] = []
+    const seen = new Set<string>()
+    for (const bounds of extents ?? [
+      getTileLonLatBounds(tileId, { toPoles: poles }),
+    ]) {
+      // Strictly: a region whose edge lies on the tile's edge shows nothing
+      // in it, and owning it would make the tile fetch it and wait on it.
+      for (const region of getRegionsInBounds({
+        bounds,
+        xyLimits: this.xyLimits,
+        levelMeta,
+        projection: this.projection,
+        latIsAscending: this.latIsAscending,
+        strict: true,
+      })) {
+        const regionKey = `${region.regionX},${region.regionY}`
+        if (seen.has(regionKey)) continue
+        seen.add(regionKey)
+        regions.push(region)
+      }
+    }
     this.tileRegionsMemo.set(key, regions)
     return regions
   }
@@ -672,7 +685,7 @@ export class RegionRenderer {
   /**
    * A tile cover for the viewport when the map gives none (Mapbox without
    * terrain): the coarsest tiles that split the viewport into at least
-   * MIN_VIEWPORT_TILES, each cut down to the part of it the viewport shows
+   * MIN_VIEWPORT_TILES, each cut down to the parts of it the viewport shows
    * so selection stays exactly the viewport's regions, each read at the map
    * zoom, nearest the centre first. Empty without map bounds.
    */
@@ -715,21 +728,23 @@ export class RegionRenderer {
         for (let y = y0; y <= y1; y++) {
           const tileId = { z, x, y }
           const b = getTileLonLatBounds(tileId, { toPoles: poles })
-          const lon =
+          const lons: Array<[number, number]> =
             span >= 360
-              ? [b.west, b.east]
+              ? [[b.west, b.east]]
               : intersectLon(b.west, b.east, west, east)
-          const extent = lon && {
-            west: lon[0],
-            east: lon[1],
-            south: Math.max(b.south, south),
-            north: Math.min(b.north, north),
-          }
-          if (!extent || extent.south >= extent.north) continue
+          const tileSouth = Math.max(b.south, south)
+          const tileNorth = Math.min(b.north, north)
+          if (lons.length === 0 || tileSouth >= tileNorth) continue
+          const extents = lons.map(([lonWest, lonEast]) => ({
+            west: lonWest,
+            east: lonEast,
+            south: tileSouth,
+            north: tileNorth,
+          }))
           const dLon = wrapLon((b.west + b.east) / 2 - center.lng)
           const dLat = (b.south + b.north) / 2 - center.lat
           tiles.push({
-            tile: { tileId, zoom, poles, extent },
+            tile: { tileId, zoom, poles, extents },
             d: dLon * dLon + dLat * dLat,
           })
         }

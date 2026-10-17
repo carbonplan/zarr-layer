@@ -183,9 +183,25 @@ async function waitForRuntime(
   }
 }
 
-async function makeRenderer({ single = false, wide = false } = {}) {
+async function makeRenderer({
+  single = false,
+  wide = false,
+  strips = false,
+} = {}) {
   // `wide`: a global single level of 64x64 regions, 5.625 degrees each.
-  const memory = wide
+  // `strips`: a global single level of 72 pole-to-pole regions, 5° wide.
+  const memory = strips
+    ? buildMemoryZarrStore({
+        arrays: [
+          {
+            name: 'temperature',
+            shape: [2, 144],
+            chunkShape: [2, 2],
+            dimensionNames: ['lat', 'lon'],
+          },
+        ],
+      })
+    : wide
     ? buildMemoryZarrStore({
         arrays: [
           {
@@ -831,6 +847,42 @@ describe('per-tile level selection', () => {
       .sort()
     expect(viewport.length).toBeGreaterThan(0)
     expect([...seam(renderer).wantedKeys].sort()).toEqual(viewport)
+  })
+
+  it('selects every visible region of a viewport meeting a tile at both ends', async () => {
+    // A view about 355° wide meets the tile column 0°–90° at both ends:
+    // [-280, -270] is 80°–90° a turn west, and [0, 75] is the column itself.
+    // The tile must own the regions under both parts.
+    const { renderer, gl } = await makeRenderer({ strips: true })
+    for (const [west, east] of [
+      [-280, 75],
+      [80, 435],
+    ]) {
+      const map = mapAt(west, -85, east, 85, 2)
+      renderer.update(map, gl)
+      await waitForActive(renderer, 0)
+      renderer.setCoveringTiles(null)
+      renderer.update(map, gl)
+
+      const tiles = seam(renderer).viewportTiles(map)
+      const ids = tiles.map((t) => `${t.tileId.z}/${t.tileId.x}/${t.tileId.y}`)
+      expect(new Set(ids).size).toBe(ids.length)
+
+      const runtime = seam(renderer).levelLoader.runtime(0)!
+      const visible = getRegionsInBounds({
+        bounds: { west, south: -85, east, north: 85 },
+        xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+        levelMeta: runtime,
+        projection: seam(renderer).projection,
+        latIsAscending: false,
+        strict: true,
+      })
+        .map((r) => makeRegionKey(0, r.regionX, r.regionY))
+        .sort()
+      expect(visible.length).toBe(71)
+      expect([...seam(renderer).wantedKeys].sort()).toEqual(visible)
+      await settle(renderer)
+    }
   })
 
   it('falls back to the viewport at the active level without a tile cover', async () => {
