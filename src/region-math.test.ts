@@ -13,6 +13,7 @@ import {
 } from './region-math'
 import { createProjectionContext } from './projection-utils'
 import { boundsToMercatorNorm } from './map-utils'
+import { getTileLonLatBounds } from './tile-utils'
 import type { ResolutionLevel } from './types'
 
 /**
@@ -603,6 +604,77 @@ describe('getRegionsInBounds strict overlap', () => {
     expect(
       keysIn({ west: 170, south: -45, east: 180.00000005, north: 0 })
     ).toEqual(['0,1', '3,1'])
+  })
+})
+
+describe('getRegionsInBounds strict overlap in EPSG:3857', () => {
+  // A global 32768-pixel web-mercator raster of 256-pixel regions: 128 per
+  // axis, so a zoom-4 tile holds 8 by 8 of them, their edges on its seams.
+  const E = 20037508.342789244
+  const levelMeta = {
+    width: 32768,
+    height: 32768,
+    regionSize: [256, 256] as [number, number],
+  }
+  const regionsIn = (tile: { z: number; x: number; y: number }, shift = 0) => {
+    const xyLimits = {
+      xMin: -E + shift,
+      xMax: E + shift,
+      yMin: -E + shift,
+      yMax: E + shift,
+    }
+    const regions = getRegionsInBounds({
+      bounds: getTileLonLatBounds(tile),
+      xyLimits,
+      levelMeta,
+      projection: createProjectionContext({
+        crs: 'EPSG:3857',
+        proj4def: null,
+        xyLimits,
+      }),
+      latIsAscending: false,
+      strict: true,
+    })
+    return {
+      count: regions.length,
+      columns: [...new Set(regions.map((r) => r.regionX))].sort(
+        (a, b) => a - b
+      ),
+      rows: [...new Set(regions.map((r) => r.regionY))].sort((a, b) => a - b),
+    }
+  }
+  const range = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => from + i)
+
+  it('leaves out neighbours whose edges land on the seams', () => {
+    // Projected back, an aligned edge lands a rounding error across the
+    // seam (-157.50000000000003° against -157.5°); that is no overlap.
+    expect(regionsIn({ z: 4, x: 0, y: 0 })).toEqual({
+      count: 64,
+      columns: range(0, 7),
+      rows: range(0, 7),
+    })
+    expect(regionsIn({ z: 4, x: 1, y: 0 })).toEqual({
+      count: 64,
+      columns: range(8, 15),
+      rows: range(0, 7),
+    })
+  })
+
+  it('keeps a region crossing a seam by a hair', () => {
+    // Shifted 5e-8° of longitude east and north, column 7 reaches past
+    // -157.5° and row 8 past the row seam: each tile they cross owns them.
+    const shift = (5e-8 / 180) * E
+    expect(regionsIn({ z: 4, x: 0, y: 0 }, shift)).toEqual({
+      count: 72,
+      columns: range(0, 7),
+      rows: range(0, 8),
+    })
+    expect(regionsIn({ z: 4, x: 1, y: 0 }, shift)).toEqual({
+      count: 81,
+      columns: range(7, 15),
+      rows: range(0, 8),
+    })
   })
 })
 

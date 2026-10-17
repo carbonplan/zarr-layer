@@ -68,6 +68,13 @@ function getChunkRegionSize(
   return null // No chunking or single chunk
 }
 
+/**
+ * Overlap in degrees a strict test needs: far above the float error of a
+ * projected region edge landing on a tile seam (about 1e-13°), far below a
+ * pixel at zoom 24 even where Mercator stretches latitude near its limit.
+ */
+const STRICT_OVERLAP_DEGREES = 1e-10
+
 export interface LonLatBounds {
   west: number
   south: number
@@ -114,7 +121,10 @@ export function getRegionsInBounds({
   levelMeta: LevelMeta | null
   projection: ProjectionContext
   latIsAscending: boolean
-  /** Require a positive-width overlap: a region touching an edge is out. */
+  /**
+   * Require a positive-width overlap: a region touching an edge is out, even
+   * when projecting it puts the edge a rounding error across.
+   */
   strict?: boolean
 }): RegionCoordinate[] {
   if (!xyLimits || !levelMeta) return []
@@ -160,6 +170,9 @@ export function getRegionsInBounds({
   // Verify candidates via inverse transform to WGS84 for precise overlap.
   // This handles non-bijective projections where forward transforms can
   // produce false positives.
+  const inset = strict ? STRICT_OVERLAP_DEGREES : 0
+  const lonSpan = east >= west ? east - west : east + 360 - west
+  if (strict && (lonSpan <= 2 * inset || north - south <= 2 * inset)) return []
   const regions: RegionCoordinate[] = []
   for (const { regionX, regionY } of candidates) {
     const regBounds = getRegionBounds({
@@ -195,11 +208,11 @@ export function getRegionsInBounds({
       regNorth = Math.max(regNorth, lat)
     }
     const latOverlaps = strict
-      ? regNorth > south && regSouth < north
+      ? regNorth > south + inset && regSouth < north - inset
       : regNorth >= south && regSouth <= north
     if (
       hasValid &&
-      lonRangeOverlaps(west, east, regWest, regEast, strict) &&
+      lonRangeOverlaps(west + inset, east - inset, regWest, regEast, strict) &&
       latOverlaps
     ) {
       regions.push({ regionX, regionY })
