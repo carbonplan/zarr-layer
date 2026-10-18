@@ -1147,9 +1147,10 @@ describe('region byte budget', () => {
   })
 
   it('holds a dataset of large regions to the byte budget', async () => {
-    // Regions of 32x64 float32 pixels, 8 KB each, against a 1 MB cache: an
-    // update may want half of it, 64 regions, well short of the region
-    // budget. The world tile needs all 4096 regions of the only level.
+    // Regions of 32x64 float32 pixels, 8 KB of data and 8 KB of texture
+    // each, against a 1 MB cache: an update may want half of it, 32
+    // regions, well short of the region budget. The world tile needs all
+    // 4096 regions of the only level.
     const { renderer, gl } = await makeRenderer({
       wide: true,
       limits: { maxBytes: 1024 * 1024 },
@@ -1160,10 +1161,12 @@ describe('region byte budget', () => {
 
     renderer.setCoveringTiles([{ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }])
     renderer.update(map, gl)
-    expect(seam(renderer).wantedKeys.size).toBe(64)
+    expect(seam(renderer).wantedKeys.size).toBe(32)
 
-    // The estimate the budget ran on matches what the regions hold.
+    // The estimate the budget ran on matches what the regions hold once
+    // drawn.
     await settle(renderer)
+    seam(renderer).plannedDraws(gl)
     const cache = seam(renderer).regionCache
     let bytes = 0
     for (const key of seam(renderer).wantedKeys) {
@@ -1175,12 +1178,13 @@ describe('region byte budget', () => {
 
 describe('region byte estimates', () => {
   it('estimates regions grown past the array at the extent they hold', async () => {
-    // Grown regions are 128x128 pixels, 64 KB of float32 each, but the array
-    // holds only 64x128 and 64x64 of them, 48 KB together. The update may
-    // want 56 KB: estimated at full size not even the first region fits.
+    // Grown regions are 128x128 pixels, 128 KB each of float32 data and
+    // texture, but the array holds only 64x128 and 64x64 of them, 96 KB
+    // together. The update may want 112 KB: estimated at full size not even
+    // the first region fits.
     const { renderer, gl } = await makeRenderer({
       grown: true,
-      limits: { maxBytes: 2 * 56 * 1024 },
+      limits: { maxBytes: 2 * 112 * 1024 },
     })
     const map = viewportAt(0)
     renderer.update(map, gl)
@@ -1196,15 +1200,16 @@ describe('region byte estimates', () => {
     expect([...seam(renderer).wantedKeys].sort()).toEqual(['0:0,0', '0:1,0'])
 
     await settle(renderer)
+    seam(renderer).plannedDraws(gl)
     const cache = seam(renderer).regionCache
     const bytes = [...seam(renderer).wantedKeys].map((key) =>
       regionByteLength(cache.get(key)!)
     )
-    expect(bytes).toEqual([32 * 1024, 16 * 1024])
+    expect(bytes).toEqual([64 * 1024, 32 * 1024])
   })
 
   it('wants the nearest tile even when no region fits the budget', async () => {
-    // 8 KB regions against an update budget of 512 bytes: nothing fits, but
+    // 16 KB regions against an update budget of 512 bytes: nothing fits, but
     // a blank view helps no one, so the nearest tile is wanted in full and
     // the next not at all.
     const { renderer, gl } = await makeRenderer({

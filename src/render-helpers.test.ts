@@ -117,6 +117,8 @@ describe('ensureRegionGpuResources', () => {
     expect(ensureRegionGpuResources(gl, region)).toBe(true)
     expect(region.texture).not.toBeNull()
     expect(region.textureUploaded).toBe(true)
+    // A 2x2 single-channel float32 texture.
+    expect(region.textureBytes).toBe(16)
     expect(region.vertexBuffer).not.toBeNull()
     expect(region.pixCoordBuffer).not.toBeNull()
     expect(region.indexBuffer).not.toBeNull()
@@ -402,6 +404,7 @@ describe('ensureRegionGpuResources with band rendering', () => {
     expect(ensureRegionGpuResources(gl, region, ['red', 'green'])).toBe(true)
     expect(gl.deleteTexture).toHaveBeenCalledWith(mainTexture)
     expect(region.texture).toBeNull()
+    expect(region.textureBytes).toBe(0)
   })
 })
 

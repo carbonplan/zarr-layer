@@ -3,9 +3,10 @@ import { bandTextureKey } from './render-helpers'
 import type { BandFormat } from './band-format'
 
 /**
- * Pixel bytes the cache holds across its regions, the limit that governs
- * it: region cost varies from kilobytes (one small band) to tens of
- * megabytes (many bands of a large chunk), so no region count fits both.
+ * Pixel bytes the cache holds across its regions, CPU arrays and GPU
+ * textures alike, the limit that governs it: region cost varies from
+ * kilobytes (one small band) to tens of megabytes (many bands of a large
+ * chunk), so no region count fits both.
  */
 export const MAX_CACHED_REGION_BYTES = 512 * 1024 * 1024
 
@@ -40,12 +41,16 @@ export const DEFAULT_REGION_CACHE_LIMITS: RegionCacheLimits = {
 }
 
 /**
- * Bytes a region's pixel data occupies. Band data lives on the CPU until it
- * is uploaded and on the GPU after, so it is counted wherever it is; a
- * single band doubling as the interleaved data is counted once.
+ * Bytes a region's pixel data occupies, on the CPU and on the GPU: the
+ * interleaved data and its main texture, and the bands, as arrays until a
+ * band texture takes them. A single band doubling as the interleaved data
+ * is counted once.
  */
 export function regionByteLength(region: RegionState): number {
-  let bytes = (region.data?.byteLength ?? 0) + region.bandTextureBytes
+  let bytes =
+    (region.data?.byteLength ?? 0) +
+    region.textureBytes +
+    region.bandTextureBytes
   for (const band of region.bandData.values()) {
     if (band !== region.data) bytes += band.byteLength
   }
@@ -53,9 +58,11 @@ export function regionByteLength(region: RegionState): number {
 }
 
 /**
- * Bytes `regionByteLength` will count for a region once fetched, before it
- * is: each band at its stored size, plus the interleaved copy that feeds
- * the main texture when it holds more than one band.
+ * Bytes `regionByteLength` will count for a region once fetched and
+ * uploaded, before it is. A band texture holds each band at its stored
+ * size, and its arrays are released. The main texture path keeps the bands
+ * as float32 arrays, an interleaved copy of them when there is more than
+ * one, and the main texture, the same size again.
  */
 export function estimateRegionBytes({
   pixels,
@@ -69,7 +76,8 @@ export function estimateRegionBytes({
   interleaved: boolean
 }): number {
   const bandBytes = pixels * bands * bytesPerValue
-  return interleaved && bands > 1 ? bandBytes * 2 : bandBytes
+  if (!interleaved) return bandBytes
+  return bandBytes * (bands > 1 ? 3 : 2)
 }
 
 export function makeRegionKey(
@@ -101,6 +109,7 @@ export function createRegionState(
     channels: 1,
     texture: null,
     textureUploaded: false,
+    textureBytes: 0,
     vertexBuffer: null,
     pixCoordBuffer: null,
     indexBuffer: null,

@@ -328,6 +328,7 @@ export function ensureRegionGpuResources(
       gl.deleteTexture(region.texture)
       region.texture = null
       region.textureUploaded = false
+      region.textureBytes = 0
     }
     texturesReady = ensureBandTexture(gl, region, requiredBands, bandFormat)
   } else {
@@ -347,6 +348,8 @@ export function ensureRegionGpuResources(
         configured: false,
       })
       region.textureUploaded = result.uploaded
+      region.textureBytes =
+        region.width * region.height * Math.min(region.channels, 4) * 4
     }
     texturesReady = region.textureUploaded
   }

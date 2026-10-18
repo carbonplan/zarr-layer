@@ -291,12 +291,14 @@ describe('RegionCache.evict', () => {
 })
 
 describe('region bytes', () => {
-  it('counts a single band doubling as the interleaved data once', () => {
+  it('counts a single band doubling as the interleaved data once, and its texture', () => {
     const r = region(0, 0, 0)
     const band = new Float32Array(256)
     r.bandData.set('a', band)
     r.data = band
     expect(regionByteLength(r)).toBe(1024)
+    r.textureBytes = 1024
+    expect(regionByteLength(r)).toBe(2048)
     expect(
       estimateRegionBytes({
         pixels: 256,
@@ -304,20 +306,34 @@ describe('region bytes', () => {
         bytesPerValue: 4,
         interleaved: true,
       })
-    ).toBe(1024)
+    ).toBe(2048)
   })
 
-  it('estimates the interleaved copy of several bands', () => {
+  it('estimates the bands, their interleaved copy and its texture', () => {
     const r = region(0, 0, 0)
     r.bandData.set('a', new Float32Array(256))
     r.bandData.set('b', new Float32Array(256))
     r.data = new Float32Array(512)
+    r.textureBytes = 2048
     expect(
       estimateRegionBytes({
         pixels: 256,
         bands: 2,
         bytesPerValue: 4,
         interleaved: true,
+      })
+    ).toBe(regionByteLength(r))
+  })
+
+  it('estimates a band texture at its stored size alone', () => {
+    const r = region(0, 0, 0)
+    r.bandTextureBytes = 2 * 256 * 2
+    expect(
+      estimateRegionBytes({
+        pixels: 256,
+        bands: 2,
+        bytesPerValue: 2,
+        interleaved: false,
       })
     ).toBe(regionByteLength(r))
   })
