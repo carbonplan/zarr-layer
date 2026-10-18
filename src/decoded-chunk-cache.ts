@@ -67,16 +67,19 @@ const createLRU = <V>(
 type AnyChunk = zarr.Chunk<zarr.DataType>
 
 /**
- * Hard caps on decoded chunks held per store.
+ * Caps on decoded chunks held per store; bytes govern.
  *
- * Sized to the regions one update may want, which is the working set: one
- * rendered region reads one chunk, and a cache below that turns every
- * selector change back into network reads. Decoded chunks run about the
- * size of the regions built from them, so the wanted byte budget holds the
- * chunks of the wanted regions; past it re-reads start missing rather than
- * letting a large chunk size retain gigabytes.
+ * Sized to the regions one update may want, which is the working set: a
+ * cache below that turns every selector change back into network reads.
+ * Decoded chunks run about the size of the regions built from them, so the
+ * wanted byte budget holds the chunks of the wanted regions; past it
+ * re-reads start missing rather than letting a large chunk size retain
+ * gigabytes. A region can read many chunks (bands chunked apart, regions
+ * grown past one chunk), so the entry count is only a safety bound against
+ * vast numbers of tiny chunks.
  */
-const DEFAULT_MAX_ENTRIES = MAX_WANTED_REGIONS
+const CHUNKS_PER_WANTED_REGION = 16
+const DEFAULT_MAX_ENTRIES = MAX_WANTED_REGIONS * CHUNKS_PER_WANTED_REGION
 const DEFAULT_MAX_BYTES = MAX_WANTED_REGION_BYTES
 
 const chunkBytes = (chunk: AnyChunk): number => {
