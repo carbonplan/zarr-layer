@@ -943,6 +943,14 @@ export class ZarrLayer {
 
     this.configureMapboxRenderPath()
 
+    // Neither map calls this on a frame it drapes the layer, so the draped
+    // hooks are out of use: Mapbox leaving its draped globe as it zooms in
+    // never calls them again. Tiles they drew must stop steering selection,
+    // and this frame draws from a selection made without them.
+    if (this.regionRenderer.clearDrawnTiles()) {
+      this.regionRenderer.update(this.map, this.gl)
+    }
+
     const projectionParams = resolveProjectionParams(
       params,
       projection,

@@ -633,10 +633,20 @@ export class RegionRenderer {
     })
   }
 
-  clearDrawnTiles(): void {
+  /**
+   * Forget the tiles the draped hooks drew, once the map no longer drapes
+   * the layer. Returns whether there were any; the cap they set goes too.
+   */
+  clearDrawnTiles(): boolean {
+    if (this.drawnTiles.size === 0 && this.previousDrawnTiles.size === 0) {
+      this.drawnTilesRevision = null
+      return false
+    }
     this.drawnTiles = new Map()
     this.previousDrawnTiles = new Map()
     this.drawnTilesRevision = null
+    this.levelWidthCap = Infinity
+    return true
   }
 
   /**

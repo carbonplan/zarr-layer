@@ -32,6 +32,34 @@ const memoryStore = () =>
     ],
   })
 
+/**
+ * Two levels 256 and 512 pixels wide in 64x32 pixel chunks: zoom 0 reads
+ * level 0, zoom 1 level 1.
+ */
+const pyramidStore = () =>
+  buildMemoryZarrStore({
+    attributes: {
+      multiscales: {
+        layout: [{ asset: '0' }, { asset: '1' }],
+        crs: 'EPSG:4326',
+      },
+    },
+    arrays: [
+      {
+        name: '0/temperature',
+        shape: [128, 256],
+        chunkShape: [32, 64],
+        dimensionNames: ['lat', 'lon'],
+      },
+      {
+        name: '1/temperature',
+        shape: [256, 512],
+        chunkShape: [32, 64],
+        dimensionNames: ['lat', 'lon'],
+      },
+    ],
+  })
+
 /** The memory store with chunk reads held back until `release` is called. */
 function gatedStore() {
   const memory = memoryStore()
@@ -119,6 +147,12 @@ type Seam = { regionRenderer: RegionRenderer }
 type RendererInternals = {
   regionCache: RegionCache
   drawnTiles: Map<string, unknown>
+  syntheticCover: unknown[] | null
+  wantedRegions: Map<number, unknown[]>
+  activeLevel: { index: number } | null
+  plannedDraws(gl: WebGL2RenderingContext): Array<{
+    region: { levelIndex: number }
+  }>
 }
 
 /** Hop the macrotask queue until the condition holds. */
@@ -496,6 +530,38 @@ describe('Mapbox renderToTile', () => {
     expect(options).toEqual({ northUp: false })
     expect(layer.shouldRerenderTiles()).toBe(true)
     expect(layer.shouldRerenderTiles()).toBe(false)
+  })
+
+  it('drops the draped tiles once the globe draws the layer directly', async () => {
+    // Zoomed out, the globe drapes the layer through renderToTile; zoomed in
+    // past the globe's morph it calls render instead and never the hook
+    // again, so tiles drawn while draped must not go on steering selection.
+    const { layer, gl, state, internals, settled } = await addLayer(
+      { globe: true, terrain: false, zoom: 0 },
+      { store: pyramidStore() }
+    )
+    await waitFor(() => internals.activeLevel?.index === 0)
+    layer.renderToTile(gl, WORLD_TILE)
+    layer.prerender(gl, {})
+    expect(internals.drawnTiles.size).toBe(1)
+
+    state.zoom = 1
+    layer.prerender(gl, {})
+    await waitFor(() => internals.activeLevel?.index === 1)
+    layer.prerender(gl, {})
+    // Still read from the world tile drawn at zoom 0.
+    expect([...internals.wantedRegions.keys()]).toEqual([0])
+
+    layer.render(gl, new Float32Array(16))
+
+    expect(internals.drawnTiles.size).toBe(0)
+    expect(internals.syntheticCover).not.toBeNull()
+    expect([...internals.wantedRegions.keys()]).toEqual([1])
+    await settled()
+    layer.prerender(gl, {})
+    const draws = internals.plannedDraws(gl as WebGL2RenderingContext)
+    expect(draws.length).toBeGreaterThan(0)
+    expect(draws.every((d) => d.region.levelIndex === 1)).toBe(true)
   })
 
   it('keeps the globe blend for draped globe tiles', async () => {
