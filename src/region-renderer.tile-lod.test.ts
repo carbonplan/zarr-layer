@@ -101,7 +101,7 @@ type Seam = {
   ): RegionCoordinate[]
   projection: ProjectionContext
   wantedCovered(): boolean
-  levelWidthCap: number
+  tileLevels: Map<string, number>
   tileLevel(tile: TileRequest): number | null
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
@@ -906,16 +906,20 @@ describe('per-tile level selection', () => {
 })
 
 describe('region budget across tiles', () => {
-  it('coarsens the finest tiles until the whole cover can be wanted in full', async () => {
-    // Twelve zoom-5 tiles (lon -135..-67.5, lat 41..56) at zoom 1: each fits
-    // the budget at level 1, but together they need more than one update
-    // may want. Spending it nearest first would leave the far tiles with
-    // nothing; read from level 0, every tile is wanted in full.
-    const { renderer, map, gl } = await rendererAtZoom(1)
+  it('coarsens the farthest tiles first until the whole cover can be wanted in full', async () => {
+    // A tilted view at one tile zoom: twelve zoom-5 tiles (lon -135..-67.5,
+    // lat 41..56) at zoom 1, the map center over the westmost. Each fits the
+    // budget at level 1, but together they need more than one update may
+    // want. Spending it nearest first would leave the far tiles with
+    // nothing; the far tiles read level 0 instead and the near ones keep
+    // level 1, so every tile is wanted in full.
+    const { renderer, gl } = await rendererAtZoom(1)
+    const map = { ...viewportAt(1), getCenter: () => ({ lng: -130, lat: 50 }) }
     const tiles: TileRequest[] = []
-    for (let y = 10; y <= 11; y++) {
-      for (let x = 4; x <= 9; x++)
+    for (let x = 4; x <= 9; x++) {
+      for (let y = 10; y <= 11; y++) {
         tiles.push({ tileId: { z: 5, x, y }, zoom: 1 })
+      }
     }
     const fine = seam(renderer).levelLoader.runtime(1)!
     const fineRegions = tiles.map((tile) =>
@@ -932,32 +936,39 @@ describe('region budget across tiles', () => {
     renderer.update(map, gl)
     await waitForRuntime(renderer, 0)
     renderer.update(map, gl)
-    const wanted = [...seam(renderer).wantedKeys]
+    const wanted = [...seam(renderer).wantedKeys].sort()
     renderer.update(map, gl)
 
     // Settled: a further update wants the same.
-    expect([...seam(renderer).wantedKeys]).toEqual(wanted)
-    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect([...seam(renderer).wantedKeys].sort()).toEqual(wanted)
     expect(wanted.length).toBeLessThanOrEqual(MAX_CACHED_REGIONS)
+    const levels = tiles.map((tile) => seam(renderer).tileLevel(tile))
+    expect(levels.slice(0, 2)).toEqual([1, 1])
+    expect(levels.slice(-2)).toEqual([0, 0])
+    // Inward from the far end, never finer farther out.
+    for (let i = 1; i < levels.length; i++) {
+      expect(levels[i]!).toBeLessThanOrEqual(levels[i - 1]!)
+    }
     await settle(renderer)
-    for (const tile of tiles) {
+    tiles.forEach((tile, i) => {
       const plan = seam(renderer).planTile(tile, () => true)
       expect(plan.ready).toBe(true)
       expect(plan.regions.length).toBeGreaterThan(0)
+      expect(plan.regions.every((r) => r.levelIndex === levels[i])).toBe(true)
       expect(
         plan.regions.every((r) => seam(renderer).wantedKeys.has(r.key))
       ).toBe(true)
-    }
+    })
   })
 })
 
 describe('region budget with hook tiles from an earlier view', () => {
-  it('relaxes the cap once the cover shrinks, whatever hook tiles remain', async () => {
+  it('refits once the cover shrinks, whatever hook tiles remain', async () => {
     // A tilted view covers twelve zoom-5 tiles, too many regions at level 1,
-    // so the cap holds them at level 0; the hooks draw the same tiles. The
+    // so the fit drops some to level 0; the hooks draw the same tiles. The
     // view then shrinks to two tiles elsewhere that fit at level 1. Nothing
     // redraws the terrain, so the hook tiles stay; they must neither hold
-    // the cap coarse nor take the budget from the cover.
+    // the fit coarse nor take the budget from the cover.
     const { renderer, map, gl } = await rendererAtZoom(1)
     const wide: TileRequest[] = []
     for (let y = 10; y <= 11; y++) {
@@ -975,7 +986,7 @@ describe('region budget with hook tiles from an earlier view', () => {
     for (const tile of hooked.slice(0, 6)) renderer.noteDrawnTile(tile, 1)
     for (const tile of hooked.slice(6)) renderer.noteDrawnTile(tile, 2)
     renderer.update(map, gl)
-    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect([...seam(renderer).wantedRegions.keys()]).toContain(0)
     await settle(renderer)
 
     // Lon -45..-22.5, lat 49..56: clear of the hook tiles.
@@ -986,7 +997,7 @@ describe('region budget with hook tiles from an earlier view', () => {
     renderer.setCoveringTiles(narrow)
     renderer.update(map, gl)
 
-    expect(seam(renderer).levelWidthCap).toBe(Infinity)
+    expect([...seam(renderer).tileLevels.values()]).toEqual([1, 1])
     expect(seam(renderer).wantedKeys.size).toBe(MAX_CACHED_REGIONS)
     const fine = seam(renderer).levelLoader.runtime(1)!
     for (const tile of narrow) {
@@ -1017,7 +1028,7 @@ describe('region budget with hook tiles from an earlier view', () => {
     renderer.setCoveringTiles(null)
     renderer.clearDrawnTiles()
     renderer.update({ getZoom: () => 1 } as MapLike, gl)
-    expect(seam(renderer).levelWidthCap).toBe(Infinity)
+    expect(seam(renderer).tileLevels.size).toBe(0)
   })
 })
 

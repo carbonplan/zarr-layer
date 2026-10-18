@@ -163,6 +163,8 @@ function intersectLon(
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 const requestKey = (tile: TileRequest) =>
   `${tileKey(tile.tileId)}@${tile.wrap ?? 'all'}`
+/** Copies of one tile show the same thing, so they share a plan and level. */
+const planKey = (tile: TileRequest) => `${tileKey(tile.tileId)}:${tile.zoom}`
 
 /** What one map tile shows. */
 interface TileDraw {
@@ -268,9 +270,10 @@ export class RegionRenderer {
   private previousDrawnTiles: Map<string, TileRequest> = new Map()
   private drawnTilesRevision: number | null = null
   private tileRegionsMemo: Map<string, RegionCoordinate[]> = new Map()
-  // Widest level any tile may target, set by the last selection so the
-  // whole cover fits the region budget; planning reads it too.
-  private levelWidthCap: number = Infinity
+  // The level each tile of the current cover targets, by plan key, fitted
+  // by the last selection so the whole cover fits the region budget;
+  // planning reads it too.
+  private tileLevels: Map<string, number> = new Map()
   private lastViewportHash: string = ''
   private selectorVersion: number = 0 // Incremented on selector change to track stale regions
 
@@ -635,7 +638,8 @@ export class RegionRenderer {
 
   /**
    * Forget the tiles the draped hooks drew, once the map no longer drapes
-   * the layer. Returns whether there were any; the cap they set goes too.
+   * the layer. Returns whether there were any; the levels fitted to them
+   * go too.
    */
   clearDrawnTiles(): boolean {
     if (this.drawnTiles.size === 0 && this.previousDrawnTiles.size === 0) {
@@ -645,7 +649,7 @@ export class RegionRenderer {
     this.drawnTiles = new Map()
     this.previousDrawnTiles = new Map()
     this.drawnTilesRevision = null
-    this.levelWidthCap = Infinity
+    this.tileLevels = new Map()
     return true
   }
 
@@ -798,17 +802,18 @@ export class RegionRenderer {
     if (tiles.length === 0) {
       tiles = this.viewportTiles(map)
       if (tiles.length === 0) {
-        this.levelWidthCap = Infinity
+        this.tileLevels = new Map()
         return wanted
       }
       this.syntheticCover = tiles
     }
-    // The cap follows the current view: hook tiles from an earlier one must
-    // not hold it coarse. Hook tiles alone set it only without a cover.
-    this.levelWidthCap = this.fitLevelWidthCap(
-      this.syntheticCover ?? this.coveringTiles ?? tiles
+    // The fit follows the current view: hook tiles from an earlier one must
+    // not hold it coarse. Hook tiles alone are fitted only without a cover.
+    this.tileLevels = this.fitTileLevels(
+      this.syntheticCover ?? this.coveringTiles ?? tiles,
+      map
     )
-    const perTile = this.tileTargets(tiles, this.levelWidthCap)
+    const perTile = this.tileTargets(tiles)
     let total = 0
     for (const target of perTile) {
       if (target.runtime) {
@@ -850,14 +855,13 @@ export class RegionRenderer {
   }
 
   /**
-   * Each tile's target level under a level width cap, with its regions
-   * there; a level not yet open has none to give. Tiles no level can serve
-   * are left out.
+   * Each tile's target level, with its regions there; a level not yet open
+   * has none to give. Tiles no level can serve are left out.
    */
-  private tileTargets(tiles: TileRequest[], cap: number): TileTarget[] {
+  private tileTargets(tiles: TileRequest[]): TileTarget[] {
     const targets: TileTarget[] = []
     for (const tile of tiles) {
-      const levelIndex = this.tileLevel(tile, cap)
+      const levelIndex = this.tileLevel(tile)
       if (levelIndex === null) continue
       const runtime = this.levelLoader.runtime(levelIndex)
       const regions = runtime ? this.tileRegions(levelIndex, runtime, tile) : []
@@ -867,35 +871,104 @@ export class RegionRenderer {
   }
 
   /**
-   * The widest level the tiles may target so that every tile can be wanted
-   * in full: while their regions together exceed the budget, the tiles at
-   * the finest target level drop to the next coarser one. Levels not yet
-   * open count no regions; the cap depends only on the tiles and the levels
-   * open, which only ever grow, so it settles. Infinite when the tiles fit
-   * as they are; when even the coarsest level they can reach does not fit,
-   * selection keeps the nearest regions.
+   * The level each tile targets so that the whole cover can be wanted in
+   * full. Each starts at its own; while their regions together exceed the
+   * budget, tiles drop one level at a time, farthest first (coarser zooms,
+   * then farther from the map center), working inward and round again.
+   * Tiles at the coarsest usable level are passed over; when none can drop,
+   * selection keeps the nearest regions. Levels not yet open count no
+   * regions and are opened, so the fit depends only on the tiles and the
+   * levels open, which only ever grow, and it settles.
    */
-  private fitLevelWidthCap(tiles: TileRequest[]): number {
-    let cap = Infinity
-    for (;;) {
-      const targets = this.tileTargets(tiles, cap)
-      const keys = new Set<string>()
-      let finest: number | null = null
-      for (const { levelIndex, regions } of targets) {
-        for (const { regionX, regionY } of regions) {
-          keys.add(this.makeRegionKey(levelIndex, regionX, regionY))
-        }
-        if (
-          finest === null ||
-          this.levelWidth(levelIndex) > this.levelWidth(finest)
-        ) {
-          finest = levelIndex
+  private fitTileLevels(
+    tiles: TileRequest[],
+    map: MapLike
+  ): Map<string, number> {
+    const levels = new Map<string, number>()
+    const counts = new Map<string, number>()
+    let unique = 0
+    const regionKeys = (tile: TileRequest, levelIndex: number) => {
+      const runtime = this.levelLoader.runtime(levelIndex)
+      if (!runtime) {
+        void this.levelLoader.ensureRuntime(levelIndex)
+        return []
+      }
+      return this.tileRegions(levelIndex, runtime, tile).map((region) =>
+        this.makeRegionKey(levelIndex, region.regionX, region.regionY)
+      )
+    }
+    const add = (keys: string[]) => {
+      for (const key of keys) {
+        const count = counts.get(key) ?? 0
+        if (count === 0) unique++
+        counts.set(key, count + 1)
+      }
+    }
+    const remove = (keys: string[]) => {
+      for (const key of keys) {
+        const count = counts.get(key)!
+        if (count === 1) {
+          counts.delete(key)
+          unique--
+        } else {
+          counts.set(key, count - 1)
         }
       }
-      if (keys.size <= MAX_WANTED_REGIONS || finest === null) return cap
-      const coarser = this.usableLevel(this.coarserLevel(finest))
-      if (coarser === null) return cap
-      cap = this.levelWidth(coarser)
+    }
+
+    const { lng, lat } = this.mapCenter(map)
+    const cx = (lng + 180) / 360
+    const cy = latToMercatorNorm(lat)
+    const entries: Array<{
+      tile: TileRequest
+      key: string
+      levelIndex: number
+      keys: string[]
+      distance: number
+    }> = []
+    for (const tile of tiles) {
+      const key = planKey(tile)
+      if (levels.has(key)) continue
+      const levelIndex = this.ownTileLevel(tile)
+      if (levelIndex === null) continue
+      const keys = regionKeys(tile, levelIndex)
+      add(keys)
+      levels.set(key, levelIndex)
+      const { z, x, y } = tile.tileId
+      let dx = (x + 0.5) / 2 ** z - cx
+      dx -= Math.round(dx)
+      const dy = (y + 0.5) / 2 ** z - cy
+      entries.push({ tile, key, levelIndex, keys, distance: dx * dx + dy * dy })
+    }
+    if (unique <= MAX_WANTED_REGIONS) return levels
+
+    entries.sort((a, b) => a.tile.zoom - b.tile.zoom || b.distance - a.distance)
+    let dropped = true
+    while (unique > MAX_WANTED_REGIONS && dropped) {
+      dropped = false
+      for (const entry of entries) {
+        if (unique <= MAX_WANTED_REGIONS) break
+        const coarser = this.usableLevel(this.coarserLevel(entry.levelIndex))
+        if (coarser === null) continue
+        remove(entry.keys)
+        entry.levelIndex = coarser
+        entry.keys = regionKeys(entry.tile, coarser)
+        add(entry.keys)
+        levels.set(entry.key, coarser)
+        dropped = true
+      }
+    }
+    return levels
+  }
+
+  /** The map center, or the middle of its bounds without one. */
+  private mapCenter(map: MapLike): { lng: number; lat: number } {
+    const center = map.getCenter?.()
+    if (center) return center
+    const bounds = map.getBounds?.()?.toArray?.()
+    return {
+      lng: bounds ? (bounds[0][0] + bounds[1][0]) / 2 : 0,
+      lat: bounds ? (bounds[0][1] + bounds[1][1]) / 2 : 0,
     }
   }
 
@@ -905,10 +978,7 @@ export class RegionRenderer {
     runtime: LevelRuntime,
     map: MapLike
   ): RegionCoordinate[] {
-    const center = map.getCenter?.()
-    const bounds = map.getBounds?.()?.toArray?.()
-    const lng = center?.lng ?? (bounds ? (bounds[0][0] + bounds[1][0]) / 2 : 0)
-    const lat = center?.lat ?? (bounds ? (bounds[0][1] + bounds[1][1]) / 2 : 0)
+    const { lng, lat } = this.mapCenter(map)
     const inverse = this.projection.toWGS84?.inverse
     const distance = (region: RegionCoordinate) => {
       const b = this.getRegionBounds(region.regionX, region.regionY, runtime)
@@ -995,26 +1065,31 @@ export class RegionRenderer {
   }
 
   /**
-   * The level a tile targets: the one its zoom resolves to or, when that is
-   * wider than the cap or has more regions under the tile than one update
-   * may want, the finest coarser level that fits, so the tile can be wanted
-   * in full and shown from its target. A level not yet open is trusted
-   * until it opens. With no coarser level the tile keeps its own and shows
-   * what it has of it. Null when no level can serve the tile, which then
-   * draws nothing.
+   * The level a tile targets: the one the last selection fitted it to, or
+   * its own for a tile outside the fitted cover. Null when no level can
+   * serve the tile, which then draws nothing.
    */
-  private tileLevel(
-    tile: TileRequest,
-    cap: number = this.levelWidthCap
-  ): number | null {
+  private tileLevel(tile: TileRequest): number | null {
+    const fitted = this.tileLevels.get(planKey(tile))
+    return fitted === undefined
+      ? this.ownTileLevel(tile)
+      : this.usableLevel(fitted)
+  }
+
+  /**
+   * A tile's own level: the one its zoom resolves to or, when that has more
+   * regions under the tile than one update may want, the finest coarser
+   * level that fits, so the tile can be wanted in full and shown from its
+   * target. A level not yet open is trusted until it opens. With no coarser
+   * level the tile keeps its own and shows what it has of it.
+   */
+  private ownTileLevel(tile: TileRequest): number | null {
     let levelIndex = this.resolveLevel(tile.zoom)
     while (levelIndex !== null) {
-      if (this.levelWidth(levelIndex) <= cap) {
-        const runtime = this.levelLoader.runtime(levelIndex)
-        if (!runtime) return levelIndex
-        const count = this.tileRegions(levelIndex, runtime, tile).length
-        if (count <= MAX_WANTED_REGIONS) return levelIndex
-      }
+      const runtime = this.levelLoader.runtime(levelIndex)
+      if (!runtime) return levelIndex
+      const count = this.tileRegions(levelIndex, runtime, tile).length
+      if (count <= MAX_WANTED_REGIONS) return levelIndex
       const coarser = this.usableLevel(this.coarserLevel(levelIndex))
       if (coarser === null) return levelIndex
       levelIndex = coarser
@@ -1154,12 +1229,11 @@ export class RegionRenderer {
     const plans = new Map<string, TileDraw>()
     const owners = new Map<string, { region: RegionState; tiles: ClipTile[] }>()
     for (const tile of tiles) {
-      // Copies of one tile show the same thing; plan it once.
-      const planKey = `${tileKey(tile.tileId)}:${tile.zoom}`
-      let plan = plans.get(planKey)
+      const key = planKey(tile)
+      let plan = plans.get(key)
       if (!plan) {
         plan = this.planTile(tile, drawable)
-        plans.set(planKey, plan)
+        plans.set(key, plan)
       }
       for (const region of plan.regions) {
         let entry = owners.get(region.key)
