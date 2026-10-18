@@ -101,6 +101,8 @@ type Seam = {
   ): RegionCoordinate[]
   projection: ProjectionContext
   wantedCovered(): boolean
+  levelWidthCap: number
+  tileLevel(tile: TileRequest): number | null
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
 
@@ -946,6 +948,76 @@ describe('region budget across tiles', () => {
         plan.regions.every((r) => seam(renderer).wantedKeys.has(r.key))
       ).toBe(true)
     }
+  })
+})
+
+describe('region budget with hook tiles from an earlier view', () => {
+  it('relaxes the cap once the cover shrinks, whatever hook tiles remain', async () => {
+    // A tilted view covers twelve zoom-5 tiles, too many regions at level 1,
+    // so the cap holds them at level 0; the hooks draw the same tiles. The
+    // view then shrinks to two tiles elsewhere that fit at level 1. Nothing
+    // redraws the terrain, so the hook tiles stay; they must neither hold
+    // the cap coarse nor take the budget from the cover.
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    const wide: TileRequest[] = []
+    for (let y = 10; y <= 11; y++) {
+      for (let x = 4; x <= 9; x++) {
+        wide.push({ tileId: { z: 5, x, y }, zoom: 1 })
+      }
+    }
+    renderer.setCoveringTiles(wide)
+    renderer.update(map, gl)
+    await waitForRuntime(renderer, 0)
+    renderer.update(map, gl)
+    // Drawn at a finer zoom than the cover, so sorting by zoom alone would
+    // put them first.
+    const hooked = wide.map((tile) => ({ ...tile, zoom: 1.5 }))
+    for (const tile of hooked.slice(0, 6)) renderer.noteDrawnTile(tile, 1)
+    for (const tile of hooked.slice(6)) renderer.noteDrawnTile(tile, 2)
+    renderer.update(map, gl)
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    await settle(renderer)
+
+    // Lon -45..-22.5, lat 49..56: clear of the hook tiles.
+    const narrow: TileRequest[] = [
+      { tileId: { z: 5, x: 12, y: 10 }, zoom: 1 },
+      { tileId: { z: 5, x: 13, y: 10 }, zoom: 1 },
+    ]
+    renderer.setCoveringTiles(narrow)
+    renderer.update(map, gl)
+
+    expect(seam(renderer).levelWidthCap).toBe(Infinity)
+    expect(seam(renderer).wantedKeys.size).toBe(MAX_CACHED_REGIONS)
+    const fine = seam(renderer).levelLoader.runtime(1)!
+    for (const tile of narrow) {
+      for (const { regionX, regionY } of seam(renderer).tileRegions(
+        1,
+        fine,
+        tile
+      )) {
+        expect(
+          seam(renderer).wantedKeys.has(makeRegionKey(1, regionX, regionY))
+        ).toBe(true)
+      }
+    }
+    await settle(renderer)
+    for (const tile of narrow) {
+      const plan = seam(renderer).planTile(tile, () => true)
+      expect(plan.ready).toBe(true)
+      expect(plan.regions.every((r) => r.levelIndex === 1)).toBe(true)
+    }
+    // Hook tiles get what budget the cover leaves, at the level the planner
+    // gives them, and show a complete coarser level meanwhile.
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([1])
+    expect(seam(renderer).tileLevel(hooked[0])).toBe(1)
+    expect(
+      seam(renderer).planTile(hooked[0], () => true).regions.length
+    ).toBeGreaterThan(0)
+
+    renderer.setCoveringTiles(null)
+    renderer.clearDrawnTiles()
+    renderer.update({ getZoom: () => 1 } as MapLike, gl)
+    expect(seam(renderer).levelWidthCap).toBe(Infinity)
   })
 })
 

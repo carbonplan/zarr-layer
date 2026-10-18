@@ -639,17 +639,27 @@ export class RegionRenderer {
     this.drawnTilesRevision = null
   }
 
-  /** Every tile the map is drawing, most detailed (nearest) first. */
+  /**
+   * Every tile the map is drawing: the map's cover, then tiles the draped
+   * hooks drew beyond it, each most detailed (nearest) first. Hook tiles
+   * outlive the view that drew them until the terrain is redrawn, so they
+   * come after the cover and only get what budget it leaves.
+   */
   private requestedTiles(): TileRequest[] {
-    const byKey = new Map<string, TileRequest>()
-    const add = (tile: TileRequest) => {
+    const byZoom = (a: TileRequest, b: TileRequest) => b.zoom - a.zoom
+    const keys = new Set<string>()
+    const cover: TileRequest[] = []
+    const hooked: TileRequest[] = []
+    const add = (tile: TileRequest, list: TileRequest[]) => {
       const key = requestKey(tile)
-      if (!byKey.has(key)) byKey.set(key, tile)
+      if (keys.has(key)) return
+      keys.add(key)
+      list.push(tile)
     }
-    for (const tile of this.coveringTiles ?? []) add(tile)
-    for (const tile of this.drawnTiles.values()) add(tile)
-    for (const tile of this.previousDrawnTiles.values()) add(tile)
-    return [...byKey.values()].sort((a, b) => b.zoom - a.zoom)
+    for (const tile of this.coveringTiles ?? []) add(tile, cover)
+    for (const tile of this.drawnTiles.values()) add(tile, hooked)
+    for (const tile of this.previousDrawnTiles.values()) add(tile, hooked)
+    return [...cover.sort(byZoom), ...hooked.sort(byZoom)]
   }
 
   /** Regions of a level under a tile; the tile grid and levels never move. */
@@ -777,11 +787,18 @@ export class RegionRenderer {
     let tiles = this.requestedTiles()
     if (tiles.length === 0) {
       tiles = this.viewportTiles(map)
-      if (tiles.length === 0) return wanted
+      if (tiles.length === 0) {
+        this.levelWidthCap = Infinity
+        return wanted
+      }
       this.syntheticCover = tiles
     }
-    const { cap, targets: perTile } = this.fitLevelWidthCap(tiles)
-    this.levelWidthCap = cap
+    // The cap follows the current view: hook tiles from an earlier one must
+    // not hold it coarse. Hook tiles alone set it only without a cover.
+    this.levelWidthCap = this.fitLevelWidthCap(
+      this.syntheticCover ?? this.coveringTiles ?? tiles
+    )
+    const perTile = this.tileTargets(tiles, this.levelWidthCap)
     let total = 0
     for (const target of perTile) {
       if (target.runtime) {
@@ -791,9 +808,10 @@ export class RegionRenderer {
         this.pendingLevels.add(target.levelIndex)
       }
     }
-    // Nearest tiles come first already. When the budget bites, order each
-    // tile's regions by distance from the map center too, so a single tile
-    // spanning many regions cannot spend the budget on its far corner.
+    // Tiles come in order already: the cover's, then the hooks', nearest
+    // first. When the budget bites, order each tile's regions by distance
+    // from the map center too, so a single tile spanning many regions cannot
+    // spend the budget on its far corner.
     const truncating = total > MAX_WANTED_REGIONS
     const seen = new Set<string>()
     for (const { levelIndex, runtime, regions } of perTile) {
@@ -840,17 +858,14 @@ export class RegionRenderer {
 
   /**
    * The widest level the tiles may target so that every tile can be wanted
-   * in full, with the tiles' targets under it: while their regions together
-   * exceed the budget, the tiles at the finest target level drop to the next
-   * coarser one. Levels not yet open count no regions; the cap depends only
-   * on the tiles and the levels open, which only ever grow, so it settles.
-   * Infinite when the tiles fit as they are; when even the coarsest level
-   * they can reach does not fit, selection keeps the nearest regions.
+   * in full: while their regions together exceed the budget, the tiles at
+   * the finest target level drop to the next coarser one. Levels not yet
+   * open count no regions; the cap depends only on the tiles and the levels
+   * open, which only ever grow, so it settles. Infinite when the tiles fit
+   * as they are; when even the coarsest level they can reach does not fit,
+   * selection keeps the nearest regions.
    */
-  private fitLevelWidthCap(tiles: TileRequest[]): {
-    cap: number
-    targets: TileTarget[]
-  } {
+  private fitLevelWidthCap(tiles: TileRequest[]): number {
     let cap = Infinity
     for (;;) {
       const targets = this.tileTargets(tiles, cap)
@@ -867,11 +882,9 @@ export class RegionRenderer {
           finest = levelIndex
         }
       }
-      if (keys.size <= MAX_WANTED_REGIONS || finest === null) {
-        return { cap, targets }
-      }
+      if (keys.size <= MAX_WANTED_REGIONS || finest === null) return cap
       const coarser = this.usableLevel(this.coarserLevel(finest))
-      if (coarser === null) return { cap, targets }
+      if (coarser === null) return cap
       cap = this.levelWidth(coarser)
     }
   }
