@@ -69,16 +69,22 @@ import {
 import { boundsIntersect, getTileLonLatBounds } from './tile-utils'
 import { tileClipBounds, tileClipPasses, type ClipTile } from './clip-boxes'
 import {
-  MAX_CACHED_REGIONS,
   RegionCache,
+  WANTED_CACHE_SHARE,
+  estimateRegionBytes,
   hasRegionData,
   isRegionCpuReady,
   isRegionFailed,
   isRegionGpuReady,
   makeRegionKey,
   releaseRegionTextures,
+  type RegionCacheLimits,
 } from './region-cache'
-import { bandFormatForDtype, type BandFormat } from './band-format'
+import {
+  bandBytesPerValue,
+  bandFormatForDtype,
+  type BandFormat,
+} from './band-format'
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader, type LevelLoadOutcome } from './level-loader'
 import { wrapError } from './errors'
@@ -123,14 +129,6 @@ export interface TileRequest {
    */
   extents?: LonLatBounds[]
 }
-
-/**
- * Regions one update may want in total: wanting more than the cache can hold
- * would only make it thrash. A cover needing more reads coarser levels until
- * it fits; with no coarser level left, selection stops there, nearest tiles
- * first.
- */
-const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 
 /**
  * Fewest tiles a cover synthesised for the viewport splits it into; the
@@ -247,7 +245,7 @@ export class RegionRenderer {
 
   // Region-based loading (for multi-level datasets with chunking/sharding)
   // Single unified cache with LRU eviction - keys include level index (e.g., "2:0,0")
-  private regionCache = new RegionCache()
+  private regionCache: RegionCache
   // Regions wanted by the last update, per level: fetched, protected and
   // drawn. Each tile the map draws reads the level matching its zoom, so
   // a pitched view wants coarser levels in the distance than near the camera.
@@ -295,8 +293,10 @@ export class RegionRenderer {
     invalidate: () => void,
     fixedDataScale: number = 1,
     minRegionSize: number = 0,
-    maxRegionFetches: number = MAX_ACTIVE_REGION_FETCHES
+    maxRegionFetches: number = MAX_ACTIVE_REGION_FETCHES,
+    cacheLimits: Partial<RegionCacheLimits> = {}
   ) {
+    this.regionCache = new RegionCache(cacheLimits)
     this.minRegionSize = minRegionSize
     this.requestCanceller = createRequestCanceller(maxRegionFetches)
     this.zarrStore = store
@@ -553,7 +553,7 @@ export class RegionRenderer {
    * Never evicts currently visible regions.
    */
   private evictOldRegions(gl: WebGL2RenderingContext): void {
-    this.regionCache.evict(gl)
+    this.regionCache.evict(gl, { wantedCount: this.wantedKeys.size })
   }
 
   /**
@@ -814,10 +814,13 @@ export class RegionRenderer {
       map
     )
     const perTile = this.tileTargets(tiles)
-    let total = 0
+    const budget = this.wantedBudget()
+    let totalRegions = 0
+    let totalBytes = 0
     for (const target of perTile) {
       if (target.runtime) {
-        total += target.regions.length
+        totalRegions += target.regions.length
+        totalBytes += target.regions.length * this.regionBytes(target.runtime)
       } else {
         void this.levelLoader.ensureRuntime(target.levelIndex)
         this.pendingLevels.add(target.levelIndex)
@@ -827,10 +830,13 @@ export class RegionRenderer {
     // first. When the budget bites, order each tile's regions by distance
     // from the map center too, so a single tile spanning many regions cannot
     // spend the budget on its far corner.
-    const truncating = total > MAX_WANTED_REGIONS
+    const truncating =
+      totalRegions > budget.regions || totalBytes > budget.bytes
     const seen = new Set<string>()
+    let wantedBytes = 0
     for (const { levelIndex, runtime, regions } of perTile) {
       if (!runtime) continue
+      const cost = this.regionBytes(runtime)
       const ordered = truncating
         ? this.nearestCenterFirst(regions, runtime, map)
         : regions
@@ -841,8 +847,11 @@ export class RegionRenderer {
           region.regionY
         )
         if (seen.has(key)) continue
-        if (seen.size >= MAX_WANTED_REGIONS) return wanted
+        if (seen.size >= budget.regions || wantedBytes + cost > budget.bytes) {
+          return wanted
+        }
         seen.add(key)
+        wantedBytes += cost
         let list = wanted.get(levelIndex)
         if (!list) {
           list = []
@@ -873,7 +882,7 @@ export class RegionRenderer {
   /**
    * The level each tile targets so that the whole cover can be wanted in
    * full. Each starts at its own; while their regions together exceed the
-   * budget, tiles drop one level at a time, farthest first (coarser zooms,
+   * budget, in count or estimated bytes, tiles drop one level at a time, farthest first (coarser zooms,
    * then farther from the map center), working inward and round again.
    * Tiles at the coarsest usable level are passed over; when none can drop,
    * selection keeps the nearest regions. Levels not yet open count no
@@ -884,32 +893,40 @@ export class RegionRenderer {
     tiles: TileRequest[],
     map: MapLike
   ): Map<string, number> {
+    const budget = this.wantedBudget()
     const levels = new Map<string, number>()
     const counts = new Map<string, number>()
     let unique = 0
+    let bytes = 0
+    const over = () => unique > budget.regions || bytes > budget.bytes
     const regionKeys = (tile: TileRequest, levelIndex: number) => {
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) {
         void this.levelLoader.ensureRuntime(levelIndex)
-        return []
+        return { keys: [], cost: 0 }
       }
-      return this.tileRegions(levelIndex, runtime, tile).map((region) =>
+      const keys = this.tileRegions(levelIndex, runtime, tile).map((region) =>
         this.makeRegionKey(levelIndex, region.regionX, region.regionY)
       )
+      return { keys, cost: this.regionBytes(runtime) }
     }
-    const add = (keys: string[]) => {
+    const add = ({ keys, cost }: { keys: string[]; cost: number }) => {
       for (const key of keys) {
         const count = counts.get(key) ?? 0
-        if (count === 0) unique++
+        if (count === 0) {
+          unique++
+          bytes += cost
+        }
         counts.set(key, count + 1)
       }
     }
-    const remove = (keys: string[]) => {
+    const remove = ({ keys, cost }: { keys: string[]; cost: number }) => {
       for (const key of keys) {
         const count = counts.get(key)!
         if (count === 1) {
           counts.delete(key)
           unique--
+          bytes -= cost
         } else {
           counts.set(key, count - 1)
         }
@@ -923,7 +940,7 @@ export class RegionRenderer {
       tile: TileRequest
       key: string
       levelIndex: number
-      keys: string[]
+      regions: { keys: string[]; cost: number }
       distance: number
     }> = []
     for (const tile of tiles) {
@@ -931,34 +948,71 @@ export class RegionRenderer {
       if (levels.has(key)) continue
       const levelIndex = this.ownTileLevel(tile)
       if (levelIndex === null) continue
-      const keys = regionKeys(tile, levelIndex)
-      add(keys)
+      const regions = regionKeys(tile, levelIndex)
+      add(regions)
       levels.set(key, levelIndex)
       const { z, x, y } = tile.tileId
       let dx = (x + 0.5) / 2 ** z - cx
       dx -= Math.round(dx)
       const dy = (y + 0.5) / 2 ** z - cy
-      entries.push({ tile, key, levelIndex, keys, distance: dx * dx + dy * dy })
+      entries.push({
+        tile,
+        key,
+        levelIndex,
+        regions,
+        distance: dx * dx + dy * dy,
+      })
     }
-    if (unique <= MAX_WANTED_REGIONS) return levels
+    if (!over()) return levels
 
     entries.sort((a, b) => a.tile.zoom - b.tile.zoom || b.distance - a.distance)
     let dropped = true
-    while (unique > MAX_WANTED_REGIONS && dropped) {
+    while (over() && dropped) {
       dropped = false
       for (const entry of entries) {
-        if (unique <= MAX_WANTED_REGIONS) break
+        if (!over()) break
         const coarser = this.usableLevel(this.coarserLevel(entry.levelIndex))
         if (coarser === null) continue
-        remove(entry.keys)
+        remove(entry.regions)
         entry.levelIndex = coarser
-        entry.keys = regionKeys(entry.tile, coarser)
-        add(entry.keys)
+        entry.regions = regionKeys(entry.tile, coarser)
+        add(entry.regions)
         levels.set(entry.key, coarser)
         dropped = true
       }
     }
     return levels
+  }
+
+  /**
+   * What one update may want: a share of the cache, in regions and in
+   * pixel bytes, so fallbacks shown meanwhile still fit beside it.
+   */
+  private wantedBudget(): { regions: number; bytes: number } {
+    const { maxRegions, maxBytes } = this.regionCache.limits
+    return {
+      regions: Math.floor(maxRegions * WANTED_CACHE_SHARE),
+      bytes: maxBytes * WANTED_CACHE_SHARE,
+    }
+  }
+
+  /**
+   * Estimated pixel bytes of one region of a level once fetched, from its
+   * region size, the bands the selector reads and the form they are kept
+   * in: integer dtypes stay native for band-sampling shaders, everything
+   * else is float32.
+   */
+  private regionBytes(runtime: LevelRuntime): number {
+    const [height, width] = runtime.regionSize
+    return estimateRegionBytes({
+      pixels: height * width,
+      bands: Math.max(1, this.bandNames.length),
+      bytesPerValue: bandBytesPerValue(
+        runtime.zarrArray.dtype,
+        this.rendersFromBandTextures
+      ),
+      interleaved: !this.rendersFromBandTextures,
+    })
   }
 
   /** The map center, or the middle of its bounds without one. */
@@ -1020,6 +1074,7 @@ export class RegionRenderer {
         if (cached && isRegionGpuReady(cached, requiredBands, bandFormat)) {
           continue
         }
+        if (cached && isRegionFailed(cached, this.selectorVersion)) continue
         areas.push(
           cached?.mercatorBounds ??
             this.computeRegionMercatorBounds(
@@ -1077,9 +1132,9 @@ export class RegionRenderer {
   }
 
   /**
-   * A tile's own level: the one its zoom resolves to or, when that has more
-   * regions under the tile than one update may want, the finest coarser
-   * level that fits, so the tile can be wanted in full and shown from its
+   * A tile's own level: the one its zoom resolves to or, when the regions
+   * under the tile alone exceed what one update may want, the finest
+   * coarser level that fits, so the tile can be wanted in full and shown from its
    * target. A level not yet open is trusted until it opens. With no coarser
    * level the tile keeps its own and shows what it has of it.
    */
@@ -1089,7 +1144,13 @@ export class RegionRenderer {
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) return levelIndex
       const count = this.tileRegions(levelIndex, runtime, tile).length
-      if (count <= MAX_WANTED_REGIONS) return levelIndex
+      const budget = this.wantedBudget()
+      if (
+        count <= budget.regions &&
+        count * this.regionBytes(runtime) <= budget.bytes
+      ) {
+        return levelIndex
+      }
       const coarser = this.usableLevel(this.coarserLevel(levelIndex))
       if (coarser === null) return levelIndex
       levelIndex = coarser
@@ -1099,7 +1160,8 @@ export class RegionRenderer {
 
   /**
    * What one tile shows: its own level once every region under it is
-   * drawable, else the one cached level that serves it best meanwhile.
+   * drawable or has failed, else the one cached level that serves it best
+   * meanwhile.
    */
   private planTile(
     tile: TileRequest,
@@ -1117,7 +1179,9 @@ export class RegionRenderer {
           this.makeRegionKey(levelIndex, regionX, regionY)
         )
         if (cached && drawable(cached)) regions.push(cached)
-        else ready = false
+        else if (!cached || !isRegionFailed(cached, this.selectorVersion)) {
+          ready = false
+        }
       }
       if (ready) return { tile, regions, ready }
     }

@@ -33,6 +33,21 @@ const NATIVE_FORMATS: Record<string, BandFormat> = {
   uint16: 'uint',
 }
 
+const NATIVE_BYTES: Record<string, number> = {
+  int8: 1,
+  uint8: 1,
+  int16: 2,
+  uint16: 2,
+}
+
+/** Bytes per value of a band kept in its dtype's native form, else float32. */
+export function bandBytesPerValue(
+  dtype: string | null | undefined,
+  native: boolean
+): number {
+  return (native && dtype && NATIVE_BYTES[dtype]) || 4
+}
+
 export function bandFormatForDtype(
   dtype: string | null | undefined
 ): BandFormat {

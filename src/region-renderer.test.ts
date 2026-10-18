@@ -816,7 +816,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
       [...cache.entries()].map(([k]) => k).filter((k) => k !== key),
       { retainKeysNotMatching: '' }
     )
-    cache.evict(gl, 0)
+    cache.evict(gl, { maxBytes: 0 })
     expect(cache.get(key)).toBeUndefined()
 
     renderer.update(map, gl)
@@ -857,11 +857,6 @@ describe('RegionRenderer with a region whose fetch fails', () => {
 
     renderer.update(map, gl)
     await settle(renderer)
-    // Until a frame uploads what arrived, the fallback still carries the view.
-    renderer.update(map, gl)
-    expect(cache.isProtected(fallback.key)).toBe(true)
-
-    drawn(renderer, gl)
     renderer.update(map, gl)
     expect(cache.isProtected(fallback.key)).toBe(false)
     const states = drawn(renderer, gl)

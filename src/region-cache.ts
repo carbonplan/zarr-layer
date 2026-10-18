@@ -2,24 +2,74 @@ import type { RegionState } from './region-state'
 import { bandTextureKey } from './render-helpers'
 import type { BandFormat } from './band-format'
 
-/** Maximum number of regions to keep in cache (LRU eviction) */
-export const MAX_CACHED_REGIONS = 128
-
 /**
- * Maximum pixel bytes held across cached regions. Region cost varies with
- * band count: one 256x256 float32 band is 256 KB, but 64 bands of it are
- * 16 MB, so the count cap alone would let the cache grow to gigabytes.
+ * Pixel bytes the cache holds across its regions, the limit that governs
+ * it: region cost varies from kilobytes (one small band) to tens of
+ * megabytes (many bands of a large chunk), so no region count fits both.
  */
 export const MAX_CACHED_REGION_BYTES = 512 * 1024 * 1024
 
 /**
+ * Regions the cache may keep: at least the floor, and twice the regions an
+ * update wants, so fallbacks fit beside them, up to a hard bound that keeps
+ * the count of GL objects (a texture and three buffers each) sane.
+ */
+export const MIN_CACHED_REGIONS = 128
+export const MAX_CACHED_REGIONS = 1024
+const CACHED_PER_WANTED_REGION = 2
+
+/**
+ * Share of the cache one update may want; the rest is headroom for the
+ * fallbacks shown while the wanted regions load.
+ */
+export const WANTED_CACHE_SHARE = 1 / 2
+export const MAX_WANTED_REGION_BYTES =
+  MAX_CACHED_REGION_BYTES * WANTED_CACHE_SHARE
+export const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS * WANTED_CACHE_SHARE
+
+export interface RegionCacheLimits {
+  maxBytes: number
+  minRegions: number
+  maxRegions: number
+}
+
+export const DEFAULT_REGION_CACHE_LIMITS: RegionCacheLimits = {
+  maxBytes: MAX_CACHED_REGION_BYTES,
+  minRegions: MIN_CACHED_REGIONS,
+  maxRegions: MAX_CACHED_REGIONS,
+}
+
+/**
  * Bytes a region's pixel data occupies. Band data lives on the CPU until it
- * is uploaded and on the GPU after, so it is counted wherever it is.
+ * is uploaded and on the GPU after, so it is counted wherever it is; a
+ * single band doubling as the interleaved data is counted once.
  */
 export function regionByteLength(region: RegionState): number {
   let bytes = (region.data?.byteLength ?? 0) + region.bandTextureBytes
-  for (const band of region.bandData.values()) bytes += band.byteLength
+  for (const band of region.bandData.values()) {
+    if (band !== region.data) bytes += band.byteLength
+  }
   return bytes
+}
+
+/**
+ * Bytes `regionByteLength` will count for a region once fetched, before it
+ * is: each band at its stored size, plus the interleaved copy that feeds
+ * the main texture when it holds more than one band.
+ */
+export function estimateRegionBytes({
+  pixels,
+  bands,
+  bytesPerValue,
+  interleaved,
+}: {
+  pixels: number
+  bands: number
+  bytesPerValue: number
+  interleaved: boolean
+}): number {
+  const bandBytes = pixels * bands * bytesPerValue
+  return interleaved && bands > 1 ? bandBytes * 2 : bandBytes
 }
 
 export function makeRegionKey(
@@ -166,6 +216,11 @@ export function disposeRegion(
 export class RegionCache {
   private regions = new Map<string, RegionState>()
   private protectedKeys = new Set<string>()
+  readonly limits: RegionCacheLimits
+
+  constructor(limits: Partial<RegionCacheLimits> = {}) {
+    this.limits = { ...DEFAULT_REGION_CACHE_LIMITS, ...limits }
+  }
 
   get size(): number {
     return this.regions.size
@@ -228,16 +283,33 @@ export class RegionCache {
     this.protectedKeys = nextProtected
   }
 
+  /** Regions the cache may keep while an update wants `wantedCount`. */
+  maxRegionsFor(wantedCount: number): number {
+    const { minRegions, maxRegions } = this.limits
+    return Math.min(
+      maxRegions,
+      Math.max(minRegions, wantedCount * CACHED_PER_WANTED_REGION)
+    )
+  }
+
+  /**
+   * Drop the oldest unprotected regions until the cache is within its byte
+   * limit and the region count `wantedCount` allows. Protected regions stay
+   * even past both.
+   */
   evict(
     gl: WebGL2RenderingContext,
-    maxBytes: number = MAX_CACHED_REGION_BYTES
+    {
+      wantedCount = 0,
+      maxBytes = this.limits.maxBytes,
+    }: { wantedCount?: number; maxBytes?: number } = {}
   ): void {
-    // Uses Map iteration order (oldest first). Never evicts currently visible regions.
+    const maxRegions = this.maxRegionsFor(wantedCount)
     let totalBytes = 0
     for (const region of this.regions.values()) {
       totalBytes += regionByteLength(region)
     }
-    while (this.regions.size > MAX_CACHED_REGIONS || totalBytes > maxBytes) {
+    while (this.regions.size > maxRegions || totalBytes > maxBytes) {
       let evictedKey: string | null = null
       for (const key of this.regions.keys()) {
         if (!this.protectedKeys.has(key)) {

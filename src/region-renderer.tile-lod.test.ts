@@ -3,10 +3,12 @@ import { RegionRenderer, type TileRequest } from './region-renderer'
 import { ZarrStore } from './zarr-store'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
 import {
-  MAX_CACHED_REGIONS,
+  MAX_WANTED_REGIONS,
   hasRegionData,
   makeRegionKey,
+  regionByteLength,
   type RegionCache,
+  type RegionCacheLimits,
 } from './region-cache'
 import type { LevelLoader } from './level-loader'
 import type { MapLike } from './types'
@@ -27,6 +29,12 @@ import { boundsIntersect, getTileBounds } from './tile-utils'
  * and zoom 1 selects level 1. Regions are 2x4 pixels with no chunk data:
  * level 0 is a 64x64 region grid (5.625 by 2.8125 degrees), level 1 128x128.
  */
+
+/**
+ * Regions one update may want here: the cache is held to twice that, so
+ * the region budget, not bytes, binds on these small fixtures.
+ */
+const WANTED_REGIONS = 128
 
 function fakeGl({ failTextures = false } = {}) {
   let textures = 0
@@ -194,6 +202,12 @@ async function makeRenderer({
   single = false,
   wide = false,
   strips = false,
+  limits = { maxRegions: 2 * WANTED_REGIONS },
+}: {
+  single?: boolean
+  wide?: boolean
+  strips?: boolean
+  limits?: Partial<RegionCacheLimits>
 } = {}) {
   // `wide`: a global single level of 64x64 regions, 5.625 degrees each.
   // `strips`: a global single level of 72 pole-to-pole regions, 5° wide.
@@ -262,7 +276,16 @@ async function makeRenderer({
   await store.initialized
 
   const invalidate = vi.fn()
-  const renderer = new RegionRenderer(store, 'temperature', {}, invalidate)
+  const renderer = new RegionRenderer(
+    store,
+    'temperature',
+    {},
+    invalidate,
+    1,
+    0,
+    undefined,
+    limits
+  )
   await renderer.initialize()
   const gl = fakeGl()
   return { renderer, invalidate, gl }
@@ -419,7 +442,7 @@ describe('per-tile level selection', () => {
     for (const key of coarseKeys) {
       expect(cache.isProtected(key)).toBe(false)
     }
-    cache.evict(gl, 1)
+    cache.evict(gl, { maxBytes: 1 })
     expect([...cache].every(([key]) => key.startsWith('1:'))).toBe(true)
   })
 
@@ -602,7 +625,7 @@ describe('per-tile level selection', () => {
     expect(coarse.length).toBeGreaterThan(0)
     for (const key of coarse) expect(cache.isProtected(key)).toBe(true)
 
-    cache.evict(failing, 1)
+    cache.evict(failing, { maxBytes: 1 })
     for (const key of coarse) expect(cache.get(key)).toBeDefined()
     const draws = seam(renderer).plannedDraws(failing)
     expect(draws.length).toBeGreaterThan(0)
@@ -692,7 +715,7 @@ describe('per-tile level selection', () => {
     renderer.update(map, gl)
 
     expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
-    expect(wantedAt(renderer, 0).length).toBeLessThanOrEqual(MAX_CACHED_REGIONS)
+    expect(wantedAt(renderer, 0).length).toBeLessThanOrEqual(WANTED_REGIONS)
     await settle(renderer)
     seam(renderer).plannedDraws(gl)
     const plan = seam(renderer).planTile(wide, () => true)
@@ -926,11 +949,11 @@ describe('region budget across tiles', () => {
       seam(renderer).tileRegions(1, fine, tile)
     )
     expect(
-      fineRegions.every((regions) => regions.length <= MAX_CACHED_REGIONS)
+      fineRegions.every((regions) => regions.length <= WANTED_REGIONS)
     ).toBe(true)
     expect(
       new Set(fineRegions.flat().map((r) => `${r.regionX},${r.regionY}`)).size
-    ).toBeGreaterThan(MAX_CACHED_REGIONS)
+    ).toBeGreaterThan(WANTED_REGIONS)
 
     renderer.setCoveringTiles(tiles)
     renderer.update(map, gl)
@@ -941,7 +964,7 @@ describe('region budget across tiles', () => {
 
     // Settled: a further update wants the same.
     expect([...seam(renderer).wantedKeys].sort()).toEqual(wanted)
-    expect(wanted.length).toBeLessThanOrEqual(MAX_CACHED_REGIONS)
+    expect(wanted.length).toBeLessThanOrEqual(WANTED_REGIONS)
     const levels = tiles.map((tile) => seam(renderer).tileLevel(tile))
     expect(levels.slice(0, 2)).toEqual([1, 1])
     expect(levels.slice(-2)).toEqual([0, 0])
@@ -998,7 +1021,7 @@ describe('region budget with hook tiles from an earlier view', () => {
     renderer.update(map, gl)
 
     expect([...seam(renderer).tileLevels.values()]).toEqual([1, 1])
-    expect(seam(renderer).wantedKeys.size).toBe(MAX_CACHED_REGIONS)
+    expect(seam(renderer).wantedKeys.size).toBe(WANTED_REGIONS)
     const fine = seam(renderer).levelLoader.runtime(1)!
     for (const tile of narrow) {
       for (const { regionX, regionY } of seam(renderer).tileRegions(
@@ -1077,6 +1100,63 @@ describe('tiles drawn by the draped hooks', () => {
   })
 })
 
+describe('region byte budget', () => {
+  it('lets a dataset of small regions want more than the old region count', async () => {
+    // Regions of 2x4 float32 pixels: the bytes allow far more than 128 of
+    // them, so four zoom-2 tiles over the northern hemisphere are wanted in
+    // full under the default limits.
+    const { renderer, gl } = await makeRenderer({ single: true, limits: {} })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const tiles: TileRequest[] = []
+    for (let x = 0; x < 4; x++) {
+      tiles.push({ tileId: { z: 2, x, y: 1 }, zoom: 0 })
+    }
+    const runtime = seam(renderer).levelLoader.runtime(0)!
+    const all = new Set(
+      tiles.flatMap((tile) =>
+        seam(renderer)
+          .tileRegions(0, runtime, tile)
+          .map((r) => makeRegionKey(0, r.regionX, r.regionY))
+      )
+    )
+    expect(all.size).toBeGreaterThan(128)
+    expect(all.size).toBeLessThanOrEqual(MAX_WANTED_REGIONS)
+
+    renderer.setCoveringTiles(tiles)
+    renderer.update(map, gl)
+
+    expect([...seam(renderer).wantedKeys].sort()).toEqual([...all].sort())
+  })
+
+  it('holds a dataset of large regions to the byte budget', async () => {
+    // Regions of 32x64 float32 pixels, 8 KB each, against a 1 MB cache: an
+    // update may want half of it, 64 regions, well short of the region
+    // budget. The world tile needs all 4096 regions of the only level.
+    const { renderer, gl } = await makeRenderer({
+      wide: true,
+      limits: { maxBytes: 1024 * 1024 },
+    })
+    const map = { ...viewportAt(0), getCenter: () => ({ lng: 0, lat: 0 }) }
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    renderer.setCoveringTiles([{ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }])
+    renderer.update(map, gl)
+    expect(seam(renderer).wantedKeys.size).toBe(64)
+
+    // The estimate the budget ran on matches what the regions hold.
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    let bytes = 0
+    for (const key of seam(renderer).wantedKeys) {
+      bytes += regionByteLength(cache.get(key)!)
+    }
+    expect(bytes).toBe(512 * 1024)
+  })
+})
+
 describe('single-resolution datasets', () => {
   it('caps the wanted regions at the cache size, nearest tiles first', async () => {
     // With no coarser level, far tiles map onto many regions of the only
@@ -1098,7 +1178,7 @@ describe('single-resolution datasets', () => {
     renderer.update(map, gl)
 
     const wanted = seam(renderer).wantedKeys
-    expect(wanted.size).toBe(MAX_CACHED_REGIONS)
+    expect(wanted.size).toBe(WANTED_REGIONS)
     // The nearest tile (lon -135..-90, lat 41..67) covers region column 4..8,
     // rows 4..8; its regions are in despite being listed last.
     expect(wanted.has(makeRegionKey(0, 5, 5))).toBe(true)
@@ -1115,13 +1195,13 @@ describe('single-resolution datasets', () => {
 
     renderer.setCoveringTiles([world])
     renderer.update(map, gl)
-    expect(seam(renderer).wantedKeys.size).toBe(MAX_CACHED_REGIONS)
+    expect(seam(renderer).wantedKeys.size).toBe(WANTED_REGIONS)
     await settle(renderer)
     seam(renderer).plannedDraws(gl)
 
     const plan = seam(renderer).planTile(world, () => true)
     expect(plan.ready).toBe(false)
-    expect(plan.regions.length).toBe(MAX_CACHED_REGIONS)
+    expect(plan.regions.length).toBe(WANTED_REGIONS)
     expect(seam(renderer).plannedDraws(gl).length).toBeGreaterThan(0)
   })
 
@@ -1140,7 +1220,7 @@ describe('single-resolution datasets', () => {
     renderer.update(map, gl)
 
     const wanted = seam(renderer).wantedKeys
-    expect(wanted.size).toBe(MAX_CACHED_REGIONS)
+    expect(wanted.size).toBe(WANTED_REGIONS)
     // Column 25 (lon 101..112), row 19 (lat -17..-22) holds the center.
     expect(wanted.has(makeRegionKey(0, 25, 19))).toBe(true)
     expect(wanted.has(makeRegionKey(0, 0, 0))).toBe(false)
