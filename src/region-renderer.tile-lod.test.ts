@@ -94,6 +94,11 @@ type Seam = {
     drawable: (region: RegionState) => boolean
   ): { regions: RegionState[]; ready: boolean }
   viewportTiles(map: MapLike): TileRequest[]
+  tileRegions(
+    levelIndex: number,
+    levelMeta: NonNullable<ReturnType<LevelLoader['runtime']>>,
+    tile: TileRequest
+  ): RegionCoordinate[]
   projection: ProjectionContext
   wantedCovered(): boolean
 }
@@ -895,6 +900,52 @@ describe('per-tile level selection', () => {
 
     expect([...seam(renderer).wantedRegions.keys()]).toEqual([1])
     expect(wantedAt(renderer, 1).length).toBeGreaterThan(0)
+  })
+})
+
+describe('region budget across tiles', () => {
+  it('coarsens the finest tiles until the whole cover can be wanted in full', async () => {
+    // Twelve zoom-5 tiles (lon -135..-67.5, lat 41..56) at zoom 1: each fits
+    // the budget at level 1, but together they need more than one update
+    // may want. Spending it nearest first would leave the far tiles with
+    // nothing; read from level 0, every tile is wanted in full.
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    const tiles: TileRequest[] = []
+    for (let y = 10; y <= 11; y++) {
+      for (let x = 4; x <= 9; x++)
+        tiles.push({ tileId: { z: 5, x, y }, zoom: 1 })
+    }
+    const fine = seam(renderer).levelLoader.runtime(1)!
+    const fineRegions = tiles.map((tile) =>
+      seam(renderer).tileRegions(1, fine, tile)
+    )
+    expect(
+      fineRegions.every((regions) => regions.length <= MAX_CACHED_REGIONS)
+    ).toBe(true)
+    expect(
+      new Set(fineRegions.flat().map((r) => `${r.regionX},${r.regionY}`)).size
+    ).toBeGreaterThan(MAX_CACHED_REGIONS)
+
+    renderer.setCoveringTiles(tiles)
+    renderer.update(map, gl)
+    await waitForRuntime(renderer, 0)
+    renderer.update(map, gl)
+    const wanted = [...seam(renderer).wantedKeys]
+    renderer.update(map, gl)
+
+    // Settled: a further update wants the same.
+    expect([...seam(renderer).wantedKeys]).toEqual(wanted)
+    expect([...seam(renderer).wantedRegions.keys()]).toEqual([0])
+    expect(wanted.length).toBeLessThanOrEqual(MAX_CACHED_REGIONS)
+    await settle(renderer)
+    for (const tile of tiles) {
+      const plan = seam(renderer).planTile(tile, () => true)
+      expect(plan.ready).toBe(true)
+      expect(plan.regions.length).toBeGreaterThan(0)
+      expect(
+        plan.regions.every((r) => seam(renderer).wantedKeys.has(r.key))
+      ).toBe(true)
+    }
   })
 })
 

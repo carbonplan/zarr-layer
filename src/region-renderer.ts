@@ -125,10 +125,10 @@ export interface TileRequest {
 }
 
 /**
- * Regions one update may want in total. A dataset with no coarser level maps
- * a far tile onto many regions of its only level; wanting more than the
- * cache can hold would only make it thrash, so selection stops there,
- * nearest tiles first.
+ * Regions one update may want in total: wanting more than the cache can hold
+ * would only make it thrash. A cover needing more reads coarser levels until
+ * it fits; with no coarser level left, selection stops there, nearest tiles
+ * first.
  */
 const MAX_WANTED_REGIONS = MAX_CACHED_REGIONS
 
@@ -171,6 +171,13 @@ interface TileDraw {
   regions: RegionState[]
   /** Whether they are the tile's own level, complete. */
   ready: boolean
+}
+
+/** The level a tile targets and its regions there, none until it opens. */
+interface TileTarget {
+  levelIndex: number
+  runtime: LevelRuntime | null
+  regions: RegionCoordinate[]
 }
 
 /** A region to draw on the direct path, clipped to the tiles that show it. */
@@ -261,6 +268,9 @@ export class RegionRenderer {
   private previousDrawnTiles: Map<string, TileRequest> = new Map()
   private drawnTilesRevision: number | null = null
   private tileRegionsMemo: Map<string, RegionCoordinate[]> = new Map()
+  // Widest level any tile may target, set by the last selection so the
+  // whole cover fits the region budget; planning reads it too.
+  private levelWidthCap: number = Infinity
   private lastViewportHash: string = ''
   private selectorVersion: number = 0 // Incremented on selector change to track stale regions
 
@@ -770,31 +780,24 @@ export class RegionRenderer {
       if (tiles.length === 0) return wanted
       this.syntheticCover = tiles
     }
-    const perTile: Array<{
-      levelIndex: number
-      runtime: LevelRuntime
-      regions: RegionCoordinate[]
-    }> = []
+    const { cap, targets: perTile } = this.fitLevelWidthCap(tiles)
+    this.levelWidthCap = cap
     let total = 0
-    for (const tile of tiles) {
-      const levelIndex = this.tileLevel(tile)
-      if (levelIndex === null) continue
-      const runtime = this.levelLoader.runtime(levelIndex)
-      if (!runtime) {
-        void this.levelLoader.ensureRuntime(levelIndex)
-        this.pendingLevels.add(levelIndex)
-        continue
+    for (const target of perTile) {
+      if (target.runtime) {
+        total += target.regions.length
+      } else {
+        void this.levelLoader.ensureRuntime(target.levelIndex)
+        this.pendingLevels.add(target.levelIndex)
       }
-      const regions = this.tileRegions(levelIndex, runtime, tile)
-      perTile.push({ levelIndex, runtime, regions })
-      total += regions.length
     }
-    // Nearest tiles come first already. When the cap will bite, order each
+    // Nearest tiles come first already. When the budget bites, order each
     // tile's regions by distance from the map center too, so a single tile
     // spanning many regions cannot spend the budget on its far corner.
     const truncating = total > MAX_WANTED_REGIONS
     const seen = new Set<string>()
     for (const { levelIndex, runtime, regions } of perTile) {
+      if (!runtime) continue
       const ordered = truncating
         ? this.nearestCenterFirst(regions, runtime, map)
         : regions
@@ -816,6 +819,61 @@ export class RegionRenderer {
       }
     }
     return wanted
+  }
+
+  /**
+   * Each tile's target level under a level width cap, with its regions
+   * there; a level not yet open has none to give. Tiles no level can serve
+   * are left out.
+   */
+  private tileTargets(tiles: TileRequest[], cap: number): TileTarget[] {
+    const targets: TileTarget[] = []
+    for (const tile of tiles) {
+      const levelIndex = this.tileLevel(tile, cap)
+      if (levelIndex === null) continue
+      const runtime = this.levelLoader.runtime(levelIndex)
+      const regions = runtime ? this.tileRegions(levelIndex, runtime, tile) : []
+      targets.push({ levelIndex, runtime, regions })
+    }
+    return targets
+  }
+
+  /**
+   * The widest level the tiles may target so that every tile can be wanted
+   * in full, with the tiles' targets under it: while their regions together
+   * exceed the budget, the tiles at the finest target level drop to the next
+   * coarser one. Levels not yet open count no regions; the cap depends only
+   * on the tiles and the levels open, which only ever grow, so it settles.
+   * Infinite when the tiles fit as they are; when even the coarsest level
+   * they can reach does not fit, selection keeps the nearest regions.
+   */
+  private fitLevelWidthCap(tiles: TileRequest[]): {
+    cap: number
+    targets: TileTarget[]
+  } {
+    let cap = Infinity
+    for (;;) {
+      const targets = this.tileTargets(tiles, cap)
+      const keys = new Set<string>()
+      let finest: number | null = null
+      for (const { levelIndex, regions } of targets) {
+        for (const { regionX, regionY } of regions) {
+          keys.add(this.makeRegionKey(levelIndex, regionX, regionY))
+        }
+        if (
+          finest === null ||
+          this.levelWidth(levelIndex) > this.levelWidth(finest)
+        ) {
+          finest = levelIndex
+        }
+      }
+      if (keys.size <= MAX_WANTED_REGIONS || finest === null) {
+        return { cap, targets }
+      }
+      const coarser = this.usableLevel(this.coarserLevel(finest))
+      if (coarser === null) return { cap, targets }
+      cap = this.levelWidth(coarser)
+    }
   }
 
   /** Regions ordered by their distance from the map center, in degrees. */
@@ -914,20 +972,26 @@ export class RegionRenderer {
   }
 
   /**
-   * The level a tile targets: the one its zoom resolves to or, when that
-   * has more regions under the tile than one update may want, the finest
-   * coarser level that fits, so the tile can be wanted in full and shown
-   * from its target. A level not yet open is trusted until it opens. With
-   * no coarser level the tile keeps its own and shows what it has of it.
-   * Null when no level can serve the tile, which then draws nothing.
+   * The level a tile targets: the one its zoom resolves to or, when that is
+   * wider than the cap or has more regions under the tile than one update
+   * may want, the finest coarser level that fits, so the tile can be wanted
+   * in full and shown from its target. A level not yet open is trusted
+   * until it opens. With no coarser level the tile keeps its own and shows
+   * what it has of it. Null when no level can serve the tile, which then
+   * draws nothing.
    */
-  private tileLevel(tile: TileRequest): number | null {
+  private tileLevel(
+    tile: TileRequest,
+    cap: number = this.levelWidthCap
+  ): number | null {
     let levelIndex = this.resolveLevel(tile.zoom)
     while (levelIndex !== null) {
-      const runtime = this.levelLoader.runtime(levelIndex)
-      if (!runtime) return levelIndex
-      const count = this.tileRegions(levelIndex, runtime, tile).length
-      if (count <= MAX_WANTED_REGIONS) return levelIndex
+      if (this.levelWidth(levelIndex) <= cap) {
+        const runtime = this.levelLoader.runtime(levelIndex)
+        if (!runtime) return levelIndex
+        const count = this.tileRegions(levelIndex, runtime, tile).length
+        if (count <= MAX_WANTED_REGIONS) return levelIndex
+      }
       const coarser = this.usableLevel(this.coarserLevel(levelIndex))
       if (coarser === null) return levelIndex
       levelIndex = coarser
