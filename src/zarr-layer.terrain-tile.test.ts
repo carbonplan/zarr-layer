@@ -62,6 +62,9 @@ const SOUTH_EAST: Bounds = [
   [170, -10],
 ]
 
+/** Stands in for MapLibre's terrain object, `map.terrain`. */
+const TERRAIN = { sourceCache: {} }
+
 function fakeMap({
   globe = false,
   zoom = 0,
@@ -84,6 +87,9 @@ function fakeMap({
   const map = {
     getProjection: () => ({ type: state.globe ? 'globe' : 'mercator' }),
     getTerrain: () => (state.terrain ? { source: 'dem' } : null),
+    get terrain() {
+      return state.terrain ? TERRAIN : undefined
+    },
     getSource: (id: string) =>
       id === 'dem' && terrainTileSize
         ? { tileSize: terrainTileSize }
@@ -320,6 +326,26 @@ describe('per-tile levels', () => {
       { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5, poles: false, wrap: 0 },
       { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5, poles: false, wrap: 0 },
     ])
+  })
+
+  it('covers terrain with the map terrain, so tile zooms follow the surface', async () => {
+    // MapLibre keeps every tile at the center zoom up to a 60 degree pitch
+    // unless given the terrain, which its own sources pass.
+    const { layer, gl, map, state } = await addLayer({
+      zoom: 3.5,
+      cover: [{ z: 3, x: 1, y: 1 }],
+    })
+    const coveringTiles = vi.spyOn(map, 'coveringTiles')
+
+    layer.prerender(gl, {})
+    expect(coveringTiles).toHaveBeenLastCalledWith({
+      tileSize: 512,
+      terrain: TERRAIN,
+    })
+
+    state.terrain = false
+    layer.prerender(gl, {})
+    expect(coveringTiles).toHaveBeenLastCalledWith({ tileSize: 512 })
   })
 
   it('extends the cover to the poles when drawn directly on the globe', async () => {

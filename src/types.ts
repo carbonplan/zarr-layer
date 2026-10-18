@@ -204,10 +204,17 @@ export interface MapLike {
   getRenderWorldCopies?(): boolean
   getTerrain?(): unknown
   getSource?(id: string): unknown
-  /** MapLibre: the tiles covering the view for a tile size in screen pixels. */
+  /**
+   * MapLibre: the tiles covering the view for a tile size in screen pixels.
+   * Given the map's terrain, tile zooms follow the distance to the terrain
+   * surface, as the map's own sources cover it.
+   */
   coveringTiles?(options: {
     tileSize: number
+    terrain?: unknown
   }): Array<{ canonical: { z: number; x: number; y: number }; wrap?: number }>
+  /** MapLibre: the terrain the map is drawn on, undefined without terrain. */
+  terrain?: unknown
   on?(event: string, handler: (...args: unknown[]) => void): void
   off?(event: string, handler: (...args: unknown[]) => void): void
   triggerRepaint?(): void

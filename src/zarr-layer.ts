@@ -862,8 +862,8 @@ export class ZarrLayer {
   /**
    * The tiles the map draws this frame, each with the map zoom its pixel
    * density matches, when the map exposes its tile cover (MapLibre does).
-   * Tilted, the cover reaches lower zooms towards the horizon, so the layer
-   * reads coarser levels there than at the center.
+   * Tilted or on terrain, the cover reaches lower zooms towards the horizon,
+   * so the layer reads coarser levels there than at the center.
    */
   private coveringTiles(): TileRequest[] | null {
     const map = this.map
@@ -871,8 +871,13 @@ export class ZarrLayer {
     // Drawn directly on the globe, the layer reaches the poles, so the
     // cover's polar edge tiles must too; draped tiles stay Mercator.
     const poles = this.isGlobeProjection() && !map.getTerrain?.()
+    const terrain = map.terrain ?? undefined
     return map
-      .coveringTiles({ tileSize: COVERING_TILE_SIZE })
+      .coveringTiles(
+        terrain
+          ? { tileSize: COVERING_TILE_SIZE, terrain }
+          : { tileSize: COVERING_TILE_SIZE }
+      )
       .map(({ canonical, wrap }) => ({
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
