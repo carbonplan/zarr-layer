@@ -831,16 +831,15 @@ export class RegionRenderer {
     // Tiles come in order already: the cover's, then the hooks', nearest
     // first. When the budget bites, order each tile's regions by distance
     // from the map center too, so a single tile spanning many regions cannot
-    // spend the budget on its far corner. When not even the first region
-    // fits, the nearest tile is wanted anyway, so the view never goes blank.
+    // spend the budget on its far corner. The first region, the nearest,
+    // is wanted even when it alone exceeds the budget, so the view never
+    // goes blank; past it the budget holds.
     const truncating =
       totalRegions > budget.regions || totalBytes > budget.bytes
     const seen = new Set<string>()
     let wantedBytes = 0
-    let nearestOnly = false
     for (const { levelIndex, runtime, regions } of perTile) {
       if (!runtime) continue
-      if (nearestOnly) break
       const ordered = truncating
         ? this.nearestCenterFirst(regions, runtime, map)
         : regions
@@ -853,10 +852,7 @@ export class RegionRenderer {
         if (seen.has(key)) continue
         if (seen.size >= budget.regions) return wanted
         const cost = this.regionBytes(runtime, region)
-        if (wantedBytes + cost > budget.bytes) {
-          if (seen.size > 0 && !nearestOnly) return wanted
-          nearestOnly = true
-        }
+        if (seen.size > 0 && wantedBytes + cost > budget.bytes) return wanted
         seen.add(key)
         wantedBytes += cost
         let list = wanted.get(levelIndex)

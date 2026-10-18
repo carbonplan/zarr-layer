@@ -1208,29 +1208,58 @@ describe('region byte estimates', () => {
     expect(bytes).toEqual([64 * 1024, 32 * 1024])
   })
 
-  it('wants the nearest tile even when no region fits the budget', async () => {
-    // 16 KB regions against an update budget of 512 bytes: nothing fits, but
-    // a blank view helps no one, so the nearest tile is wanted in full and
-    // the next not at all.
+  it('wants the single nearest region when it alone exceeds the budget', async () => {
+    // 16 KB regions under the world tile against an update budget of 8 KB:
+    // a blank view helps no one, so the region nearest the map center is
+    // wanted, and nothing more. The world tile shows what it has.
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
     const { renderer, gl } = await makeRenderer({
       wide: true,
-      limits: { maxBytes: 1024 },
+      limits: { maxBytes: 16 * 1024 },
     })
-    const map = viewportAt(0)
+    // Column 32 (lon 0..5.6), row 31 (lat 0..2.8) holds the center.
+    let map = { ...viewportAt(0), getCenter: () => ({ lng: 2, lat: 1 }) }
     renderer.update(map, gl)
     await settle(renderer)
-    const nearest: TileRequest = { tileId: { z: 3, x: 0, y: 3 }, zoom: 0 }
-    const next: TileRequest = { tileId: { z: 3, x: 4, y: 3 }, zoom: 0 }
 
-    renderer.setCoveringTiles([nearest, next])
+    renderer.setCoveringTiles([world])
     renderer.update(map, gl)
+    expect([...seam(renderer).wantedKeys]).toEqual(['0:32,31'])
 
-    const runtime = seam(renderer).levelLoader.runtime(0)!
-    const own = seam(renderer)
-      .tileRegions(0, runtime, nearest)
-      .map((r) => makeRegionKey(0, r.regionX, r.regionY))
-    expect(own.length).toBeGreaterThan(0)
-    expect([...seam(renderer).wantedKeys].sort()).toEqual(own.sort())
+    // Panning swaps the forced region; the one before is neither wanted nor
+    // shown, so it is evicted rather than piling up.
+    const cache = seam(renderer).regionCache
+    for (const lng of [20, 40]) {
+      await settle(renderer)
+      expect(seam(renderer).plannedDraws(gl).length).toBe(1)
+      map = { ...viewportAt(0), getCenter: () => ({ lng, lat: 1 }) }
+      renderer.update(map, gl)
+      expect(seam(renderer).wantedKeys.size).toBe(1)
+      await settle(renderer)
+      renderer.update(map, gl)
+      expect([...cache.values()].map((r) => r.key)).toEqual([
+        ...seam(renderer).wantedKeys,
+      ])
+    }
+  })
+
+  it('wants the next nearest region once the budget fits two', async () => {
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+    const { renderer, gl } = await makeRenderer({
+      wide: true,
+      limits: { maxBytes: 64 * 1024 },
+    })
+    const map = { ...viewportAt(0), getCenter: () => ({ lng: 2, lat: 1 }) }
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    renderer.setCoveringTiles([world])
+    renderer.update(map, gl)
+    // Row 32 (lat 0..-2.8) lies just south of the center.
+    expect([...seam(renderer).wantedKeys].sort()).toEqual([
+      '0:32,31',
+      '0:32,32',
+    ])
   })
 })
 
