@@ -820,7 +820,9 @@ export class RegionRenderer {
     for (const target of perTile) {
       if (target.runtime) {
         totalRegions += target.regions.length
-        totalBytes += target.regions.length * this.regionBytes(target.runtime)
+        for (const region of target.regions) {
+          totalBytes += this.regionBytes(target.runtime, region)
+        }
       } else {
         void this.levelLoader.ensureRuntime(target.levelIndex)
         this.pendingLevels.add(target.levelIndex)
@@ -829,14 +831,16 @@ export class RegionRenderer {
     // Tiles come in order already: the cover's, then the hooks', nearest
     // first. When the budget bites, order each tile's regions by distance
     // from the map center too, so a single tile spanning many regions cannot
-    // spend the budget on its far corner.
+    // spend the budget on its far corner. When not even the first region
+    // fits, the nearest tile is wanted anyway, so the view never goes blank.
     const truncating =
       totalRegions > budget.regions || totalBytes > budget.bytes
     const seen = new Set<string>()
     let wantedBytes = 0
+    let nearestOnly = false
     for (const { levelIndex, runtime, regions } of perTile) {
       if (!runtime) continue
-      const cost = this.regionBytes(runtime)
+      if (nearestOnly) break
       const ordered = truncating
         ? this.nearestCenterFirst(regions, runtime, map)
         : regions
@@ -847,8 +851,11 @@ export class RegionRenderer {
           region.regionY
         )
         if (seen.has(key)) continue
-        if (seen.size >= budget.regions || wantedBytes + cost > budget.bytes) {
-          return wanted
+        if (seen.size >= budget.regions) return wanted
+        const cost = this.regionBytes(runtime, region)
+        if (wantedBytes + cost > budget.bytes) {
+          if (seen.size > 0 && !nearestOnly) return wanted
+          nearestOnly = true
         }
         seen.add(key)
         wantedBytes += cost
@@ -882,8 +889,9 @@ export class RegionRenderer {
   /**
    * The level each tile targets so that the whole cover can be wanted in
    * full. Each starts at its own; while their regions together exceed the
-   * budget, in count or estimated bytes, tiles drop one level at a time, farthest first (coarser zooms,
-   * then farther from the map center), working inward and round again.
+   * budget, in count or estimated bytes, tiles drop one level at a time,
+   * farthest first (coarser zooms, then farther from the map center),
+   * working inward and round again.
    * Tiles at the coarsest usable level are passed over; when none can drop,
    * selection keeps the nearest regions. Levels not yet open count no
    * regions and are opened, so the fit depends only on the tiles and the
@@ -903,34 +911,38 @@ export class RegionRenderer {
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) {
         void this.levelLoader.ensureRuntime(levelIndex)
-        return { keys: [], cost: 0 }
+        return { keys: [], costs: [] }
       }
-      const keys = this.tileRegions(levelIndex, runtime, tile).map((region) =>
-        this.makeRegionKey(levelIndex, region.regionX, region.regionY)
-      )
-      return { keys, cost: this.regionBytes(runtime) }
+      const regions = this.tileRegions(levelIndex, runtime, tile)
+      return {
+        keys: regions.map((region) =>
+          this.makeRegionKey(levelIndex, region.regionX, region.regionY)
+        ),
+        costs: regions.map((region) => this.regionBytes(runtime, region)),
+      }
     }
-    const add = ({ keys, cost }: { keys: string[]; cost: number }) => {
-      for (const key of keys) {
+    type Regions = { keys: string[]; costs: number[] }
+    const add = ({ keys, costs }: Regions) => {
+      keys.forEach((key, i) => {
         const count = counts.get(key) ?? 0
         if (count === 0) {
           unique++
-          bytes += cost
+          bytes += costs[i]
         }
         counts.set(key, count + 1)
-      }
+      })
     }
-    const remove = ({ keys, cost }: { keys: string[]; cost: number }) => {
-      for (const key of keys) {
+    const remove = ({ keys, costs }: Regions) => {
+      keys.forEach((key, i) => {
         const count = counts.get(key)!
         if (count === 1) {
           counts.delete(key)
           unique--
-          bytes -= cost
+          bytes -= costs[i]
         } else {
           counts.set(key, count - 1)
         }
-      }
+      })
     }
 
     const { lng, lat } = this.mapCenter(map)
@@ -940,7 +952,7 @@ export class RegionRenderer {
       tile: TileRequest
       key: string
       levelIndex: number
-      regions: { keys: string[]; cost: number }
+      regions: Regions
       distance: number
     }> = []
     for (const tile of tiles) {
@@ -997,15 +1009,20 @@ export class RegionRenderer {
   }
 
   /**
-   * Estimated pixel bytes of one region of a level once fetched, from its
-   * region size, the bands the selector reads and the form they are kept
-   * in: integer dtypes stay native for band-sampling shaders, everything
-   * else is float32.
+   * Estimated pixel bytes of one region once fetched, from its extent in the
+   * level (regions grown past the array, and edge regions, hold less), the
+   * bands the selector reads and the form they are kept in: integer dtypes
+   * stay native for band-sampling shaders, everything else is float32.
    */
-  private regionBytes(runtime: LevelRuntime): number {
-    const [height, width] = runtime.regionSize
+  private regionBytes(
+    runtime: LevelRuntime,
+    { regionX, regionY }: RegionCoordinate
+  ): number {
+    const [regionH, regionW] = runtime.regionSize
+    const width = Math.min(regionW, runtime.width - regionX * regionW)
+    const height = Math.min(regionH, runtime.height - regionY * regionH)
     return estimateRegionBytes({
-      pixels: height * width,
+      pixels: Math.max(0, width) * Math.max(0, height),
       bands: Math.max(1, this.bandNames.length),
       bytesPerValue: bandBytesPerValue(
         runtime.zarrArray.dtype,
@@ -1143,12 +1160,11 @@ export class RegionRenderer {
     while (levelIndex !== null) {
       const runtime = this.levelLoader.runtime(levelIndex)
       if (!runtime) return levelIndex
-      const count = this.tileRegions(levelIndex, runtime, tile).length
+      const regions = this.tileRegions(levelIndex, runtime, tile)
       const budget = this.wantedBudget()
-      if (
-        count <= budget.regions &&
-        count * this.regionBytes(runtime) <= budget.bytes
-      ) {
+      let bytes = 0
+      for (const region of regions) bytes += this.regionBytes(runtime, region)
+      if (regions.length <= budget.regions && bytes <= budget.bytes) {
         return levelIndex
       }
       const coarser = this.usableLevel(this.coarserLevel(levelIndex))

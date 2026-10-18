@@ -202,16 +202,32 @@ async function makeRenderer({
   single = false,
   wide = false,
   strips = false,
+  grown = false,
   limits = { maxRegions: 2 * WANTED_REGIONS },
 }: {
   single?: boolean
   wide?: boolean
   strips?: boolean
+  grown?: boolean
   limits?: Partial<RegionCacheLimits>
 } = {}) {
   // `wide`: a global single level of 64x64 regions, 5.625 degrees each.
   // `strips`: a global single level of 72 pole-to-pole regions, 5° wide.
-  const memory = strips
+  // `grown`: a global single level of 64x192 pixels whose 32x64 chunks grow
+  // to 128x128 regions, past the array: a 64x128 region west of lon 60 and
+  // a 64x64 edge region east of it.
+  const memory = grown
+    ? buildMemoryZarrStore({
+        arrays: [
+          {
+            name: 'temperature',
+            shape: [64, 192],
+            chunkShape: [32, 64],
+            dimensionNames: ['lat', 'lon'],
+          },
+        ],
+      })
+    : strips
     ? buildMemoryZarrStore({
         arrays: [
           {
@@ -282,7 +298,7 @@ async function makeRenderer({
     {},
     invalidate,
     1,
-    0,
+    grown ? 128 : 0,
     undefined,
     limits
   )
@@ -1154,6 +1170,62 @@ describe('region byte budget', () => {
       bytes += regionByteLength(cache.get(key)!)
     }
     expect(bytes).toBe(512 * 1024)
+  })
+})
+
+describe('region byte estimates', () => {
+  it('estimates regions grown past the array at the extent they hold', async () => {
+    // Grown regions are 128x128 pixels, 64 KB of float32 each, but the array
+    // holds only 64x128 and 64x64 of them, 48 KB together. The update may
+    // want 56 KB: estimated at full size not even the first region fits.
+    const { renderer, gl } = await makeRenderer({
+      grown: true,
+      limits: { maxBytes: 2 * 56 * 1024 },
+    })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    // The western half-world meets only the first region; the eastern
+    // meets both.
+    renderer.setCoveringTiles([
+      { tileId: { z: 1, x: 0, y: 0 }, zoom: 0 },
+      { tileId: { z: 1, x: 1, y: 0 }, zoom: 0 },
+    ])
+    renderer.update(map, gl)
+    expect([...seam(renderer).wantedKeys].sort()).toEqual(['0:0,0', '0:1,0'])
+
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    const bytes = [...seam(renderer).wantedKeys].map((key) =>
+      regionByteLength(cache.get(key)!)
+    )
+    expect(bytes).toEqual([32 * 1024, 16 * 1024])
+  })
+
+  it('wants the nearest tile even when no region fits the budget', async () => {
+    // 8 KB regions against an update budget of 512 bytes: nothing fits, but
+    // a blank view helps no one, so the nearest tile is wanted in full and
+    // the next not at all.
+    const { renderer, gl } = await makeRenderer({
+      wide: true,
+      limits: { maxBytes: 1024 },
+    })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const nearest: TileRequest = { tileId: { z: 3, x: 0, y: 3 }, zoom: 0 }
+    const next: TileRequest = { tileId: { z: 3, x: 4, y: 3 }, zoom: 0 }
+
+    renderer.setCoveringTiles([nearest, next])
+    renderer.update(map, gl)
+
+    const runtime = seam(renderer).levelLoader.runtime(0)!
+    const own = seam(renderer)
+      .tileRegions(0, runtime, nearest)
+      .map((r) => makeRegionKey(0, r.regionX, r.regionY))
+    expect(own.length).toBeGreaterThan(0)
+    expect([...seam(renderer).wantedKeys].sort()).toEqual(own.sort())
   })
 })
 
