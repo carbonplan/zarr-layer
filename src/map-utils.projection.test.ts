@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   computeWorldOffsets,
+  customProjectionName,
   isGlobeProjection,
   resolveProjectionParams,
 } from './map-utils'
@@ -51,6 +52,36 @@ describe('isGlobeProjection', () => {
     expect(isGlobeProjection(null)).toBe(false)
     expect(isGlobeProjection(undefined)).toBe(false)
     expect(isGlobeProjection({})).toBe(false)
+  })
+})
+
+describe('customProjectionName', () => {
+  it('names projections registered with addProjection', () => {
+    expect(customProjectionName({ type: 'EPSG:3031' })).toBe('EPSG:3031')
+    expect(customProjectionName({ type: 'custom:floor-plan' })).toBe(
+      'custom:floor-plan'
+    )
+    expect(customProjectionName({ type: 'identity' })).toBe('identity')
+  })
+
+  it('returns null for built-in projections', () => {
+    expect(customProjectionName({ type: 'mercator' })).toBe(null)
+    expect(customProjectionName({ type: 'globe' })).toBe(null)
+    expect(customProjectionName({ type: 'vertical-perspective' })).toBe(null)
+    expect(
+      customProjectionName({
+        type: [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          10,
+          'globe',
+          12,
+          'mercator',
+        ],
+      })
+    ).toBe(null)
+    expect(customProjectionName(null)).toBe(null)
   })
 })
 

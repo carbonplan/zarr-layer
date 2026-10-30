@@ -53,7 +53,7 @@ interface ReprojectorConfig {
   width: number
   height: number
   latIsAscending: boolean
-  transformer: ProjectionTransformer
+  transformer: Pick<ProjectionTransformer, 'forward' | 'inverse'>
 }
 
 interface AdaptiveMeshResult {
@@ -796,5 +796,182 @@ export function createHybridMesh(
     texCoords: new Float32Array(splitResult.texCoords),
     indices: splitResult.indices,
     meshBounds,
+  }
+}
+
+/**
+ * Longest triangle edge a world mesh keeps, in world-square units. Longer
+ * edges join vertices on both sides of a seam in the map's projection,
+ * such as a world projection's antimeridian, and would draw across the map.
+ */
+const MAX_WORLD_TRIANGLE_EDGE = 0.5
+
+interface WorldMeshOptions {
+  geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
+  width: number
+  height: number
+  lonSubdivisions: number
+  latSubdivisions: number
+  /** Source CRS to the map's world square and back. */
+  toWorld: (x: number, y: number) => [number, number]
+  fromWorld: (x: number, y: number) => [number, number]
+  latIsAscending: boolean
+  maxError?: number
+}
+
+/**
+ * Mesh for a map in a projection registered with `addProjection`: vertices
+ * go straight from the source CRS to the map's world square, refined where
+ * that mapping bends, and are encoded as deltas from the region's own
+ * anchor like the Mercator mesh. Triangles with a vertex the map's
+ * projection cannot place, or spanning a seam in it, are dropped.
+ */
+export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
+  const {
+    geoBounds,
+    width,
+    height,
+    lonSubdivisions,
+    latSubdivisions,
+    toWorld,
+    fromWorld,
+    latIsAscending,
+    maxError = DEFAULT_MESH_MAX_ERROR,
+  } = options
+  const { xMin, xMax, yMin, yMax } = geoBounds
+
+  const reprojector = createReprojector({
+    bounds: [xMin, yMin, xMax, yMax],
+    width,
+    height,
+    latIsAscending,
+    transformer: { forward: toWorld, inverse: fromWorld },
+  })
+  for (
+    let i = 0;
+    i < MAX_ITERATIONS && reprojector.getMaxError() > maxError;
+    i++
+  ) {
+    const prevVertCount = reprojector.uvs.length / 2
+    reprojector.refine()
+    const newVertCount = reprojector.uvs.length / 2
+    if (
+      newVertCount >= MAX_ADAPTIVE_VERTICES ||
+      newVertCount === prevVertCount
+    ) {
+      break
+    }
+  }
+
+  // Edges get a vertex at every data pixel and no others, so neighboring
+  // regions share the vertices along the edge between them and meet without
+  // a gap where the projection curves it.
+  const adaptiveUVs: number[] = []
+  for (let k = 0; k < reprojector.uvs.length; k += 2) {
+    const u = reprojector.uvs[k]
+    const v = reprojector.uvs[k + 1]
+    if (u > 0 && u < 1 && v > 0 && v < 1) adaptiveUVs.push(u, v)
+  }
+  const cols = Math.max(1, Math.ceil(lonSubdivisions))
+  const rows = Math.max(1, Math.ceil(latSubdivisions))
+  const edgeCols = Math.max(1, Math.ceil(width))
+  const edgeRows = Math.max(1, Math.ceil(height))
+  const uvs = new Float64Array(
+    adaptiveUVs.length +
+      (cols + 1) * (rows + 1) * 2 +
+      (edgeCols + 1 + edgeRows + 1) * 4
+  )
+  uvs.set(adaptiveUVs)
+  let offset = adaptiveUVs.length
+  for (let row = 0; row <= rows; row++) {
+    for (let col = 0; col <= cols; col++) {
+      uvs[offset++] = col / cols
+      uvs[offset++] = row / rows
+    }
+  }
+  for (let col = 0; col <= edgeCols; col++) {
+    for (const v of [0, 1]) {
+      uvs[offset++] = col / edgeCols
+      uvs[offset++] = v
+    }
+  }
+  for (let row = 0; row <= edgeRows; row++) {
+    for (const u of [0, 1]) {
+      uvs[offset++] = u
+      uvs[offset++] = row / edgeRows
+    }
+  }
+  const triangles = new Delaunator(uvs).triangles
+
+  const numVerts = uvs.length / 2
+  const world = new Float64Array(numVerts * 2)
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (let i = 0; i < numVerts; i++) {
+    const u = uvs[i * 2]
+    const v = uvs[i * 2 + 1]
+    const srcX = xMin + u * (xMax - xMin)
+    const srcY = latIsAscending
+      ? yMin + v * (yMax - yMin)
+      : yMax - v * (yMax - yMin)
+    const [x, y] = toWorld(srcX, srcY)
+    world[i * 2] = x
+    world[i * 2 + 1] = y
+  }
+
+  const finite = (i: number) =>
+    Number.isFinite(world[i * 2]) && Number.isFinite(world[i * 2 + 1])
+  const longEdge = (a: number, b: number) =>
+    Math.hypot(
+      world[a * 2] - world[b * 2],
+      world[a * 2 + 1] - world[b * 2 + 1]
+    ) > MAX_WORLD_TRIANGLE_EDGE
+  const kept: number[] = []
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t]
+    const b = triangles[t + 1]
+    const c = triangles[t + 2]
+    if (!finite(a) || !finite(b) || !finite(c)) continue
+    if (longEdge(a, b) || longEdge(b, c) || longEdge(c, a)) continue
+    kept.push(a, b, c)
+    for (const i of [a, b, c]) {
+      minX = Math.min(minX, world[i * 2])
+      minY = Math.min(minY, world[i * 2 + 1])
+      maxX = Math.max(maxX, world[i * 2])
+      maxY = Math.max(maxY, world[i * 2 + 1])
+    }
+  }
+
+  if (kept.length === 0) {
+    return {
+      positions: new Float32Array(0),
+      texCoords: new Float32Array(0),
+      indices: new Uint32Array(0),
+      meshBounds: { x0: 0, y0: 0, x1: 0, y1: 0 },
+    }
+  }
+
+  const anchorX = (minX + maxX) / 2
+  const anchorY = (minY + maxY) / 2
+  const halfX = (maxX - minX) / 2 || 0.5
+  const halfY = (maxY - minY) / 2 || 0.5
+  const positions = new Float32Array(numVerts * 2)
+  for (let i = 0; i < numVerts; i++) {
+    positions[i * 2] = finite(i) ? (world[i * 2] - anchorX) / halfX : 0
+    positions[i * 2 + 1] = finite(i) ? (world[i * 2 + 1] - anchorY) / halfY : 0
+  }
+
+  return {
+    positions,
+    texCoords: new Float32Array(uvs),
+    indices: new Uint32Array(kept),
+    meshBounds: {
+      x0: anchorX - halfX,
+      y0: anchorY - halfY,
+      x1: anchorX + halfX,
+      y1: anchorY + halfY,
+    },
   }
 }

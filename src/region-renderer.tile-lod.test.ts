@@ -16,6 +16,8 @@ import { getRegionsInBounds, type RegionCoordinate } from './region-math'
 import type { ProjectionContext } from './projection-utils'
 import type { RegionState } from './region-state'
 import { boundsIntersect, getTileBounds } from './tile-utils'
+import { latToMercatorNorm } from './map-utils'
+import type { WorldMapping } from './world-mapping'
 
 /**
  * Per-tile level selection. The map picks a zoom per tile by distance when
@@ -1395,5 +1397,73 @@ describe('single-resolution datasets', () => {
     // Column 25 (lon 101..112), row 19 (lat -17..-22) holds the center.
     expect(wanted.has(makeRegionKey(0, 25, 19))).toBe(true)
     expect(wanted.has(makeRegionKey(0, 0, 0))).toBe(false)
+  })
+})
+
+describe('registered projections', () => {
+  // Plate carrée over the top half of the world square, standing in for a
+  // map projection registered with addProjection.
+  const PLATE: WorldMapping = {
+    name: 'custom:plate',
+    extentAtZoom0: 360,
+    toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
+    toLngLat: (x, y) => {
+      const lat = 90 - y * 360
+      return lat < -90 || lat > 90 ? null : [x * 360 - 180, lat]
+    },
+  }
+  // The world square's tile 4/0/0: lon -180..-157.5, lat 90..67.5, two
+  // columns and four rows of the 32x32 grid.
+  const CORNER: TileRequest = { tileId: { z: 4, x: 0, y: 0 }, zoom: 0 }
+
+  async function rendererInPlate() {
+    const made = await makeRenderer({ single: true })
+    made.renderer.setWorldMapping(PLATE)
+    made.renderer.setCoveringTiles([CORNER])
+    const map = mapAt(-180, 67.5, -157.5, 90, 0)
+    made.renderer.update(map, made.gl)
+    await settle(made.renderer)
+    return { ...made, map }
+  }
+
+  it('selects the regions under each tile of the projection', async () => {
+    const { renderer } = await rendererInPlate()
+
+    expect(wantedAt(renderer, 0)).toEqual([
+      '0,0',
+      '0,1',
+      '0,2',
+      '0,3',
+      '1,0',
+      '1,1',
+      '1,2',
+      '1,3',
+    ])
+  })
+
+  it('places regions in the world square of the projection', async () => {
+    const { renderer } = await rendererInPlate()
+
+    // Region 1,3: lon -168.75..-157.5, lat 73.125..67.5.
+    const mesh = seam(renderer).regionCache.get(makeRegionKey(0, 1, 3))!
+      .meshBounds!
+    expect(mesh.x0).toBeCloseTo(11.25 / 360, 9)
+    expect(mesh.x1).toBeCloseTo(22.5 / 360, 9)
+    expect(mesh.y0).toBeCloseTo(16.875 / 360, 9)
+    expect(mesh.y1).toBeCloseTo(22.5 / 360, 9)
+  })
+
+  it('rebuilds cached regions in Web Mercator once the map leaves the projection', async () => {
+    const { renderer, invalidate } = await rendererInPlate()
+    const region = seam(renderer).regionCache.get(makeRegionKey(0, 1, 3))!
+    region.geometryUploaded = true
+    invalidate.mockClear()
+
+    renderer.setWorldMapping(null)
+
+    expect(region.geometryUploaded).toBe(false)
+    expect(region.meshBounds!.y1).toBeCloseTo(latToMercatorNorm(67.5), 6)
+    expect(region.mercatorBounds!.y1).toBeCloseTo(latToMercatorNorm(67.5), 6)
+    expect(invalidate).toHaveBeenCalled()
   })
 })

@@ -250,6 +250,19 @@ export function isGlobeProjection(
   return projection?.type === 'globe' || projection?.name === 'globe'
 }
 
+/**
+ * The name of a projection registered with MapLibre's `addProjection`
+ * (maplibre-gl >= 6.15), or null for a built-in projection. Registered names
+ * contain a colon; `identity` is the one MapLibre registers itself.
+ */
+export function customProjectionName(
+  projection: { type?: unknown } | null | undefined
+): string | null {
+  const type = projection?.type
+  if (typeof type !== 'string') return null
+  return type.includes(':') || type === 'identity' ? type : null
+}
+
 interface ProjectionResolution {
   matrix: number[] | Float32Array | Float64Array | null
   shaderData?: ShaderData

@@ -10,6 +10,12 @@ import type { ProjectionContext } from './projection-utils'
 import { sampleEdgesToMercatorBounds } from './projection-utils'
 import type { LevelMeta } from './region-state'
 import type { DimIndicesProps, MapLike, ResolutionLevel } from './types'
+import {
+  worldBoundsOf,
+  worldToSource,
+  type WorldBounds,
+  type WorldMapping,
+} from './world-mapping'
 
 export type RegionCoordinate = { regionX: number; regionY: number }
 type SourceBounds = { xMin: number; xMax: number; yMin: number; yMax: number }
@@ -342,6 +348,145 @@ export function getCandidateRegions({
   return candidates
 }
 
+/** Below this overlap a region only touches a world box. */
+const STRICT_OVERLAP_WORLD = 1e-9
+
+/**
+ * Regions of a level whose footprint in the world square of a map in a
+ * registered projection overlaps a box. Candidates come from the box mapped
+ * back to the source CRS; each is kept only when its own world footprint
+ * overlaps by more than a touch.
+ */
+export function getRegionsInWorldBox({
+  box,
+  xyLimits,
+  levelMeta,
+  projection,
+  mapping,
+  latIsAscending,
+}: {
+  box: WorldBounds
+  xyLimits: XYLimits | null
+  levelMeta: LevelMeta | null
+  projection: ProjectionContext
+  mapping: WorldMapping
+  latIsAscending: boolean
+}): RegionCoordinate[] {
+  const to4326 = projection.to4326
+  if (!xyLimits || !levelMeta || !to4326) return []
+  const { width, height, regionSize } = levelMeta
+  const [regionH, regionW] = regionSize
+  const limits = levelMeta.xyLimits ?? xyLimits
+  const wrapLongitude =
+    projection.kind === 'epsg4326' && (limits.xMin < -180 || limits.xMax > 180)
+  const candidates = getCandidateRegions({
+    west: box.x0,
+    south: box.y0,
+    east: box.x1,
+    north: box.y1,
+    transformer: { forward: worldToSource(mapping, to4326) },
+    numRegionsX: Math.ceil(width / regionW),
+    numRegionsY: Math.ceil(height / regionH),
+    regionW,
+    regionH,
+    width,
+    height,
+    xyLimits: limits,
+    latIsAscending,
+    wrapLongitude,
+  })
+  const inset = STRICT_OVERLAP_WORLD
+  const reach = sourceReachOfWorldBox(box, mapping, to4326)
+  // The map gives longitudes in [-180, 180]; regions past it are reached a
+  // turn away.
+  const turns = wrapLongitude ? [-360, 0, 360] : [0]
+  return candidates.filter(({ regionX, regionY }) => {
+    const bounds = getRegionBounds({
+      regionX,
+      regionY,
+      levelMeta,
+      xyLimits,
+      latIsAscending,
+    })
+    // Curved footprints, such as lon/lat cells around a pole, have boxes far
+    // larger than themselves; both boxes must overlap.
+    if (
+      reach &&
+      (bounds.yMax <= reach.yMin ||
+        bounds.yMin >= reach.yMax ||
+        turns.every(
+          (turn) =>
+            bounds.xMax + turn <= reach.xMin || bounds.xMin + turn >= reach.xMax
+        ))
+    ) {
+      return false
+    }
+    const footprint = worldBoundsOf(bounds, mapping, to4326, 4)
+    return (
+      !!footprint &&
+      footprint.x0 < box.x1 - inset &&
+      footprint.x1 > box.x0 + inset &&
+      footprint.y0 < box.y1 - inset &&
+      footprint.y1 > box.y0 + inset
+    )
+  })
+}
+
+/**
+ * The source-CRS box a world box reaches, from a grid of samples across it
+ * and each pole inside it, padded by a grid cell for what falls between
+ * samples. Null when no sample has a source position.
+ */
+function sourceReachOfWorldBox(
+  box: WorldBounds,
+  mapping: WorldMapping,
+  to4326: {
+    forward(x: number, y: number): [number, number]
+    inverse(lng: number, lat: number): [number, number]
+  }
+): SourceBounds | null {
+  const toSource = worldToSource(mapping, to4326)
+  const samples = 8
+  let xMin = Infinity
+  let xMax = -Infinity
+  let yMin = Infinity
+  let yMax = -Infinity
+  const record = ([x, y]: [number, number]) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return
+    xMin = Math.min(xMin, x)
+    xMax = Math.max(xMax, x)
+    yMin = Math.min(yMin, y)
+    yMax = Math.max(yMax, y)
+  }
+  for (let j = 0; j <= samples; j++) {
+    for (let i = 0; i <= samples; i++) {
+      record(
+        toSource(
+          box.x0 + (i / samples) * (box.x1 - box.x0),
+          box.y0 + (j / samples) * (box.y1 - box.y0)
+        )
+      )
+    }
+  }
+  for (const lat of [-90, 90]) {
+    const [px, py] = mapping.toWorld(0, lat)
+    if (px < box.x0 || px > box.x1 || py < box.y0 || py > box.y1) continue
+    // Every longitude meets at the pole.
+    for (const lng of [-180, -90, 0, 90, 180]) {
+      record(to4326.inverse(lng, lat))
+    }
+  }
+  if (!Number.isFinite(xMin)) return null
+  const padX = (xMax - xMin) / samples
+  const padY = (yMax - yMin) / samples
+  return {
+    xMin: xMin - padX,
+    xMax: xMax + padX,
+    yMin: yMin - padY,
+    yMax: yMax + padY,
+  }
+}
+
 export function getRegionBounds({
   regionX,
   regionY,
@@ -394,17 +539,25 @@ export function selectLevelForZoom({
   levels,
   projection,
   lonIndex,
+  worldFraction: mapWorldFraction,
 }: {
   mapZoom: number
   xyLimits: XYLimits | null
   levels: ResolutionLevel[]
   projection: ProjectionContext
   lonIndex?: number
+  /**
+   * The share of the map's world width the data spans, for a map whose
+   * world is not Web Mercator's.
+   */
+  worldFraction?: number
 }): number {
   if (!xyLimits || levels.length === 0) return 0
   const mapPixelsPerWorld = 256 * Math.pow(2, mapZoom)
   let worldFraction: number
-  if (projection.kind === 'epsg4326') {
+  if (mapWorldFraction !== undefined && mapWorldFraction > 0) {
+    worldFraction = mapWorldFraction
+  } else if (projection.kind === 'epsg4326') {
     // proj4's adjust_lon folds inputs outside [-180, 180] back into range
     // (e.g. forward(360,·)→0, forward(190,·)→-170), which collapses or
     // distorts the width for 0-360° stores and antimeridian-crossing

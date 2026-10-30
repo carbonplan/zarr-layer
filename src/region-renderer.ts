@@ -62,11 +62,16 @@ import {
   getRegionBounds,
   getRegionSize,
   getRegionsInBounds,
+  getRegionsInWorldBox,
   selectLevelForZoom,
   type LonLatBounds,
   type RegionCoordinate,
 } from './region-math'
-import { boundsIntersect, getTileLonLatBounds } from './tile-utils'
+import {
+  boundsIntersect,
+  getTileBounds,
+  getTileLonLatBounds,
+} from './tile-utils'
 import { tileClipBounds, tileClipPasses, type ClipTile } from './clip-boxes'
 import {
   RegionCache,
@@ -88,7 +93,14 @@ import {
 import { RegionFetcher } from './region-fetcher'
 import { LevelLoader, type LevelLoadOutcome } from './level-loader'
 import { wrapError } from './errors'
-import { createHybridMesh } from './mesh-reprojector'
+import { createHybridMesh, createWorldMesh } from './mesh-reprojector'
+import {
+  sourceToWorld,
+  worldBoundsOf,
+  worldFractionOf,
+  worldToSource,
+  type WorldMapping,
+} from './world-mapping'
 import {
   type RequestCanceller,
   type LoadingManager,
@@ -282,6 +294,15 @@ export class RegionRenderer {
   private rendersFromBandTextures: boolean = false
   // Track current projection for Mapbox's direct globe render path.
   private isGlobeProjection: boolean = false
+  // The map's world when it is in a projection registered with
+  // addProjection: regions are placed and selected in its world square,
+  // which its tiles divide, in place of normalized Web Mercator.
+  private worldMapping: WorldMapping | null = null
+  private worldFraction: {
+    mapping: WorldMapping
+    xyLimits: XYLimits
+    value: number | undefined
+  } | null = null
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
   private minRegionSize: number
@@ -691,6 +712,18 @@ export class RegionRenderer {
     const memo = this.tileRegionsMemo.get(key)
     if (memo) return memo
     if (this.tileRegionsMemo.size > 4096) this.tileRegionsMemo.clear()
+    if (this.worldMapping) {
+      const regions = getRegionsInWorldBox({
+        box: getTileBounds(tileId),
+        xyLimits: this.xyLimits,
+        levelMeta,
+        projection: this.projection,
+        mapping: this.worldMapping,
+        latIsAscending: this.latIsAscending,
+      })
+      this.tileRegionsMemo.set(key, regions)
+      return regions
+    }
     const regions: RegionCoordinate[] = []
     const seen = new Set<string>()
     for (const bounds of extents ?? [
@@ -941,9 +974,7 @@ export class RegionRenderer {
       })
     }
 
-    const { lng, lat } = this.mapCenter(map)
-    const cx = (lng + 180) / 360
-    const cy = latToMercatorNorm(lat)
+    const [cx, cy] = this.centerInWorld(map)
     const entries: Array<{
       tile: TileRequest
       key: string
@@ -1039,7 +1070,20 @@ export class RegionRenderer {
     }
   }
 
-  /** Regions ordered by their distance from the map center, in degrees. */
+  /**
+   * The map center in the world its tiles divide: the registered
+   * projection's world square, else normalized Web Mercator.
+   */
+  private centerInWorld(map: MapLike): [number, number] {
+    const { lng, lat } = this.mapCenter(map)
+    if (this.worldMapping) return this.worldMapping.toWorld(lng, lat)
+    return [(lng + 180) / 360, latToMercatorNorm(lat)]
+  }
+
+  /**
+   * Regions ordered by their distance from the map center: in degrees, or
+   * in the world square of a registered projection.
+   */
   private nearestCenterFirst(
     regions: RegionCoordinate[],
     runtime: LevelRuntime,
@@ -1047,10 +1091,18 @@ export class RegionRenderer {
   ): RegionCoordinate[] {
     const { lng, lat } = this.mapCenter(map)
     const inverse = this.projection.toWGS84?.inverse
+    const mapping = this.worldMapping
+    const to4326 = this.projection.to4326
+    const [cx, cy] = this.centerInWorld(map)
     const distance = (region: RegionCoordinate) => {
       const b = this.getRegionBounds(region.regionX, region.regionY, runtime)
       const xMid = (b.xMin + b.xMax) / 2
       const yMid = (b.yMin + b.yMax) / 2
+      if (mapping && to4326) {
+        const [x, y] = sourceToWorld(mapping, to4326)(xMid, yMid)
+        const d = (x - cx) ** 2 + (y - cy) ** 2
+        return Number.isFinite(d) ? d : Infinity
+      }
       const [lon, latitude] = inverse ? inverse(xMid, yMid) : [xMid, yMid]
       let dLon = ((lon - lng + 540) % 360) - 180
       if (!Number.isFinite(dLon)) dLon = 180
@@ -1504,21 +1556,34 @@ export class RegionRenderer {
     const lonSubdivisions = subdivisionsForSpan(lonSpan)
     const latSubdivisions = subdivisionsForSpan(latSpan)
 
-    const meshResult = createHybridMesh({
-      geoBounds,
-      width: region.width,
-      height: region.height,
-      lonSubdivisions,
-      latSubdivisions,
-      transformer: this.projection.to4326,
-      latIsAscending: this.latIsAscending,
-      allowUnwrappedLongitudes: this.projection.kind === 'epsg4326',
-      // The mesh encodes vertices as deltas from a per-region mercator origin
-      // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
-      // anchor_clip, keeping the eye origin near the on-screen region for
-      // high-zoom precision (no pan/zoom jitter, no seams). See
-      // VERTEX_TO_WGS84_TO_MERCATOR.
-    })
+    const meshResult = this.worldMapping
+      ? createWorldMesh({
+          geoBounds,
+          width: region.width,
+          height: region.height,
+          // The world square is flat: adaptive refinement follows the
+          // projection's bends, with no globe curvature to tessellate for.
+          lonSubdivisions: MIN_SUBDIVISIONS,
+          latSubdivisions: MIN_SUBDIVISIONS,
+          toWorld: sourceToWorld(this.worldMapping, this.projection.to4326),
+          fromWorld: worldToSource(this.worldMapping, this.projection.to4326),
+          latIsAscending: this.latIsAscending,
+        })
+      : createHybridMesh({
+          geoBounds,
+          width: region.width,
+          height: region.height,
+          lonSubdivisions,
+          latSubdivisions,
+          transformer: this.projection.to4326,
+          latIsAscending: this.latIsAscending,
+          allowUnwrappedLongitudes: this.projection.kind === 'epsg4326',
+          // The mesh encodes vertices as deltas from a per-region mercator origin
+          // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
+          // anchor_clip, keeping the eye origin near the on-screen region for
+          // high-zoom precision (no pan/zoom jitter, no seams). See
+          // VERTEX_TO_WGS84_TO_MERCATOR.
+        })
     region.vertexArr = meshResult.positions
     region.pixCoordArr = meshResult.texCoords
     region.indexArr = meshResult.indices
@@ -1817,7 +1882,36 @@ export class RegionRenderer {
       levels: this.levels,
       projection: this.projection,
       lonIndex: this.dimIndices.lon?.index,
+      worldFraction: this.dataWorldFraction(),
     })
+  }
+
+  /**
+   * The share of a registered projection's world width the data spans, or
+   * undefined on a Web Mercator world.
+   */
+  private dataWorldFraction(): number | undefined {
+    if (!this.worldMapping || !this.xyLimits || !this.projection.to4326) {
+      return undefined
+    }
+    const cached = this.worldFraction
+    if (
+      cached?.mapping === this.worldMapping &&
+      cached.xyLimits === this.xyLimits
+    ) {
+      return cached.value
+    }
+    const value = worldFractionOf(
+      this.xyLimits,
+      this.worldMapping,
+      this.projection.to4326
+    )
+    this.worldFraction = {
+      mapping: this.worldMapping,
+      xyLimits: this.xyLimits,
+      value,
+    }
+    return value
   }
 
   render(renderer: ZarrRenderer, context: RenderContext): void {
@@ -2059,13 +2153,47 @@ export class RegionRenderer {
     return computeMercatorBoundsFromProjection(this.xyLimits, this.projection)
   }
 
+  /**
+   * A region's box in the world the map's tiles divide: the registered
+   * projection's world square, else normalized Web Mercator.
+   */
   private computeRegionMercatorBounds(bounds: {
     xMin: number
     xMax: number
     yMin: number
     yMax: number
   }): MercatorBounds {
+    if (this.worldMapping && this.projection.to4326) {
+      return (
+        worldBoundsOf(bounds, this.worldMapping, this.projection.to4326) ?? {
+          x0: 0,
+          y0: 0,
+          x1: 0,
+          y1: 0,
+        }
+      )
+    }
     return computeRegionMercatorBounds(bounds, this.projection)
+  }
+
+  /**
+   * Place regions in the world of a map in a registered projection, or in
+   * Web Mercator for null. Cached regions are rebuilt for the new world,
+   * keeping their data, and the tile plans start over.
+   */
+  setWorldMapping(mapping: WorldMapping | null): void {
+    if (mapping === this.worldMapping) return
+    this.worldMapping = mapping
+    this.tileRegionsMemo.clear()
+    this.tileLevels = new Map()
+    this.lastViewportHash = ''
+    for (const region of this.regionCache.values()) {
+      if (!region.levelMeta) continue
+      if (!region.mercatorBounds && !region.vertexArr) continue
+      region.mercatorBounds = null
+      this.createRegionGeometry(region.regionX, region.regionY, region)
+    }
+    this.invalidate()
   }
 
   async setSelector(selector: NormalizedSelector): Promise<void> {
