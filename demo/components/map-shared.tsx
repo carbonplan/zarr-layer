@@ -11,11 +11,8 @@ import mapboxgl from 'mapbox-gl'
 import { layers, namedFlavor } from '@protomaps/basemaps'
 import { Protocol } from 'pmtiles'
 import { useAppStore, type DemoProjection } from '../lib/store'
-import {
-  ANTARCTIC_CRS,
-  ANTARCTIC_PROJECTION,
-  setAntarctic,
-} from './antarctic-projection'
+import { MAP_PROJECTIONS, setMapProjection } from './custom-projections'
+import { isCustomProjection } from '../lib/projections'
 import type { LayerProps } from '../datasets/types'
 import MapZoomControls, { useAttributionStyles } from './map-controls'
 
@@ -140,21 +137,7 @@ const mapLibreConfig: MapConfig = {
     }) as MapInstance
   },
   setProjection: (map: MapInstance, projection: DemoProjection) => {
-    const maplibre = map as MapLibreMap
-    const antarctic = projection === 'antarctic'
-    const changed = setAntarctic(maplibre, antarctic)
-    maplibre.setProjection({
-      type: antarctic ? ANTARCTIC_PROJECTION : projection,
-    })
-    // The GIBS imagery starts at zoom 1.
-    maplibre.setMinZoom(antarctic ? 1 : null)
-    if (changed) {
-      maplibre.jumpTo(
-        antarctic
-          ? { center: [0, -90], zoom: 1.2 }
-          : { center: [0, 20], zoom: 2 }
-      )
-    }
+    setMapProjection(map as MapLibreMap, projection)
   },
   getLayerBeforeId: () => 'landuse_pedestrian',
   terrainSource: 'terrain-dem',
@@ -259,7 +242,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
         proj4: datasetModule.proj4,
         onLoadingStateChange: setLoadingState,
         renderPoles,
-        mapProjections: [ANTARCTIC_CRS],
+        mapProjections: MAP_PROJECTIONS,
       }
 
       if (datasetModule.store) {
@@ -470,9 +453,9 @@ export const Map = () => {
   useEffect(() => {
     if (!map || !isMapLoaded) return
     try {
-      // The terrain tiles are Web Mercator, so they cannot drape the
-      // Antarctic projection's grid.
-      if (terrainEnabled && projection !== 'antarctic') {
+      // The terrain tiles are Web Mercator, so they cannot drape the grid of
+      // a custom projection.
+      if (terrainEnabled && !isCustomProjection(projection)) {
         map.setTerrain({ source: mapConfig.terrainSource, exaggeration: 1.5 })
       } else {
         map.setTerrain(null)

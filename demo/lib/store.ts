@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { DATASET_MAP, DEFAULT_DATASET_ID } from '../datasets'
 import type { Dataset } from '../datasets/types'
+import { isCustomProjection, type CustomProjectionId } from './projections'
 import type { MapProvider, MapInstance } from '../components/map-shared'
 import type {
   ZarrLayer,
@@ -8,7 +9,7 @@ import type {
   LoadingState,
 } from '@carbonplan/zarr-layer'
 
-export type DemoProjection = 'globe' | 'mercator' | 'antarctic'
+export type DemoProjection = 'globe' | 'mercator' | CustomProjectionId
 
 interface AppState {
   sidebarWidth: number | null
@@ -84,12 +85,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   setProjection: (projection) => set({ projection }),
   setTerrainEnabled: (terrainEnabled) => set({ terrainEnabled }),
   setRenderPoles: (renderPoles) => set({ renderPoles }),
-  // The Antarctic projection is MapLibre's addProjection, which Mapbox lacks.
+  // Custom projections are MapLibre's addProjection, which Mapbox lacks.
   setMapProvider: (mapProvider) =>
     set((state) => ({
       mapProvider,
       projection:
-        mapProvider === 'mapbox' && state.projection === 'antarctic'
+        mapProvider === 'mapbox' && isCustomProjection(state.projection)
           ? 'globe'
           : state.projection,
     })),

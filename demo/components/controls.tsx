@@ -14,7 +14,8 @@ import { useThemedColormap } from '@carbonplan/colormaps'
 import { Info, RotatingArrow } from '@carbonplan/icons'
 import { Box, Flex, IconButton } from 'theme-ui'
 import { SidebarDivider } from '@carbonplan/layouts'
-import { useAppStore } from '../lib/store'
+import { useAppStore, type DemoProjection } from '../lib/store'
+import { CUSTOM_PROJECTION_IDS } from '../lib/projections'
 import { subheadingSx } from './shared-controls'
 import DatasetBrowser from './dataset-browser'
 import type {
@@ -872,17 +873,15 @@ const Controls = () => {
           <Filter
             // The options differ by provider, and Filter expects a fixed set.
             key={mapProvider}
-            values={{
-              globe: projection === 'globe',
-              mercator: projection === 'mercator',
-              ...(mapProvider === 'maplibre' && {
-                antarctic: projection === 'antarctic',
-              }),
-            }}
+            values={Object.fromEntries(
+              (mapProvider === 'maplibre'
+                ? ['globe', 'mercator', ...CUSTOM_PROJECTION_IDS]
+                : ['globe', 'mercator']
+              ).map((option) => [option, projection === option])
+            )}
             setValues={(obj: Record<string, boolean>) => {
-              if (obj.globe) setProjection('globe')
-              if (obj.mercator) setProjection('mercator')
-              if (obj.antarctic) setProjection('antarctic')
+              const selected = Object.keys(obj).find((option) => obj[option])
+              if (selected) setProjection(selected as DemoProjection)
             }}
           />
         </Column>

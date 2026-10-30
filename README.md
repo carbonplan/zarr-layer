@@ -87,7 +87,7 @@ map.setProjection({ type: 'EPSG:3031' })
 const layer = new ZarrLayer({ ...options, mapProjections: [antarctic] })
 ```
 
-Data in any CRS the layer reads is reprojected into the map's projection. A map in a registered projection draws a single world without copies, and its basemap tiles must be cut in the same projection; the demo's antarctic projection uses NASA GIBS imagery. While the map is in a registered projection that is not among `mapProjections`, the layer is hidden and logs a warning.
+Data in any CRS the layer reads is reprojected into the map's projection. A map in a registered projection draws a single world without copies, and its basemap must be cut in the same projection. The demo has polar stereographic (EPSG:3031, EPSG:3413), plate carrée, Equal Earth and CONUS Albers (EPSG:5070) maps over Natural Earth GeoJSON, which MapLibre projects in its workers. While the map is in a registered projection that is not among `mapProjections`, the layer is hidden and logs a warning.
 
 ## install
 
