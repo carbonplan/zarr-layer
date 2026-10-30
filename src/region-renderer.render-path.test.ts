@@ -205,8 +205,6 @@ function mapboxContext(
 
 /** Plate carrée over the top half of a registered projection's world square. */
 const PLATE: WorldMapping = {
-  name: 'custom:plate',
-  extentAtZoom0: 360,
   toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
   toLngLat: (x, y) => [x * 360 - 180, 90 - y * 360],
 }

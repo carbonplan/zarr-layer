@@ -3,98 +3,115 @@
  *
  * The flat world of a map in a projection registered with MapLibre's
  * `addProjection` (maplibre-gl >= 6.15). Such a map lays its tiles over a
- * square tile matrix set in the CRS's own plane, and the custom-layer
- * projection uniforms take positions in that square: [0, 0] is the top-left
- * of tile 0/0/0 and [1, 1] its bottom-right. The layer places regions there
- * in place of normalized Web Mercator, and the tile math it shares with
- * Mercator (tile ids, clip boxes) carries over unchanged.
+ * square tile matrix set in the CRS's own plane, and custom layers take
+ * positions in that square: [0, 0] is the top-left of tile 0/0/0 and [1, 1]
+ * its bottom-right, with y growing downwards like tile rows. The layer
+ * places regions there in place of normalized Web Mercator, and the tile
+ * math it shares with Mercator (tile ids, clip boxes) carries over unchanged.
  */
 
 import { customProjectionName } from './map-utils'
 import type { MapLike } from './types'
 
-export interface WorldMapping {
-  /** The registered projection's name, e.g. `EPSG:3031`. */
+/**
+ * A projection registered with MapLibre's `addProjection`, in the shape of
+ * its `CRS` type, so the same object can be passed to both.
+ */
+export interface MapProjection {
+  /** The registered name, e.g. `EPSG:3031`. */
   name: string
-  /** Width of tile 0/0/0 in CRS units. */
-  extentAtZoom0: number
+  /** WGS84 degrees to CRS units and back, like a proj4 converter. */
+  projection: {
+    forward(position: number[]): number[]
+    inverse(position: number[]): number[] | null
+  }
+  tileMatrixSet: {
+    /** Top-left corner of tile 0/0/0, in CRS units. */
+    origin: [number, number]
+    /** Width of tile 0/0/0, in CRS units. */
+    extentAtZoom0: number
+  }
+}
+
+export interface WorldMapping {
   /** WGS84 degrees to the world square; NaN where the CRS has no answer. */
   toWorld(lng: number, lat: number): [number, number]
-  /** World square to WGS84 degrees; null past the edge of the CRS. */
+  /** World square to WGS84 degrees; null where the CRS has no answer. */
   toLngLat(x: number, y: number): [number, number] | null
 }
 
+const mappings = new WeakMap<MapProjection, WorldMapping>()
+
 /**
- * MapLibre's internal lng/lat to world mapping of the active projection,
- * held by the style's projection.
+ * How far, in world units, a round trip may land from where it started for
+ * the inverse to count, MapLibre's own tolerance: loose enough for a
+ * converter that is only approximately invertible, tight enough to reject an
+ * answer from the other side of the world.
  */
-interface WorldCoordinateHelper {
-  name: string
-  wraps: boolean
-  tileMatrixSet: { extentAtZoom0: number }
-  worldFromLngLat(lng: number, lat: number): { x: number; y: number }
-  lngLatFromWorld(x: number, y: number): { lng: number; lat: number }
-  hasLngLat(x: number, y: number): boolean
-}
+const ROUND_TRIP_WORLD = 1e-3
 
-const mappings = new WeakMap<WorldCoordinateHelper, WorldMapping>()
-
-function isHelper(value: unknown): value is WorldCoordinateHelper {
-  const helper = value as Partial<WorldCoordinateHelper> | null
-  return (
-    !!helper &&
-    typeof helper.name === 'string' &&
-    typeof helper.worldFromLngLat === 'function' &&
-    typeof helper.lngLatFromWorld === 'function' &&
-    typeof helper.hasLngLat === 'function' &&
-    typeof helper.tileMatrixSet?.extentAtZoom0 === 'number'
-  )
+function worldMappingOf(definition: MapProjection): WorldMapping {
+  let mapping = mappings.get(definition)
+  if (mapping) return mapping
+  const {
+    projection,
+    tileMatrixSet: {
+      origin: [originX, originY],
+      extentAtZoom0: extent,
+    },
+  } = definition
+  const toWorld = (lng: number, lat: number): [number, number] => {
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return [NaN, NaN]
+    try {
+      const [x, y] = projection.forward([lng, lat])
+      return Number.isFinite(x) && Number.isFinite(y)
+        ? [(x - originX) / extent, (originY - y) / extent]
+        : [NaN, NaN]
+    } catch {
+      return [NaN, NaN]
+    }
+  }
+  // An inverse that forward does not take back to the position has no
+  // answer there, as MapLibre treats it.
+  const toLngLat = (x: number, y: number): [number, number] | null => {
+    try {
+      const lngLat = projection.inverse([
+        originX + x * extent,
+        originY - y * extent,
+      ])
+      if (
+        !lngLat ||
+        !Number.isFinite(lngLat[0]) ||
+        !Number.isFinite(lngLat[1])
+      ) {
+        return null
+      }
+      const [backX, backY] = toWorld(lngLat[0], lngLat[1])
+      return Math.hypot(backX - x, backY - y) <= ROUND_TRIP_WORLD
+        ? [lngLat[0], lngLat[1]]
+        : null
+    } catch {
+      return null
+    }
+  }
+  mapping = { toWorld, toLngLat }
+  mappings.set(definition, mapping)
+  return mapping
 }
 
 /**
  * The world of the map's projection when it is one registered with
- * `addProjection`, or null for the built-in projections and when the map
- * does not expose it. The same projection gives the same object each frame.
+ * `addProjection` and among the projections given, or null otherwise. The
+ * same projection gives the same object each frame.
  */
-export function readWorldMapping(map: MapLike | null): WorldMapping | null {
-  if (!customProjectionName(map?.getProjection?.())) return null
-  const internals = map as {
-    style?: { projection?: { worldCoordinateHelper?: unknown } }
-    transform?: { worldCoordinateHelper?: unknown }
-  } | null
-  const helper =
-    internals?.style?.projection?.worldCoordinateHelper ??
-    internals?.transform?.worldCoordinateHelper
-  if (!isHelper(helper) || helper.wraps) return null
-  let mapping = mappings.get(helper)
-  if (!mapping) {
-    mapping = {
-      name: helper.name,
-      extentAtZoom0: helper.tileMatrixSet.extentAtZoom0,
-      toWorld: (lng, lat) => {
-        if (!Number.isFinite(lng) || !Number.isFinite(lat)) return [NaN, NaN]
-        try {
-          const { x, y } = helper.worldFromLngLat(lng, lat)
-          return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : [NaN, NaN]
-        } catch {
-          return [NaN, NaN]
-        }
-      },
-      toLngLat: (x, y) => {
-        try {
-          if (!helper.hasLngLat(x, y)) return null
-          const { lng, lat } = helper.lngLatFromWorld(x, y)
-          return Number.isFinite(lng) && Number.isFinite(lat)
-            ? [lng, lat]
-            : null
-        } catch {
-          return null
-        }
-      },
-    }
-    mappings.set(helper, mapping)
-  }
-  return mapping
+export function worldMappingFor(
+  map: MapLike | null,
+  projections: readonly MapProjection[]
+): WorldMapping | null {
+  const name = customProjectionName(map?.getProjection?.())
+  if (!name) return null
+  const definition = projections.find((p) => p.name === name)
+  return definition ? worldMappingOf(definition) : null
 }
 
 /** Source CRS to WGS84 and back, as the layer's projection context holds it. */
