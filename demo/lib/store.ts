@@ -8,13 +8,15 @@ import type {
   LoadingState,
 } from '@carbonplan/zarr-layer'
 
+export type DemoProjection = 'globe' | 'mercator' | 'antarctic'
+
 interface AppState {
   sidebarWidth: number | null
   datasetId: string
   opacity: number
   clim: [number, number]
   colormap: string
-  globeProjection: boolean
+  projection: DemoProjection
   terrainEnabled: boolean
   renderPoles: boolean
   mapProvider: MapProvider
@@ -30,7 +32,7 @@ interface AppState {
   setOpacity: (opacity: number) => void
   setClim: (clim: [number, number]) => void
   setColormap: (colormap: string) => void
-  setGlobeProjection: (globeProjection: boolean) => void
+  setProjection: (projection: DemoProjection) => void
   setTerrainEnabled: (terrainEnabled: boolean) => void
   setRenderPoles: (renderPoles: boolean) => void
   setMapProvider: (provider: MapProvider) => void
@@ -52,7 +54,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   opacity: 1,
   clim: defaultModule.clim,
   colormap: defaultModule.colormap,
-  globeProjection: true,
+  projection: 'globe',
   terrainEnabled: false,
   renderPoles: false,
   mapProvider: 'maplibre',
@@ -79,10 +81,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   setOpacity: (opacity) => set({ opacity }),
   setClim: (clim) => set({ clim }),
   setColormap: (colormap) => set({ colormap }),
-  setGlobeProjection: (globeProjection) => set({ globeProjection }),
+  setProjection: (projection) => set({ projection }),
   setTerrainEnabled: (terrainEnabled) => set({ terrainEnabled }),
   setRenderPoles: (renderPoles) => set({ renderPoles }),
-  setMapProvider: (mapProvider) => set({ mapProvider }),
+  // The Antarctic projection is MapLibre's addProjection, which Mapbox lacks.
+  setMapProvider: (mapProvider) =>
+    set((state) => ({
+      mapProvider,
+      projection:
+        mapProvider === 'mapbox' && state.projection === 'antarctic'
+          ? 'globe'
+          : state.projection,
+    })),
   setActiveDatasetState: (updates) => {
     set((state) => ({
       datasetState: { ...state.datasetState, ...updates },

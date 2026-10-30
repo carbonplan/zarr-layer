@@ -10,7 +10,8 @@ import { Map as MapLibreMap, addProtocol, setWorkerUrl } from 'maplibre-gl'
 import mapboxgl from 'mapbox-gl'
 import { layers, namedFlavor } from '@protomaps/basemaps'
 import { Protocol } from 'pmtiles'
-import { useAppStore } from '../lib/store'
+import { useAppStore, type DemoProjection } from '../lib/store'
+import { ANTARCTIC_PROJECTION, setAntarctic } from './antarctic-projection'
 import type { LayerProps } from '../datasets/types'
 import MapZoomControls, { useAttributionStyles } from './map-controls'
 
@@ -82,16 +83,16 @@ const mapLibreTheme = {
 export interface MapConfig {
   createMap: (
     container: HTMLDivElement,
-    globeProjection: boolean
+    projection: DemoProjection
   ) => MapInstance
-  setProjection: (map: MapInstance, globeProjection: boolean) => void
+  setProjection: (map: MapInstance, projection: DemoProjection) => void
   getLayerBeforeId: (map: MapInstance) => string | undefined
   /** Id of the raster-dem source the terrain toggle drapes onto. */
   terrainSource: string
 }
 
 const mapLibreConfig: MapConfig = {
-  createMap: (container: HTMLDivElement, globeProjection: boolean) => {
+  createMap: (container: HTMLDivElement, projection: DemoProjection) => {
     setWorkerUrl(
       new URL(
         'maplibre-gl/dist/maplibre-gl-worker.mjs',
@@ -104,7 +105,8 @@ const mapLibreConfig: MapConfig = {
     return new MapLibreMap({
       container,
       style: {
-        projection: globeProjection ? { type: 'globe' } : { type: 'mercator' },
+        projection:
+          projection === 'mercator' ? { type: 'mercator' } : { type: 'globe' },
         version: 8,
         glyphs:
           'https://carbonplan-maps.s3.us-west-2.amazonaws.com/basemaps/fonts/{fontstack}/{range}.pbf',
@@ -133,17 +135,29 @@ const mapLibreConfig: MapConfig = {
       zoom: window.innerWidth < 640 ? 1.2 : 2.4,
     }) as MapInstance
   },
-  setProjection: (map: MapInstance, globeProjection: boolean) => {
-    ;(map as MapLibreMap).setProjection(
-      globeProjection ? { type: 'globe' } : { type: 'mercator' }
-    )
+  setProjection: (map: MapInstance, projection: DemoProjection) => {
+    const maplibre = map as MapLibreMap
+    const antarctic = projection === 'antarctic'
+    const changed = setAntarctic(maplibre, antarctic)
+    maplibre.setProjection({
+      type: antarctic ? ANTARCTIC_PROJECTION : projection,
+    })
+    // The GIBS imagery starts at zoom 1.
+    maplibre.setMinZoom(antarctic ? 1 : null)
+    if (changed) {
+      maplibre.jumpTo(
+        antarctic
+          ? { center: [0, -90], zoom: 1.2 }
+          : { center: [0, 20], zoom: 2 }
+      )
+    }
   },
   getLayerBeforeId: () => 'landuse_pedestrian',
   terrainSource: 'terrain-dem',
 }
 
 const mapboxConfig: MapConfig = {
-  createMap: (container: HTMLDivElement, globeProjection: boolean) => {
+  createMap: (container: HTMLDivElement, projection: DemoProjection) => {
     if (process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
       mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
     }
@@ -153,7 +167,7 @@ const mapboxConfig: MapConfig = {
       style: 'mapbox://styles/mapbox/dark-v11',
       center: [0, 20],
       zoom: window.innerWidth < 640 ? 1 : 2,
-      projection: globeProjection ? 'globe' : 'mercator',
+      projection: projection === 'mercator' ? 'mercator' : 'globe',
     })
 
     map.on('load', () => {
@@ -167,9 +181,9 @@ const mapboxConfig: MapConfig = {
 
     return map as MapInstance
   },
-  setProjection: (map: MapInstance, globeProjection: boolean) => {
+  setProjection: (map: MapInstance, projection: DemoProjection) => {
     ;(map as mapboxgl.Map).setProjection({
-      name: globeProjection ? 'globe' : 'mercator',
+      name: projection === 'mercator' ? 'mercator' : 'globe',
     } as mapboxgl.ProjectionSpecification)
   },
   getLayerBeforeId: (map: MapInstance) => {
@@ -411,7 +425,7 @@ export const Map = () => {
 
   const sidebarWidth = useAppStore((state) => state.sidebarWidth)
   const mapProvider = useAppStore((state) => state.mapProvider)
-  const globeProjection = useAppStore((state) => state.globeProjection)
+  const projection = useAppStore((state) => state.projection)
   const terrainEnabled = useAppStore((state) => state.terrainEnabled)
   const loadingState = useAppStore((state) => state.loadingState)
   const setMapInstance = useAppStore((state) => state.setMapInstance)
@@ -421,7 +435,7 @@ export const Map = () => {
   useEffect(() => {
     if (!mapContainer.current) return
 
-    const newMap = mapConfig.createMap(mapContainer.current, globeProjection)
+    const newMap = mapConfig.createMap(mapContainer.current, projection)
     mapInstanceRef.current = newMap
 
     newMap.on('load', () => {
@@ -445,13 +459,15 @@ export const Map = () => {
 
   useEffect(() => {
     if (!map || !isMapLoaded) return
-    mapConfig.setProjection(map, globeProjection)
-  }, [map, isMapLoaded, globeProjection])
+    mapConfig.setProjection(map, projection)
+  }, [map, isMapLoaded, projection])
 
   useEffect(() => {
     if (!map || !isMapLoaded) return
     try {
-      if (terrainEnabled) {
+      // The terrain tiles are Web Mercator, so they cannot drape the
+      // Antarctic projection's grid.
+      if (terrainEnabled && projection !== 'antarctic') {
         map.setTerrain({ source: mapConfig.terrainSource, exaggeration: 1.5 })
       } else {
         map.setTerrain(null)
@@ -459,7 +475,7 @@ export const Map = () => {
     } catch (e) {
       console.warn('Error toggling terrain:', e)
     }
-  }, [map, isMapLoaded, terrainEnabled, mapConfig])
+  }, [map, isMapLoaded, terrainEnabled, projection, mapConfig])
 
   useMapLayer(map, isMapLoaded)
 

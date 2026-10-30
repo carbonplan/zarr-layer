@@ -318,7 +318,7 @@ const Controls = () => {
   const opacity = useAppStore((state) => state.opacity)
   const clim = useAppStore((state) => state.clim)
   const colormap = useAppStore((state) => state.colormap)
-  const globeProjection = useAppStore((state) => state.globeProjection)
+  const projection = useAppStore((state) => state.projection)
   const terrainEnabled = useAppStore((state) => state.terrainEnabled)
   const renderPoles = useAppStore((state) => state.renderPoles)
   const setRenderPoles = useAppStore((state) => state.setRenderPoles)
@@ -366,7 +366,7 @@ const Controls = () => {
   const setOpacity = useAppStore((state) => state.setOpacity)
   const setClim = useAppStore((state) => state.setClim)
   const setColormap = useAppStore((state) => state.setColormap)
-  const setGlobeProjection = useAppStore((state) => state.setGlobeProjection)
+  const setProjection = useAppStore((state) => state.setProjection)
   const setTerrainEnabled = useAppStore((state) => state.setTerrainEnabled)
   const setMapProvider = useAppStore((state) => state.setMapProvider)
   const setRegionResult = useAppStore((state) => state.setRegionResult)
@@ -897,10 +897,19 @@ const Controls = () => {
         </Column>
         <Column start={2} width={3}>
           <Filter
-            values={{ globe: globeProjection, mercator: !globeProjection }}
+            // The options differ by provider, and Filter expects a fixed set.
+            key={mapProvider}
+            values={{
+              globe: projection === 'globe',
+              mercator: projection === 'mercator',
+              ...(mapProvider === 'maplibre' && {
+                antarctic: projection === 'antarctic',
+              }),
+            }}
             setValues={(obj: Record<string, boolean>) => {
-              if (obj.mercator) setGlobeProjection(false)
-              if (obj.globe) setGlobeProjection(true)
+              if (obj.globe) setProjection('globe')
+              if (obj.mercator) setProjection('mercator')
+              if (obj.antarctic) setProjection('antarctic')
             }}
           />
         </Column>
