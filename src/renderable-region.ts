@@ -44,6 +44,12 @@ export interface RenderableRegion {
   bandTextureKey: string | null
   // Scale/offset/fill for raw integer bands; null when bands are float
   bandTransform: BandTransform | null
+
+  // Boxes (x0, y0, x1, y1, ...) of the map tiles that show this region, in
+  // normalized Mercator relative to the mesh anchor; fragments outside every
+  // box are discarded so each pixel shows exactly one level. At most
+  // MAX_CLIP_BOXES boxes; none means no clipping.
+  clipBoxes?: Float32Array
 }
 
 /**
@@ -135,6 +141,14 @@ export function renderRegion(
   }
   if (needsLatLookup && shaderProgram.latIsAscendingLoc !== null) {
     gl.uniform1i(shaderProgram.latIsAscendingLoc, region.latIsAscending ? 1 : 0)
+  }
+
+  if (shaderProgram.clipCountLoc !== null) {
+    const clipCount = region.clipBoxes ? region.clipBoxes.length / 4 : 0
+    gl.uniform1i(shaderProgram.clipCountLoc, clipCount)
+    if (clipCount > 0 && shaderProgram.clipBoxesLoc !== null) {
+      gl.uniform4fv(shaderProgram.clipBoxesLoc, region.clipBoxes!)
+    }
   }
 
   // Bind geometry

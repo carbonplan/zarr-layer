@@ -22,6 +22,8 @@ const program = new Proxy(
     bandOffsetLoc: { name: 'u_bandOffset' },
     bandFillLoc: { name: 'u_bandFill' },
     nanLoc: { name: 'u_zl_nan' },
+    clipBoxesLoc: { name: 'u_clip_boxes' },
+    clipCountLoc: { name: 'u_clip_count' },
   } as Record<string, unknown>,
   { get: (target, key) => (key in target ? target[key as string] : null) }
 ) as unknown as ShaderProgram
@@ -107,5 +109,33 @@ describe('renderRegion band transforms', () => {
       bandFormat: 'float',
     })
     expect(bandUploads(gl)).toEqual([])
+  })
+})
+
+describe('renderRegion clip boxes', () => {
+  it('uploads the tile boxes a region is clipped to', () => {
+    // Each pixel shows exactly one level: a region keeps only the fragments
+    // inside the tiles that show its level.
+    const gl = createRecordingGl()
+    const clipped = region(null)
+    clipped.clipBoxes = new Float32Array([0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1])
+    renderRegion(gl, program, clipped, [0], config)
+
+    expect(
+      gl.callsTo('uniform1i').find((c) => c.args[0] === 'u_clip_count')?.args
+    ).toEqual(['u_clip_count', 2])
+    expect(
+      gl.callsTo('uniform4fv').find((c) => c.args[0] === 'u_clip_boxes')?.args
+    ).toEqual(['u_clip_boxes', [0, 0, 0.5, 0.5, 0.5, 0.5, 1, 1]])
+  })
+
+  it('clears the count for a region drawn whole', () => {
+    const gl = createRecordingGl()
+    renderRegion(gl, program, region(null), [0], config)
+
+    expect(
+      gl.callsTo('uniform1i').find((c) => c.args[0] === 'u_clip_count')?.args
+    ).toEqual(['u_clip_count', 0])
+    expect(gl.callsTo('uniform4fv')).toHaveLength(0)
   })
 })

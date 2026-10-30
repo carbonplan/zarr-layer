@@ -69,6 +69,46 @@ describe('withDecodedChunkCaching', () => {
     expect(reads).toHaveLength(4)
   })
 
+  it('holds every chunk of a viewport whose regions read several each', async () => {
+    // Four bands chunked apart under a time dimension: 256 regions read
+    // 1024 chunks, small in bytes. Scrubbing time rereads the same set, so
+    // once warm it must come from cache, not the store.
+    const memory = buildMemoryZarrStore({
+      arrays: [
+        {
+          name: 'temperature',
+          shape: [2, 4, 64, 64],
+          chunkShape: [2, 1, 4, 4],
+          dimensionNames: ['time', 'band', 'lat', 'lon'],
+        },
+      ],
+    })
+    let reads = 0
+    const counting = {
+      get: async (key: string) => {
+        if (key.includes('/c/')) reads++
+        return memory.get(key)
+      },
+    }
+    const store = await zarr.extendStore(counting, (inner) =>
+      withDecodedChunkCaching(inner)
+    )
+    const array = await zarr.open.v3(zarr.root(store).resolve('temperature'), {
+      kind: 'array',
+    })
+    const readAll = async () => {
+      for (let band = 0; band < 4; band++) {
+        for (let y = 0; y < 16; y++) {
+          for (let x = 0; x < 16; x++) await array.getChunk([0, band, y, x])
+        }
+      }
+    }
+    await readAll()
+    expect(reads).toBe(1024)
+    await readAll()
+    expect(reads).toBe(1024)
+  })
+
   it('shares one read between concurrent callers', async () => {
     const { array, reads } = await makeArray({})
     await Promise.all([array.getChunk([0, 0]), array.getChunk([0, 0])])

@@ -213,7 +213,7 @@ async function makeHarness(
       show: () => onBatchStart(),
       hide: hideSpinner,
     },
-    getActiveLevel: () => level,
+    getLevel: (index) => (level && index === level.index ? level : null),
     getSelectorVersion: () => selectorVersion,
     getBandNames: () =>
       opts.bands
@@ -267,10 +267,13 @@ describe('RegionFetcher', () => {
   it('fetches region chunks into CPU-side state', async () => {
     const { fetcher, cache, createRegionGeometry, invalidate } =
       await makeHarness()
-    await fetcher.fetchRegions([
-      { regionX: 0, regionY: 0 },
-      { regionX: 1, regionY: 1 },
-    ])
+    await fetcher.fetchRegions(
+      [
+        { regionX: 0, regionY: 0 },
+        { regionX: 1, regionY: 1 },
+      ],
+      0
+    )
 
     const topLeft = cache.get(makeRegionKey(0, 0, 0))!
     expect(Array.from(topLeft.data!)).toEqual(chunkData(0, 0))
@@ -293,7 +296,7 @@ describe('RegionFetcher', () => {
 
   it('leaves GPU upload to render time', async () => {
     const { fetcher, cache } = await makeHarness()
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.texture).toBeNull()
@@ -310,7 +313,7 @@ describe('RegionFetcher', () => {
       attributes: { scale_factor: 2, add_offset: 10 },
       bandTextures: true,
     })
-    await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
 
     const region = cache.get(makeRegionKey(0, 1, 0))!
     const band = region.bandData.get('temperature')!
@@ -329,7 +332,7 @@ describe('RegionFetcher', () => {
       attributes: { scale_factor: 0.1 },
       bandTextures: true,
     })
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.bandData.get('temperature')).toBeInstanceOf(Int16Array)
@@ -338,7 +341,7 @@ describe('RegionFetcher', () => {
 
   it('converts integer bands to float for the main texture', async () => {
     const { fetcher, cache } = await makeHarness({ dtype: 'int8' })
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.bandData.get('temperature')).toBeInstanceOf(Float32Array)
@@ -349,7 +352,7 @@ describe('RegionFetcher', () => {
     const { fetcher, cache } = await makeHarness({
       attributes: { scale_factor: 2, add_offset: 10 },
     })
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(Array.from(region.data!)).toEqual(
@@ -360,7 +363,7 @@ describe('RegionFetcher', () => {
   it('regenerates geometry when a refetch changes the region size', async () => {
     const { fetcher, cache, createRegionGeometry, getLevel, setLevel } =
       await makeHarness()
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.width).toBe(4)
     expect(createRegionGeometry).toHaveBeenCalledTimes(1)
@@ -368,7 +371,7 @@ describe('RegionFetcher', () => {
     // Same level index and cache key, larger regions: the cached region's mesh
     // no longer matches its data, so it has to be rebuilt (and re-uploaded).
     setLevel({ ...getLevel()!, regionSize: [HEIGHT, WIDTH] })
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
     expect(region.width).toBe(WIDTH)
     expect(region.height).toBe(HEIGHT)
@@ -379,13 +382,13 @@ describe('RegionFetcher', () => {
     const { fetcher, cache } = await makeHarness()
     // A region already refreshed by a newer selector version...
     const key = makeRegionKey(0, 0, 0)
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     const region = cache.get(key)!
     region.selectorVersion = 5
     region.data = null
 
     // ...must ignore a fetch batch stamped with the old version.
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     expect(region.data).toBeNull()
     expect(region.selectorVersion).toBe(5)
   })
@@ -396,7 +399,7 @@ describe('RegionFetcher', () => {
     const original = getLevel()!
     onBatchStart(() => setLevel({ ...original, index: 1 }))
 
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     // No read is issued at all: the pre-flight check drops the batch before
     // dispatch rather than letting each fetch discard its own result.
     expect(chunkReads).toEqual([])
@@ -410,7 +413,7 @@ describe('RegionFetcher', () => {
       await makeHarness()
     onBatchStart(() => setSelectorVersion(1))
 
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     expect(chunkReads).toEqual([])
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(region.data).toBeNull()
@@ -423,7 +426,7 @@ describe('RegionFetcher', () => {
       harness
     const original = getLevel()!
 
-    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     await untilReading(chunkReads)
     setLevel({ ...original, index: 1 })
     releaseReads()
@@ -448,7 +451,7 @@ describe('RegionFetcher', () => {
         chunkReads,
       } = harness
 
-      const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       await untilReading(chunkReads)
       cancelAllRequests(requestCanceller)
       releaseReads()
@@ -471,7 +474,7 @@ describe('RegionFetcher', () => {
     const { fetcher, cache, requestCanceller, releaseReads, chunkReads } =
       harness
 
-    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     await untilReading(chunkReads)
     const region = cache.get(makeRegionKey(0, 0, 0))!
     cancelAllRequests(requestCanceller)
@@ -490,7 +493,7 @@ describe('RegionFetcher', () => {
       await makeHarness()
     const original = getLevel()!
 
-    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     setLevel({ ...original, index: 1 })
     await batch
 
@@ -501,14 +504,14 @@ describe('RegionFetcher', () => {
   it('fetches a region dropped from the queue when it is requested again', async () => {
     const { fetcher, cache, requestCanceller, chunkReads } = await makeHarness()
 
-    const dropped = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    const dropped = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     dropQueuedFetches(requestCanceller, () => true)
     await dropped
     const region = cache.get(makeRegionKey(0, 0, 0))!
     expect(chunkReads).toEqual([])
     expect(region.loading).toBe(false)
 
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     expect(Array.from(region.data!)).toEqual(chunkData(0, 0))
     expect(region.loading).toBe(false)
   })
@@ -517,7 +520,7 @@ describe('RegionFetcher', () => {
     const harness = await makeHarness()
     const { fetcher, cache, setLevel } = harness
     setLevel(null)
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     expect(cache.size).toBe(0)
   })
 
@@ -530,10 +533,13 @@ describe('RegionFetcher', () => {
         const { fetcher, cache, invalidate, hideSpinner, setSelectorVersion } =
           await makeHarness({ failReads: topRight })
         setSelectorVersion(3)
-        await fetcher.fetchRegions([
-          { regionX: 0, regionY: 0 },
-          { regionX: 1, regionY: 0 },
-        ])
+        await fetcher.fetchRegions(
+          [
+            { regionX: 0, regionY: 0 },
+            { regionX: 1, regionY: 0 },
+          ],
+          0
+        )
 
         const failed = cache.get(makeRegionKey(0, 1, 0))!
         expect(failed.failedSelectorVersion).toBe(3)
@@ -559,10 +565,13 @@ describe('RegionFetcher', () => {
         const { fetcher, invalidate, hideSpinner } = await makeHarness({
           failReads: () => true,
         })
-        await fetcher.fetchRegions([
-          { regionX: 0, regionY: 0 },
-          { regionX: 1, regionY: 0 },
-        ])
+        await fetcher.fetchRegions(
+          [
+            { regionX: 0, regionY: 0 },
+            { regionX: 1, regionY: 0 },
+          ],
+          0
+        )
         expect(hideSpinner).toHaveBeenCalledTimes(1)
         expect(invalidate).toHaveBeenCalledTimes(1)
       } finally {
@@ -573,7 +582,7 @@ describe('RegionFetcher', () => {
     it('is not what an abort is', async () => {
       const { fetcher, cache, requestCanceller, releaseReads, chunkReads } =
         await makeHarness({ gateReads: true })
-      const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      const batch = fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       await untilReading(chunkReads)
       cancelAllRequests(requestCanceller)
       releaseReads()
@@ -598,7 +607,7 @@ describe('RegionFetcher', () => {
         cache.set(region.key, region)
 
         setSelectorVersion(1)
-        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
         // Stale data would draw the previous selection as if it were this one.
         expect(region.data).toBeNull()
         expect(region.bandData.size).toBe(0)
@@ -618,7 +627,7 @@ describe('RegionFetcher', () => {
         cache.set(region.key, region)
 
         setSelectorVersion(1)
-        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
         expect(releaseRegionTextures).toHaveBeenCalledWith(region)
       } finally {
         errorSpy.mockRestore()
@@ -634,7 +643,7 @@ describe('RegionFetcher', () => {
         })
         const { fetcher, cache, releaseReads, chunkReads, setLevel, getLevel } =
           harness
-        const batch = fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        const batch = fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
         await untilReading(chunkReads)
         // The reload commits a new runtime for the same level and forgets
         // failures; the old read then rejects.
@@ -659,12 +668,12 @@ describe('RegionFetcher', () => {
         const { fetcher, cache } = await makeHarness({
           failReads: (key) => failing && topRight(key),
         })
-        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
         const region = cache.get(makeRegionKey(0, 1, 0))!
         expect(region.failedSelectorVersion).toBe(0)
 
         failing = false
-        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }])
+        await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
         expect(region.failedSelectorVersion).toBeNull()
         expect(Array.from(region.data!)).toEqual(chunkData(0, 1))
       } finally {
@@ -724,7 +733,7 @@ describe('RegionFetcher', () => {
       regionCache: cache,
       requestCanceller: createRequestCanceller(),
       loadingDebouncer: { show: () => {}, hide: () => {} },
-      getActiveLevel: () => level,
+      getLevel: (index) => (index === level.index ? level : null),
       getSelectorVersion: () => 0,
       // One name provided: the second channel falls back to band_<index>.
       getBandNames: () => ['t10'],
@@ -741,7 +750,7 @@ describe('RegionFetcher', () => {
 
   it('fetches multi-value dims as parallel channels and interleaves them', async () => {
     const { fetcher, cache } = await makeMultibandHarness(false)
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     const region = cache.get(makeRegionKey(0, 0, 0))!
 
     expect(region.channels).toBe(2)
@@ -763,7 +772,7 @@ describe('RegionFetcher', () => {
 
   it('skips the interleaved copy when the shader samples band textures', async () => {
     const { fetcher, cache } = await makeMultibandHarness(true)
-    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+    await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
     const region = cache.get(makeRegionKey(0, 0, 0))!
 
     // Every band is still fetched and kept; only the interleaved copy that
@@ -799,7 +808,7 @@ describe('RegionFetcher', () => {
         dtype: 'int16',
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       const region = cache.get(makeRegionKey(0, 0, 0))!
       expectBands(region, selected)
       // Every band is a view into the one result.
@@ -820,7 +829,7 @@ describe('RegionFetcher', () => {
         dtype: 'int16',
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       const region = cache.get(makeRegionKey(0, 0, 0))!
       for (const b of selected) {
         const rowMajor = chunkData(0, 0).map((v) => v + 100 * b)
@@ -841,7 +850,7 @@ describe('RegionFetcher', () => {
           dtype: 'int16',
           bandTextures: true,
         })
-        await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+        await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
         // Band by band, index 4 fails the read: nothing partial is kept.
         const region = cache.get(makeRegionKey(0, 0, 0))!
         expect(region.bandData.size).toBe(0)
@@ -859,7 +868,7 @@ describe('RegionFetcher', () => {
         fillValue: 0,
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       const region = cache.get(makeRegionKey(0, 0, 0))!
       for (const b of selected) {
         // The ramp's first pixel of band 0 is the fill value, so it is NaN.
@@ -878,7 +887,7 @@ describe('RegionFetcher', () => {
         dtype: 'bool',
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       const region = cache.get(makeRegionKey(0, 0, 0))!
       // Band 0 of the fixture is the ramp, true everywhere but its first
       // pixel; band 1 adds 100, so it is all true.
@@ -895,7 +904,7 @@ describe('RegionFetcher', () => {
         dtype: 'int16',
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       const region = cache.get(makeRegionKey(0, 0, 0))!
       expect(Array.from(region.bandData.get('band_-2')!)).toEqual(
         chunkData(0, 0).map((v) => v + 200)
@@ -912,7 +921,7 @@ describe('RegionFetcher', () => {
         dtype: 'int16',
         bandTextures: true,
       })
-      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }])
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
       expectBands(cache.get(makeRegionKey(0, 0, 0))!, selected)
     })
   })

@@ -21,6 +21,9 @@ export interface RegionState {
   // WebGL resources
   texture: WebGLTexture | null
   textureUploaded: boolean
+  // GPU bytes of the main texture as last uploaded; it stays allocated
+  // until replaced or deleted.
+  textureBytes: number
   vertexBuffer: WebGLBuffer | null
   pixCoordBuffer: WebGLBuffer | null
   indexBuffer: WebGLBuffer | null // For adaptive mesh indexed triangles

@@ -906,65 +906,67 @@ const Controls = () => {
         </Column>
       </Row>
 
-      {mapProvider === 'mapbox' && (
-        <>
-          <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
-            <Column start={1} width={1} sx={subheadingSx}>
-              Terrain
-            </Column>
-            <Column start={2} width={3}>
-              <Flex sx={{ alignItems: 'center', gap: 2 }}>
-                <Filter
-                  values={{ on: terrainEnabled, off: !terrainEnabled }}
-                  setValues={(obj: Record<string, boolean>) => {
-                    if (obj.off) setTerrainEnabled(false)
-                    if (obj.on) {
-                      setTerrainEnabled(true)
-                      setRenderPoles(false)
-                    }
-                  }}
-                />
-                <IconButton
-                  onClick={() => setTerrainInfo(!terrainInfo)}
-                  aria-label='More information'
-                  aria-expanded={terrainInfo}
-                  sx={{
-                    cursor: 'pointer',
-                    width: '16px',
-                    height: '16px',
-                    p: 0,
-                    flexShrink: 0,
-                    '&:hover > #terrain-info': { stroke: 'primary' },
-                  }}
-                >
-                  <Info
-                    id='terrain-info'
-                    height='16px'
-                    width='16px'
-                    sx={{
-                      stroke: terrainInfo ? 'primary' : 'secondary',
-                      transition: '0.1s',
-                    }}
-                  />
-                </IconButton>
-              </Flex>
-            </Column>
-          </Row>
-          {terrainInfo && (
-            <Box
+      <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
+        <Column start={1} width={1} sx={subheadingSx}>
+          Terrain
+        </Column>
+        <Column start={2} width={3}>
+          <Flex sx={{ alignItems: 'center', gap: 2 }}>
+            <Filter
+              values={{ on: terrainEnabled, off: !terrainEnabled }}
+              setValues={(obj: Record<string, boolean>) => {
+                if (obj.off) setTerrainEnabled(false)
+                if (obj.on) {
+                  setTerrainEnabled(true)
+                  setRenderPoles(false)
+                }
+              }}
+            />
+            <IconButton
+              onClick={() => setTerrainInfo(!terrainInfo)}
+              aria-label='More information'
+              aria-expanded={terrainInfo}
               sx={{
-                fontSize: 2,
-                color: 'secondary',
-                mt: 1,
-                mb: 2,
-                fontFamily: 'body',
+                cursor: 'pointer',
+                width: '16px',
+                height: '16px',
+                p: 0,
+                flexShrink: 0,
+                '&:hover > #terrain-info': { stroke: 'primary' },
               }}
             >
-              Drapes the zarr layer over Mapbox 3D terrain. Incompatible with
-              render poles. Mapbox only.
-            </Box>
-          )}
+              <Info
+                id='terrain-info'
+                height='16px'
+                width='16px'
+                sx={{
+                  stroke: terrainInfo ? 'primary' : 'secondary',
+                  transition: '0.1s',
+                }}
+              />
+            </IconButton>
+          </Flex>
+        </Column>
+      </Row>
+      {terrainInfo && (
+        <Box
+          sx={{
+            fontSize: 2,
+            color: 'secondary',
+            mt: 1,
+            mb: 2,
+            fontFamily: 'body',
+          }}
+        >
+          Drapes the zarr layer over 3D terrain. The draped tiles are Web
+          Mercator, so the globe shows holes at the poles. On MapLibre this is
+          experimental and needs maplibre-gl 6.13 or later. Incompatible with
+          render poles on Mapbox.
+        </Box>
+      )}
 
+      {mapProvider === 'mapbox' && (
+        <>
           <Row columns={[4, 4, 4, 4]} sx={{ alignItems: 'baseline' }}>
             <Column start={1} width={1} sx={subheadingSx}>
               Render poles

@@ -68,6 +68,9 @@ export interface ShaderProgram {
   reprojectLoc: WebGLUniformLocation | null
   latBoundsLoc: WebGLUniformLocation | null
   latIsAscendingLoc: WebGLUniformLocation | null
+  // Finer-data clip boxes, see FRAGMENT_CLIP
+  clipBoxesLoc: WebGLUniformLocation | null
+  clipCountLoc: WebGLUniformLocation | null
 }
 
 export function resolveProjectionMode(
@@ -327,6 +330,8 @@ export function createShaderProgram(
     reprojectLoc: gl.getUniformLocation(program, 'u_reproject'),
     latBoundsLoc: gl.getUniformLocation(program, 'u_latBounds'),
     latIsAscendingLoc: gl.getUniformLocation(program, 'u_latIsAscending'),
+    clipBoxesLoc: gl.getUniformLocation(program, 'u_clip_boxes'),
+    clipCountLoc: gl.getUniformLocation(program, 'u_clip_count'),
   }
 
   gl.deleteShader(vertexShader)

@@ -65,7 +65,40 @@ in vec2 vertex;
 
 out vec2 pix_coord;
 out vec2 v_mercatorPos;
-out vec2 v_wgs84Pos;`
+out vec2 v_wgs84Pos;
+out vec2 v_clipPos;`
+
+/**
+ * Most clip boxes one draw holds; each costs one fragment uniform vector. A
+ * region owned by more tiles is drawn in several passes.
+ */
+export const MAX_CLIP_BOXES = 32
+
+/**
+ * Fragment-side clip to the map tiles that show this region's level, so
+ * every pixel shows exactly one level. Boxes are (x0, y0, x1, y1) in
+ * normalized Mercator relative to the region's mesh anchor, matching the
+ * region-local delta the vertex shader carries: the compare never touches
+ * an absolute float32 coordinate, so shared tile edges stay exact at any
+ * zoom. No boxes means no clipping.
+ */
+const UNIFORMS_CLIP = `
+uniform vec4 u_clip_boxes[${MAX_CLIP_BOXES}];
+uniform int u_clip_count;`
+
+const FRAGMENT_CLIP = `
+  if (u_clip_count > 0) {
+    bool inside = false;
+    for (int i = 0; i < ${MAX_CLIP_BOXES}; i++) {
+      if (i >= u_clip_count) break;
+      vec4 box = u_clip_boxes[i];
+      if (v_clipPos.x >= box.x && v_clipPos.x < box.z && v_clipPos.y >= box.y && v_clipPos.y < box.w) {
+        inside = true;
+        break;
+      }
+    }
+    if (!inside) discard;
+  }`
 
 /** Scale handling (shared by all shaders) */
 const SCALE_HANDLING = `
@@ -74,7 +107,8 @@ const SCALE_HANDLING = `
 
 /** Transform vertex from local space to normalized Mercator coordinates */
 const VERTEX_TO_MERCATOR = `
-  vec2 merc = vec2(vertex.x * sx + shift_x + u_worldXOffset, -vertex.y * sy + shift_y);`
+  vec2 mercDelta = vec2(vertex.x * sx, -vertex.y * sy);
+  vec2 merc = mercDelta + vec2(shift_x + u_worldXOffset, shift_y);`
 
 /**
  * Source-projected FLAT path, eye-coords (render-relative-to-eye) decomposition.
@@ -171,8 +205,9 @@ ${flatEndpoint}
  * (mercY outside [0,1]) reconstruct their true latitude → poles preserved.
  */
 const VERTEX_WGS84_TO_ECEF = `
-  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
-  float mercY = vertex.y * sy + shift_y;
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  float mercX = mercDelta.x + shift_x + u_worldXOffset;
+  float mercY = mercDelta.y + shift_y;
 
   float lonRad = (mercX - 0.5) * 2.0 * PI;
   float latRad = mercatorYToLatRad(mercY);
@@ -193,8 +228,9 @@ const VERTEX_WGS84_TO_ECEF = `
  * merc→lat inversion as VERTEX_WGS84_TO_ECEF (see there).
  */
 const VERTEX_WGS84_TO_ECEF_MAPBOX = `
-  float mercX = vertex.x * sx + shift_x + u_worldXOffset;
-  float mercY = vertex.y * sy + shift_y;
+  vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
+  float mercX = mercDelta.x + shift_x + u_worldXOffset;
+  float mercY = mercDelta.y + shift_y;
 
   float lonRad = (mercX - 0.5) * 2.0 * PI;
   float latRad = mercatorYToLatRad(mercY);
@@ -371,6 +407,7 @@ ${SCALE_HANDLING}
 ${coordTransform}
 ${projectionOutput}
   pix_coord = pix_coord_in;
+  v_clipPos = mercDelta;
 ${mercatorPosAssignment}
 ${wgs84PosAssignment}
 }
@@ -458,16 +495,19 @@ uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D tex;
 uniform sampler2D cmap;
+${UNIFORMS_CLIP}
 
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
 in vec2 v_wgs84Pos;
+in vec2 v_clipPos;
 out vec4 color;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
 
 void main() {
+${FRAGMENT_CLIP}
 ${FRAGMENT_SHADER_REPROJECT}
   float texVal = texture(tex, sample_coord).r;
 
@@ -617,6 +657,7 @@ uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
 uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
 
 uniform sampler2D colormap;
+${UNIFORMS_CLIP}
 
 uniform ${samplerType} ${BAND_SAMPLER};
 ${customUniformDecls}
@@ -625,12 +666,14 @@ ${extraUniformsDecl}
 in vec2 pix_coord;
 in vec2 v_mercatorPos;
 in vec2 v_wgs84Pos;
+in vec2 v_clipPos;
 out vec4 fragColor;
 
 ${FRAG_CONST_PI}
 ${FUNC_MERCATOR_INVERT}
 ${native ? NATIVE_BAND_READ : ''}
 void main() {
+${FRAGMENT_CLIP}
 ${FRAGMENT_SHADER_REPROJECT}
 ${bandReads}
 ${bandAliases}

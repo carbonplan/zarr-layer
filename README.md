@@ -38,15 +38,15 @@ Where these attributes are absent the layer falls back to what it always did: re
 
 ### Multiscales
 
-High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. On MapLibre the level is chosen per map tile, the way the map's own raster sources work: in a pitched view, tiles near the camera read a fine level and tiles towards the horizon read coarser ones, so distant areas load less data and still show something. Each tile shows exactly one level, its own once that has loaded under the whole tile and the best cached one until then, and each region is drawn only inside the tiles showing its level, so a translucent layer never doubles up where levels meet. Untilted views read a single level, as does Mapbox without terrain, which exposes no public tile cover; there the layer tiles the viewport itself, so a change of level still switches one tile at a time without levels overlapping. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
 ## globe rendering and polar coverage
 
 Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For EPSG:4326 and `proj4` datasets:
 
-**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed.
+**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed. The exception is terrain: with terrain enabled the layer is draped as Mercator tiles and the poles show holes (see [terrain](#terrain)).
 
-**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path. Switching between the draped and direct paths relies on undocumented Mapbox behaviour (a custom layer is draped whenever it exposes `renderToTile`), which may change across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with draping the zarr layer over Mapbox terrain — when terrain is enabled the layer always uses the draped tile path.
+**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path. Switching between the draped and direct paths relies on undocumented Mapbox behaviour (a custom layer is draped whenever it exposes `renderToTile`), which may change across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with terrain — when terrain is enabled the layer always uses the draped tile path.
 
 ```ts
 new ZarrLayer({
@@ -54,6 +54,16 @@ new ZarrLayer({
   renderPoles: true, // Mapbox only — MapLibre always renders to the poles
 })
 ```
+
+## terrain
+
+The layer drapes over 3D terrain on both providers, with no configuration needed: enable terrain on the map (`map.setTerrain(...)`) and the layer follows the terrain surface.
+
+**MapLibre** — Uses MapLibre's experimental `renderToTerrainTile` custom-layer hook, which requires maplibre-gl 6.13 or later. On older versions the layer still draws, but flat, without following the terrain.
+
+**Mapbox** — Uses Mapbox's `renderToTile` tile draping.
+
+With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom, so a pitched view over terrain gets fine data near the camera and coarse data at the horizon rather than nothing.
 
 ## install
 
@@ -241,7 +251,7 @@ const layer = new ZarrLayer({
 layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
 ```
 
-Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile.
+Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile. The layer's own uniforms include the 33 vectors of its per-tile level clipping (32 clip boxes and their count), so budget a long array against what remains.
 
 ### NDVI example
 

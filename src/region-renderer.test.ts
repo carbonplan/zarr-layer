@@ -13,7 +13,6 @@ import {
 } from './__fixtures__/memory-zarr'
 import type { MapLike, NormalizedSelector } from './types'
 import type { ChunkLoadingDebouncer } from './region-utils'
-import type { RegionRenderState } from './renderer-types'
 import { bandTextureKey } from './render-helpers'
 import type { RegionState } from './region-state'
 
@@ -95,12 +94,12 @@ const mapAt = (
 })
 
 /**
- * getRegionStates is the render seam — the point where CPU-side regions become
+ * plannedDraws is the render seam — the point where CPU-side regions become
  * draw-ready GPU state. Reaching it through render() would need a real
  * ZarrRenderer and a compiled program, so the test calls it directly.
  */
 type RenderSeam = {
-  getRegionStates(gl: WebGL2RenderingContext): RegionRenderState[]
+  plannedDraws(gl: WebGL2RenderingContext): Array<{ region: RegionState }>
   createRegionGeometry(
     regionX: number,
     regionY: number,
@@ -114,6 +113,12 @@ type RenderSeam = {
   ): Promise<unknown>
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as RenderSeam
+
+/** The regions the direct path draws this frame, through the render seam. */
+const drawn = (renderer: RegionRenderer, gl: WebGL2RenderingContext) =>
+  seam(renderer)
+    .plannedDraws(gl)
+    .map((draw) => draw.region)
 
 /**
  * A drawable region from another level, standing in for coverage left over
@@ -269,7 +274,7 @@ describe('RegionRenderer', () => {
     await settle(renderer)
 
     // 2x2 region grid, all visible at a whole-world viewport.
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+    expect(drawn(renderer, gl)).toHaveLength(4)
     expect(invalidate).toHaveBeenCalled()
   })
 
@@ -282,7 +287,7 @@ describe('RegionRenderer', () => {
     expect(gl.createTexture).not.toHaveBeenCalled()
     expect(gl.texImage2D).not.toHaveBeenCalled()
 
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(gl.createTexture).toHaveBeenCalledTimes(4)
     expect(gl.texImage2D).toHaveBeenCalledTimes(4)
     for (const state of states) {
@@ -300,9 +305,9 @@ describe('RegionRenderer', () => {
 
     renderer.update(map, gl)
     await settle(renderer)
-    seam(renderer).getRegionStates(gl)
-    seam(renderer).getRegionStates(gl)
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
+    drawn(renderer, gl)
+    drawn(renderer, gl)
 
     expect(gl.createTexture).toHaveBeenCalledTimes(4)
     expect(gl.texImage2D).toHaveBeenCalledTimes(4)
@@ -311,7 +316,7 @@ describe('RegionRenderer', () => {
   it('renders nothing before a level is committed', async () => {
     const { renderer, gl } = await makeRenderer()
     // No update() yet: regions were never requested.
-    expect(seam(renderer).getRegionStates(gl)).toEqual([])
+    expect(drawn(renderer, gl)).toEqual([])
     expect(gl.createTexture).not.toHaveBeenCalled()
   })
 
@@ -338,7 +343,7 @@ describe('RegionRenderer', () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
     expect(gl.texImage2D).toHaveBeenCalledTimes(4)
     const geometryUploads = gl.bufferData.mock.calls.length
 
@@ -346,7 +351,7 @@ describe('RegionRenderer', () => {
     renderer.update(map, gl)
     await settle(renderer)
 
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(4)
     // Re-uploaded in place: new data, same textures.
     expect(gl.texImage2D).toHaveBeenCalledTimes(8)
@@ -359,7 +364,7 @@ describe('RegionRenderer', () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
     const uploadsBefore = gl.bufferData.mock.calls.length
 
     // A refetch at new region dimensions rebuilds the mesh in place. Drawing
@@ -369,7 +374,7 @@ describe('RegionRenderer', () => {
     seam(renderer).createRegionGeometry(0, 0, region)
     expect(region.geometryUploaded).toBe(false)
 
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
     const uploaded = gl.bufferData.mock.calls
       .slice(uploadsBefore)
       .map((call) => call[1])
@@ -406,7 +411,7 @@ describe('RegionRenderer', () => {
 
     // The current level has data but its textures won't allocate. Dropping the
     // fallback here on CPU readiness alone would leave the viewport blank.
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(1)
     expect(states[0].texture).toBe(fallback.texture)
   })
@@ -416,7 +421,7 @@ describe('RegionRenderer', () => {
     // Nothing fetched at the current level, so the fallback carries the frame.
     const fallback = seedFallbackRegion(renderer, { uploaded: false })
 
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(1)
     expect(states[0].texture).toBe(fallback.texture)
     expect(fallback.texture).not.toBeNull()
@@ -431,18 +436,18 @@ describe('RegionRenderer', () => {
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
     await settle(renderer)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+    expect(drawn(renderer, gl)).toHaveLength(4)
 
     // Switching back to the main texture leaves cached regions holding band
     // data only. Drawing them through the main path would put one band's
     // values on screen as if they were the whole dataset.
     renderer.setRendersFromBandTextures(false)
-    expect(seam(renderer).getRegionStates(gl)).toEqual([])
+    expect(drawn(renderer, gl)).toEqual([])
 
     // The refetch triggered by the switch restores them.
     renderer.update(map, gl)
     await settle(renderer)
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(4)
     for (const state of states) {
       expect(state.texture).not.toBeNull()
@@ -489,34 +494,33 @@ describe('RegionRenderer', () => {
     // Band textures are what this shader samples, so failing to allocate them
     // has to read as undrawable even though geometry uploads fine.
     const failing = fakeGl({ failTextures: true })
-    const states = seam(renderer).getRegionStates(failing)
+    const states = drawn(renderer, failing)
     expect(states).toHaveLength(1)
     expect(states[0].bandTexture).toBe(fallback.bandTexture)
   })
 
-  it('holds other-level eviction protection until the level is drawable', async () => {
+  it('releases other-level eviction protection once the level can be drawn', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
     const fallback = seedFallbackRegion(renderer)
     const cache = seam(renderer).regionCache
 
-    // Regions are fetched but never drawn, so the level can't be shown yet and
-    // its fallback has to stay protected — eviction here is unrecoverable.
-    renderer.update(map, gl)
-    expect(cache.isProtected(fallback.key)).toBe(true)
-
-    // Once a frame uploads them, the level stands on its own.
-    seam(renderer).getRegionStates(gl)
+    // Regions are fetched but not yet drawn. Protection is judged on what
+    // the render plan will draw, uploading as it would, so the level stands
+    // on its own at once and the fallback no tile shows is released.
     renderer.update(map, gl)
     expect(cache.isProtected(fallback.key)).toBe(false)
+    const states = drawn(renderer, gl)
+    expect(states).toHaveLength(4)
+    expect(states.every((state) => state.levelIndex === 0)).toBe(true)
   })
 
   it('evicts on a settled viewport once fetched bytes have landed', async () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
     const cache = seam(renderer).regionCache
     const evict = vi.spyOn(cache, 'evict')
 
@@ -543,6 +547,7 @@ describe('RegionRenderer', () => {
 
     // The layer switches to the band-sampling shader, which never reads the
     // main texture, so the interleaved copy stops being built.
+    gl.createTexture.mockClear()
     renderer.setRendersFromBandTextures(true)
     renderer.update(map, gl)
     await settle(renderer)
@@ -553,7 +558,7 @@ describe('RegionRenderer', () => {
 
     // Rendering uploads the bands and no main texture at all, which is only
     // true if the renderer passes its band list down to the upload.
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(4)
     for (const state of states) {
       expect(state.texture).toBeNull()
@@ -575,7 +580,7 @@ describe('RegionRenderer', () => {
 
     // Readiness is judged against the level's format, so a mismatch here
     // would leave every region undrawable.
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(4)
     for (const state of states) {
       expect(state.bandTextureKey).toBe(bandTextureKey(['temperature'], 'int'))
@@ -615,14 +620,14 @@ describe('RegionRenderer', () => {
       renderer.update(map, gl)
       await settle(renderer)
       expect(errorSpy).toHaveBeenCalledTimes(1)
-      expect(seam(renderer).getRegionStates(gl)).toEqual([])
+      expect(drawn(renderer, gl)).toEqual([])
 
       await renderer.setSelector({ time: { selected: 20, type: 'value' } })
       renderer.update(map, gl)
       await renderer.ensureQueryableLevel()
       renderer.update(map, gl)
       await settle(renderer)
-      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+      expect(drawn(renderer, gl)).toHaveLength(4)
       expect(errorSpy).toHaveBeenCalledTimes(1)
     } finally {
       errorSpy.mockRestore()
@@ -635,7 +640,7 @@ describe('RegionRenderer', () => {
       const { renderer, gl, map } = await makeRenderer()
       renderer.update(map, gl)
       await settle(renderer)
-      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+      expect(drawn(renderer, gl)).toHaveLength(4)
 
       await renderer.setSelector({
         time: { selected: 'summer', type: 'value' },
@@ -645,7 +650,7 @@ describe('RegionRenderer', () => {
       await settle(renderer)
       renderer.update(map, gl)
       await settle(renderer)
-      expect(seam(renderer).getRegionStates(gl)).toEqual([])
+      expect(drawn(renderer, gl)).toEqual([])
       expect(seam(renderer).regionCache.size).toBe(0)
       expect(errorSpy).toHaveBeenCalledTimes(1)
 
@@ -654,7 +659,7 @@ describe('RegionRenderer', () => {
       await renderer.ensureQueryableLevel()
       renderer.update(map, gl)
       await settle(renderer)
-      expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+      expect(drawn(renderer, gl)).toHaveLength(4)
     } finally {
       errorSpy.mockRestore()
     }
@@ -664,11 +669,11 @@ describe('RegionRenderer', () => {
     const { renderer, gl, map } = await makeRenderer()
     renderer.update(map, gl)
     await settle(renderer)
-    seam(renderer).getRegionStates(gl)
+    drawn(renderer, gl)
 
     renderer.dispose(gl)
     expect(gl.deleteTexture).toHaveBeenCalledTimes(4)
-    expect(seam(renderer).getRegionStates(gl)).toEqual([])
+    expect(drawn(renderer, gl)).toEqual([])
   })
 })
 
@@ -713,7 +718,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
 
     // The rest of the viewport is drawn; the failed region draws nothing.
     expect(chunkReads).toHaveLength(4)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+    expect(drawn(renderer, gl)).toHaveLength(3)
   })
 
   it('does not hold a fetch slot the other regions need', async () => {
@@ -729,7 +734,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
 
     expect(chunkReads).toHaveLength(4)
     expect(readsOf(chunkReads)).toBe(1)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+    expect(drawn(renderer, gl)).toHaveLength(3)
   })
 
   it('settles the loading indicator', async () => {
@@ -762,7 +767,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     )
     renderer.update(map, gl)
     await settle(renderer)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+    expect(drawn(renderer, gl)).toHaveLength(3)
 
     failing = false
     await renderer.setSelector({ time: { selected: 20, type: 'value' } })
@@ -770,7 +775,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     await settle(renderer)
 
     expect(readsOf(chunkReads)).toBe(2)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+    expect(drawn(renderer, gl)).toHaveLength(4)
   })
 
   it('retries it when the level is reloaded', async () => {
@@ -790,7 +795,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     await settle(renderer)
 
     expect(readsOf(chunkReads)).toBe(2)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+    expect(drawn(renderer, gl)).toHaveLength(4)
   })
 
   it('forgets it with the entry when the region is evicted', async () => {
@@ -811,7 +816,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
       [...cache.entries()].map(([k]) => k).filter((k) => k !== key),
       { retainKeysNotMatching: '' }
     )
-    cache.evict(gl, 0)
+    cache.evict(gl, { maxBytes: 0 })
     expect(cache.get(key)).toBeUndefined()
 
     renderer.update(map, gl)
@@ -827,6 +832,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     )
     // Region (0, 0) was fetched and drawn under the first selector.
     const region = seedFallbackRegion(renderer, { levelIndex: 0 })
+    region.textureBytes = region.data!.byteLength
     const texture = region.texture!
     renderer.update(map, gl)
     await settle(renderer)
@@ -840,7 +846,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     expect(gl.deleteTexture).toHaveBeenCalledWith(texture)
     expect(region.texture).toBeNull()
     expect(regionByteLength(region)).toBe(0)
-    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+    expect(drawn(renderer, gl)).toHaveLength(3)
   })
 
   it('does not hold fallback coverage on screen forever', async () => {
@@ -852,14 +858,9 @@ describe('RegionRenderer with a region whose fetch fails', () => {
 
     renderer.update(map, gl)
     await settle(renderer)
-    // Until a frame uploads what arrived, the fallback still carries the view.
-    renderer.update(map, gl)
-    expect(cache.isProtected(fallback.key)).toBe(true)
-
-    seam(renderer).getRegionStates(gl)
     renderer.update(map, gl)
     expect(cache.isProtected(fallback.key)).toBe(false)
-    const states = seam(renderer).getRegionStates(gl)
+    const states = drawn(renderer, gl)
     expect(states).toHaveLength(3)
     expect(states.map((s) => s.texture)).not.toContain(fallback.texture)
   })

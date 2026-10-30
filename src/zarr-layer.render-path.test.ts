@@ -16,7 +16,7 @@ import type { MapLike } from './types'
  *
  * Getting the gate wrong is invisible until you look at a map: on terrain the
  * layer detaches from the ground, mid-morph it pops, and on MapLibre — which
- * has no draping API at all — engaging the Mapbox-only path would break the
+ * never reads renderToTile — engaging the Mapbox-only path would break the
  * layer outright. The gate has five inputs, each covered below:
  *
  *   renderPoles opt-in, dataset ECEF-eligibility, terrain off, globe
@@ -549,9 +549,10 @@ describe('switching paths invalidates the shared draped batch cache', () => {
 
 describe('MapLibre never takes the Mapbox direct path', () => {
   it('stays draped on a globe map', async () => {
-    // MapLibre has no draping API, so renderToTile is inert there — but the
-    // render parameters are also the discriminator: MapLibre never passes
-    // them, which keeps the Mapbox-specific ECEF program off a MapLibre map.
+    // MapLibre never calls renderToTile (its terrain draping goes through
+    // renderToTerrainTile), so the property is inert there — but the render
+    // parameters are also the discriminator: MapLibre never passes them,
+    // which keeps the Mapbox-specific ECEF program off a MapLibre map.
     const { isDraped, prerender, emit } = await addLayer({
       globe: true,
       zoom: 0,

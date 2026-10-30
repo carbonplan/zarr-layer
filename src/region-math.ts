@@ -68,6 +68,20 @@ function getChunkRegionSize(
   return null // No chunking or single chunk
 }
 
+/**
+ * Overlap in degrees a strict test needs: far above the float error of a
+ * projected region edge landing on a tile seam (about 1e-13°), far below a
+ * pixel at zoom 24 even where Mercator stretches latitude near its limit.
+ */
+const STRICT_OVERLAP_DEGREES = 1e-10
+
+export interface LonLatBounds {
+  west: number
+  south: number
+  east: number
+  north: number
+}
+
 export function getVisibleRegions({
   map,
   xyLimits,
@@ -82,7 +96,38 @@ export function getVisibleRegions({
   latIsAscending: boolean
 }): RegionCoordinate[] {
   const bounds = map.getBounds?.()?.toArray?.()
-  if (!bounds || !xyLimits || !levelMeta) return []
+  if (!bounds) return []
+  const [[west, south], [east, north]] = bounds
+  return getRegionsInBounds({
+    bounds: { west, south, east, north },
+    xyLimits,
+    levelMeta,
+    projection,
+    latIsAscending,
+  })
+}
+
+/** Regions of a level that overlap a WGS84 bounding box. */
+export function getRegionsInBounds({
+  bounds,
+  xyLimits,
+  levelMeta,
+  projection,
+  latIsAscending,
+  strict = false,
+}: {
+  bounds: LonLatBounds
+  xyLimits: XYLimits | null
+  levelMeta: LevelMeta | null
+  projection: ProjectionContext
+  latIsAscending: boolean
+  /**
+   * Require a positive-width overlap: a region touching an edge is out, even
+   * when projecting it puts the edge a rounding error across.
+   */
+  strict?: boolean
+}): RegionCoordinate[] {
+  if (!xyLimits || !levelMeta) return []
   if (!projection.def || !projection.toWGS84) {
     // No proj4 transformer was set up — either because the CRS isn't
     // one proj4js handles natively and no `proj4` prop was supplied
@@ -92,7 +137,7 @@ export function getVisibleRegions({
     return []
   }
   const { width, height, regionSize } = levelMeta
-  const [[west, south], [east, north]] = bounds
+  const { west, south, east, north } = bounds
   const [regionH, regionW] = regionSize
   // Candidate index math and the verification below must agree on the extent,
   // or a level placed against its own bounds can generate no candidates at all.
@@ -125,6 +170,9 @@ export function getVisibleRegions({
   // Verify candidates via inverse transform to WGS84 for precise overlap.
   // This handles non-bijective projections where forward transforms can
   // produce false positives.
+  const inset = strict ? STRICT_OVERLAP_DEGREES : 0
+  const lonSpan = east >= west ? east - west : east + 360 - west
+  if (strict && (lonSpan <= 2 * inset || north - south <= 2 * inset)) return []
   const regions: RegionCoordinate[] = []
   for (const { regionX, regionY } of candidates) {
     const regBounds = getRegionBounds({
@@ -159,11 +207,13 @@ export function getVisibleRegions({
       regSouth = Math.min(regSouth, lat)
       regNorth = Math.max(regNorth, lat)
     }
+    const latOverlaps = strict
+      ? regNorth > south + inset && regSouth < north - inset
+      : regNorth >= south && regSouth <= north
     if (
       hasValid &&
-      lonRangeOverlaps(west, east, regWest, regEast) &&
-      regNorth >= south &&
-      regSouth <= north
+      lonRangeOverlaps(west + inset, east - inset, regWest, regEast, strict) &&
+      latOverlaps
     ) {
       regions.push({ regionX, regionY })
     }

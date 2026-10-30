@@ -60,12 +60,19 @@ export function lonRangeOverlaps(
   viewWest: number,
   viewEast: number,
   regWest: number,
-  regEast: number
+  regEast: number,
+  strict = false
 ): boolean {
   let east = viewEast
   if (east < viewWest) east += 360
-  const kMin = Math.ceil((viewWest - regEast) / 360)
-  const kMax = Math.floor((east - regWest) / 360)
+  // Some whole-turn shift k of the region lands it inside the view. Strict
+  // overlap needs a positive-width intersection, so touching edges fail.
+  const kMin = strict
+    ? Math.floor((viewWest - regEast) / 360) + 1
+    : Math.ceil((viewWest - regEast) / 360)
+  const kMax = strict
+    ? Math.ceil((east - regWest) / 360) - 1
+    : Math.floor((east - regWest) / 360)
   return kMax >= kMin
 }
 

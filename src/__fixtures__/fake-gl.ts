@@ -215,6 +215,9 @@ export function createRecordingGl({
     uniform4f: vi.fn((loc: UniformLocationStub, ...v: number[]) =>
       record('uniform4f', loc?.name, ...v)
     ),
+    uniform4fv: vi.fn((loc: UniformLocationStub, v: ArrayLike<number>) =>
+      record('uniform4fv', loc?.name, Array.from(v))
+    ),
     uniformMatrix4fv: vi.fn(
       (loc: UniformLocationStub, _transpose: boolean, value: Float32Array) =>
         record('uniformMatrix4fv', loc?.name, value)

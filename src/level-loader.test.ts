@@ -452,3 +452,43 @@ describe('LevelLoader.loadLevel', () => {
     }
   })
 })
+
+describe('LevelLoader.ensureRuntime', () => {
+  it('discards a selector failure from before the selector changed', async () => {
+    // A secondary open still resolving the old selector must not latch its
+    // failure against the new one, which would make every later open of
+    // that level return null without retrying.
+    const buildGates: Array<ReturnType<typeof deferred<void>>> = []
+    const { loader, gates, setSelector, calls } = makeHarness({
+      buildSliceArgs: async () => {
+        const gate = deferred<void>()
+        buildGates.push(gate)
+        await gate.promise
+        return { baseSliceArgs: [0, 0], baseMultiValueDims: [] }
+      },
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const stale = loader.ensureRuntime(1)
+      gates[0].resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      setSelector({ time: { selected: 1 } })
+      buildGates[0].reject(new SelectorResolutionError('obsolete'))
+      expect(await stale).toBeNull()
+
+      // The new selector's open is a fresh load, not the stale promise.
+      const fresh = loader.ensureRuntime(1)
+      expect(calls.resolveArray).toHaveLength(2)
+      gates[1].resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      buildGates[1].resolve()
+      expect((await fresh)?.index).toBe(1)
+      expect(loader.runtime(1)?.index).toBe(1)
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})

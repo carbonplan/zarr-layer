@@ -47,6 +47,15 @@ export class LevelLoader {
   private loadingLevelIndex: number | null = null
   private activeLevel: LevelRuntime | null = null
   private inflight: Promise<LevelLoadOutcome> | null = null
+  // Every committed runtime by level, the active one included. Tiles far
+  // from the camera read coarser levels than the center's, so several
+  // levels are open at once; all are built against the current selector.
+  private runtimes = new Map<number, LevelRuntime>()
+  // In-flight secondary loads, each tied to the selector it was built for.
+  private secondaryLoads = new Map<
+    number,
+    { selector: NormalizedSelector; load: Promise<LevelRuntime | null> }
+  >()
   private loadError: Error | null = null
   private loadErrorLevel: number | null = null
   // Coordinate arrays may differ by level, so latch deterministic failures per level.
@@ -68,6 +77,105 @@ export class LevelLoader {
   }
   get lastError(): Error | null {
     return this.loadError
+  }
+  /** A committed runtime for any level, or null until it is loaded. */
+  runtime(levelIndex: number): LevelRuntime | null {
+    return this.runtimes.get(levelIndex) ?? null
+  }
+
+  /**
+   * Open a level for drawing alongside the active one without making it
+   * the active level or disturbing its load. Deduped per level. Resolves
+   * null when the level cannot be had; a load that a selector change
+   * overtakes resolves null too, and its result is dropped.
+   */
+  /**
+   * Whether the level's selector failed to resolve: it cannot open until
+   * the selector changes, so nothing should wait on it.
+   */
+  levelFailed(levelIndex: number): boolean {
+    return this.selectorFailedLevels.has(levelIndex)
+  }
+
+  ensureRuntime(levelIndex: number): Promise<LevelRuntime | null> {
+    const existing = this.runtimes.get(levelIndex)
+    if (existing) return Promise.resolve(existing)
+    const count = this.context.isMultiscale() ? this.context.getLevelCount() : 1
+    if (levelIndex < 0 || levelIndex >= count) return Promise.resolve(null)
+    if (this.selectorFailedLevels.has(levelIndex)) return Promise.resolve(null)
+    const selector = this.context.getSelector()
+    // A load still running for an earlier selector resolves null; it is not
+    // the one to wait on.
+    const pending = this.secondaryLoads.get(levelIndex)
+    if (pending && pending.selector === selector) return pending.load
+    const load = this.runSecondaryLoad(levelIndex, selector)
+    this.secondaryLoads.set(levelIndex, { selector, load })
+    const clear = () => {
+      if (this.secondaryLoads.get(levelIndex)?.load === load) {
+        this.secondaryLoads.delete(levelIndex)
+      }
+    }
+    load.then(clear, clear)
+    return load
+  }
+
+  private async runSecondaryLoad(
+    levelIndex: number,
+    selectorSnapshot: NormalizedSelector
+  ): Promise<LevelRuntime | null> {
+    try {
+      const resolved = await this.context.resolveArray(levelIndex, false)
+      const coordLevelIndex = this.activeLevel?.index ?? levelIndex
+      const { baseSliceArgs, baseMultiValueDims } =
+        await this.context.buildSliceArgs(
+          selectorSnapshot,
+          resolved.zarrArray,
+          coordLevelIndex
+        )
+      if (
+        this.context.isRemoved() ||
+        this.context.getSelector() !== selectorSnapshot
+      ) {
+        return null
+      }
+      // The active load may have committed this level meanwhile; its
+      // runtime is the one fetches already hold.
+      const runtime: LevelRuntime = this.runtimes.get(levelIndex) ?? {
+        index: levelIndex,
+        zarrArray: resolved.zarrArray,
+        width: resolved.width,
+        height: resolved.height,
+        regionSize: resolved.regionSize,
+        xyLimits: resolved.xyLimits,
+        baseSliceArgs,
+        baseMultiValueDims,
+      }
+      this.runtimes.set(levelIndex, runtime)
+      this.context.invalidate()
+      return runtime
+    } catch (err) {
+      // A failure against a selector that has since been replaced says
+      // nothing about the current one, and must not latch against it.
+      if (this.context.getSelector() !== selectorSnapshot) return null
+      const error = err instanceof Error ? err : new Error(String(err))
+      if (error instanceof SelectorResolutionError) {
+        this.selectorFailedLevels.add(levelIndex)
+      }
+      console.warn(
+        `Failed to open level ${this.context.getAssetLabel(levelIndex)}:`,
+        error
+      )
+      return null
+    }
+  }
+
+  /** Drop every runtime but the active one, e.g. when the selector changes. */
+  clearSecondaryRuntimes(): void {
+    this.runtimes.clear()
+    this.secondaryLoads.clear()
+    if (this.activeLevel) {
+      this.runtimes.set(this.activeLevel.index, this.activeLevel)
+    }
   }
 
   /**
@@ -207,6 +315,10 @@ export class LevelLoader {
         baseSliceArgs,
         baseMultiValueDims,
       }
+      // A selector rebuild replaces the slice args every runtime was built
+      // against, so the others are dropped and reopened on demand.
+      if (reuseArray) this.runtimes.clear()
+      this.runtimes.set(levelIndex, this.activeLevel)
 
       // Don't clear the region cache on level changes — older-level
       // regions serve as fallback rendering while the new level's
@@ -232,7 +344,10 @@ export class LevelLoader {
         this.selectorFailedLevels.add(levelIndex)
       }
       // Do not retain slice args built for the previous selector.
-      if (reuseArray) this.activeLevel = null
+      if (reuseArray) {
+        this.activeLevel = null
+        this.runtimes.clear()
+      }
       // Retryable failures repeat every frame until they recover, so log
       // only when the error is new for this level.
       if (this.setLoadError(error, levelIndex)) {
@@ -275,6 +390,8 @@ export class LevelLoader {
     this.loadToken++
     this.loadingLevelIndex = null
     this.activeLevel = null
+    this.runtimes.clear()
+    this.secondaryLoads.clear()
     this.inflight = null
     this.loadError = null
     this.loadErrorLevel = null

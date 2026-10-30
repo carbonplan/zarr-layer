@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   MAX_CACHED_REGIONS,
+  MIN_CACHED_REGIONS,
   RegionCache,
+  estimateRegionBytes,
+  regionByteLength,
   createRegionState,
   disposeRegion,
   hasRegionData,
@@ -188,10 +191,10 @@ describe('disposeRegion', () => {
 describe('RegionCache.evict', () => {
   it('prunes oldest-first down to the cap', () => {
     const cache = new RegionCache()
-    const keys = fill(cache, MAX_CACHED_REGIONS + 10)
+    const keys = fill(cache, MIN_CACHED_REGIONS + 10)
     cache.evict(fakeGl())
 
-    expect(cache.size).toBe(MAX_CACHED_REGIONS)
+    expect(cache.size).toBe(MIN_CACHED_REGIONS)
     // The 10 oldest (insertion order) are gone; the newest all survive.
     for (const key of keys.slice(0, 10)) expect(cache.get(key)).toBeUndefined()
     for (const key of keys.slice(10)) expect(cache.get(key)).toBeDefined()
@@ -199,21 +202,21 @@ describe('RegionCache.evict', () => {
 
   it('skips protected regions and evicts the oldest unprotected instead', () => {
     const cache = new RegionCache()
-    const keys = fill(cache, MAX_CACHED_REGIONS + 5)
+    const keys = fill(cache, MIN_CACHED_REGIONS + 5)
     cache.rebuildProtection(keys.slice(0, 5), { retainKeysNotMatching: '' })
     cache.evict(fakeGl())
 
-    expect(cache.size).toBe(MAX_CACHED_REGIONS)
+    expect(cache.size).toBe(MIN_CACHED_REGIONS)
     for (const key of keys.slice(0, 5)) expect(cache.get(key)).toBeDefined()
     for (const key of keys.slice(5, 10)) expect(cache.get(key)).toBeUndefined()
   })
 
   it('stops when every region is protected (low-zoom safety valve)', () => {
     const cache = new RegionCache()
-    const keys = fill(cache, MAX_CACHED_REGIONS + 20)
+    const keys = fill(cache, MIN_CACHED_REGIONS + 20)
     cache.rebuildProtection(keys, { retainKeysNotMatching: '' })
     cache.evict(fakeGl())
-    expect(cache.size).toBe(MAX_CACHED_REGIONS + 20)
+    expect(cache.size).toBe(MIN_CACHED_REGIONS + 20)
   })
 
   it('prunes oldest-first down to the byte budget', () => {
@@ -223,7 +226,7 @@ describe('RegionCache.evict', () => {
       cache.get(key)!.bandData.set('a', new Float32Array(256))
     }
     // 10 regions of 1 KB each against a 4 KB budget.
-    cache.evict(fakeGl(), 4 * 1024)
+    cache.evict(fakeGl(), { maxBytes: 4 * 1024 })
 
     expect(cache.size).toBe(4)
     for (const key of keys.slice(0, 6)) expect(cache.get(key)).toBeUndefined()
@@ -234,7 +237,7 @@ describe('RegionCache.evict', () => {
     const cache = new RegionCache()
     const keys = fill(cache, 10)
     for (const key of keys) cache.get(key)!.bandTextureBytes = 1024
-    cache.evict(fakeGl(), 4 * 1024)
+    cache.evict(fakeGl(), { maxBytes: 4 * 1024 })
     expect(cache.size).toBe(4)
   })
 
@@ -245,18 +248,94 @@ describe('RegionCache.evict', () => {
       cache.get(key)!.bandData.set('a', new Float32Array(256))
     }
     cache.rebuildProtection(keys, { retainKeysNotMatching: '' })
-    cache.evict(fakeGl(), 1024)
+    cache.evict(fakeGl(), { maxBytes: 1024 })
     expect(cache.size).toBe(4)
+  })
+
+  it('keeps twice the wanted regions beyond the floor, up to the hard bound', () => {
+    const cache = new RegionCache()
+    const keys = fill(cache, 700)
+    cache.evict(fakeGl(), { wantedCount: 300 })
+    expect(cache.size).toBe(600)
+    for (const key of keys.slice(100)) expect(cache.get(key)).toBeDefined()
+
+    fill(cache, MAX_CACHED_REGIONS, 1)
+    cache.evict(fakeGl(), { wantedCount: MAX_CACHED_REGIONS })
+    expect(cache.size).toBe(MAX_CACHED_REGIONS)
+  })
+
+  it('keeps protected regions past the region bound and the byte limit', () => {
+    const cache = new RegionCache({ maxBytes: 4 * 1024, maxRegions: 200 })
+    const keys = fill(cache, 300)
+    for (const key of keys) {
+      cache.get(key)!.bandData.set('a', new Float32Array(256))
+    }
+    // Wanted and retained fallbacks, oldest first, well past both limits.
+    const kept = keys.slice(0, 250)
+    cache.rebuildProtection(kept, { retainKeysNotMatching: '' })
+    cache.evict(fakeGl(), { wantedCount: 200 })
+
+    expect(cache.size).toBe(250)
+    for (const key of kept) expect(cache.get(key)).toBeDefined()
   })
 
   it('disposes GL resources on eviction', () => {
     const gl = fakeGl()
     const cache = new RegionCache()
-    const keys = fill(cache, MAX_CACHED_REGIONS + 1)
+    const keys = fill(cache, MIN_CACHED_REGIONS + 1)
     const oldest = cache.get(keys[0])!
     oldest.texture = {} as WebGLTexture
     cache.evict(gl)
     expect(gl.deleteTexture).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('region bytes', () => {
+  it('counts a single band doubling as the interleaved data once, and its texture', () => {
+    const r = region(0, 0, 0)
+    const band = new Float32Array(256)
+    r.bandData.set('a', band)
+    r.data = band
+    expect(regionByteLength(r)).toBe(1024)
+    r.textureBytes = 1024
+    expect(regionByteLength(r)).toBe(2048)
+    expect(
+      estimateRegionBytes({
+        pixels: 256,
+        bands: 1,
+        bytesPerValue: 4,
+        interleaved: true,
+      })
+    ).toBe(2048)
+  })
+
+  it('estimates the bands, their interleaved copy and its texture', () => {
+    const r = region(0, 0, 0)
+    r.bandData.set('a', new Float32Array(256))
+    r.bandData.set('b', new Float32Array(256))
+    r.data = new Float32Array(512)
+    r.textureBytes = 2048
+    expect(
+      estimateRegionBytes({
+        pixels: 256,
+        bands: 2,
+        bytesPerValue: 4,
+        interleaved: true,
+      })
+    ).toBe(regionByteLength(r))
+  })
+
+  it('estimates a band texture at its stored size alone', () => {
+    const r = region(0, 0, 0)
+    r.bandTextureBytes = 2 * 256 * 2
+    expect(
+      estimateRegionBytes({
+        pixels: 256,
+        bands: 2,
+        bytesPerValue: 2,
+        interleaved: false,
+      })
+    ).toBe(regionByteLength(r))
   })
 })
 

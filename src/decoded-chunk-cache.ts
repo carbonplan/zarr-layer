@@ -1,5 +1,5 @@
 import * as zarr from 'zarrita'
-import { MAX_CACHED_REGIONS } from './region-cache'
+import { MAX_WANTED_REGION_BYTES, MAX_WANTED_REGIONS } from './region-cache'
 
 /**
  * Insertion-order LRU bounded by entry count and by total bytes, whichever
@@ -67,16 +67,20 @@ const createLRU = <V>(
 type AnyChunk = zarr.Chunk<zarr.DataType>
 
 /**
- * Hard cap on decoded bytes held per store.
+ * Caps on decoded chunks held per store; bytes govern.
  *
- * Sized so a full viewport still fits for ordinary chunk sizes: one rendered
- * region reads one chunk, so the working set is up to `MAX_CACHED_REGIONS`
- * chunks, and a cache below that turns every selector change back into
- * network reads. Above ~2 MB per chunk the byte cap wins and re-reads start
- * missing, which is the right trade: the alternative is an entry floor that
- * would let a 50 MB chunk size retain gigabytes.
+ * Sized to the regions one update may want, which is the working set: a
+ * cache below that turns every selector change back into network reads.
+ * Decoded chunks run about the size of the regions built from them, so the
+ * wanted byte budget holds the chunks of the wanted regions; past it
+ * re-reads start missing rather than letting a large chunk size retain
+ * gigabytes. A region can read many chunks (bands chunked apart, regions
+ * grown past one chunk), so the entry count is only a safety bound against
+ * vast numbers of tiny chunks.
  */
-const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * MAX_CACHED_REGIONS
+const CHUNKS_PER_WANTED_REGION = 16
+const DEFAULT_MAX_ENTRIES = MAX_WANTED_REGIONS * CHUNKS_PER_WANTED_REGION
+const DEFAULT_MAX_BYTES = MAX_WANTED_REGION_BYTES
 
 const chunkBytes = (chunk: AnyChunk): number => {
   const data = chunk.data as { byteLength?: number; length?: number }
@@ -256,7 +260,7 @@ export const withDecodedChunkCaching = zarr.defineStoreExtension(
     } = {}
   ) => {
     const cache = createLRU<AnyChunk>(
-      opts.maxEntries ?? 512,
+      opts.maxEntries ?? DEFAULT_MAX_ENTRIES,
       opts.maxBytes ?? DEFAULT_MAX_BYTES,
       chunkBytes
     )
