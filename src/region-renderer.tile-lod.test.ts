@@ -124,9 +124,22 @@ const failLevel = (renderer: RegionRenderer, levelIndex: number) =>
 
 type Box = { x0: number; y0: number; x1: number; y1: number }
 
+/** A box cut to a region's mesh: what of it the region can draw. */
+const withinMesh = (draw: Draw, box: Box): Box => {
+  const mesh = draw.region.meshBounds!
+  return {
+    x0: Math.max(box.x0, mesh.x0),
+    y0: Math.max(box.y0, mesh.y0),
+    x1: Math.min(box.x1, mesh.x1),
+    y1: Math.min(box.y1, mesh.y1),
+  }
+}
+
 /**
  * A draw's clip boxes back in absolute Mercator of the base world, for the
- * passes drawn at one world offset.
+ * passes drawn at one world offset, each cut to the region's mesh: a box
+ * edge on the mesh edge is moved out, and only what lies inside the mesh
+ * is drawn.
  */
 const absoluteBoxes = (draw: Draw, worldOffset = 0): Box[] => {
   const mesh = draw.region.meshBounds!
@@ -137,12 +150,14 @@ const absoluteBoxes = (draw: Draw, worldOffset = 0): Box[] => {
     if (pass.worldOffset !== worldOffset) continue
     const p = pass.boxes
     for (let i = 0; i < p.length; i += 4) {
-      boxes.push({
-        x0: p[i] + ax,
-        y0: p[i + 1] + ay,
-        x1: p[i + 2] + ax,
-        y1: p[i + 3] + ay,
-      })
+      boxes.push(
+        withinMesh(draw, {
+          x0: p[i] + ax,
+          y0: p[i + 1] + ay,
+          x1: p[i + 2] + ax,
+          y1: p[i + 3] + ay,
+        })
+      )
     }
   }
   return boxes
@@ -543,7 +558,9 @@ describe('per-tile level selection', () => {
       const tile = draw.region.levelIndex === 1 ? NEAR : FAR_EAST
       const boxes = absoluteBoxes(draw)
       expect(boxes).toHaveLength(1)
-      expect(sameBox(boxes[0], getTileBounds(tile.tileId))).toBe(true)
+      expect(
+        sameBox(boxes[0], withinMesh(draw, getTileBounds(tile.tileId)))
+      ).toBe(true)
     }
   })
 
@@ -567,12 +584,18 @@ describe('per-tile level selection', () => {
       if (draw.region.levelIndex === 0) {
         expect(offsets).toEqual([0])
         expect(
-          sameBox(absoluteBoxes(draw, 0)[0], getTileBounds(FAR.tileId))
+          sameBox(
+            absoluteBoxes(draw, 0)[0],
+            withinMesh(draw, getTileBounds(FAR.tileId))
+          )
         ).toBe(true)
       } else {
         expect(offsets).toEqual([-1])
         expect(
-          sameBox(absoluteBoxes(draw, -1)[0], getTileBounds(NEAR.tileId))
+          sameBox(
+            absoluteBoxes(draw, -1)[0],
+            withinMesh(draw, getTileBounds(NEAR.tileId))
+          )
         ).toBe(true)
       }
     }
@@ -606,7 +629,9 @@ describe('per-tile level selection', () => {
     const tileBounds = getTileBounds(NEAR_IN_FAR_EAST.tileId)
     for (const draw of draws) {
       expect(cache.isProtected(draw.region.key)).toBe(true)
-      expect(sameBox(absoluteBoxes(draw)[0], tileBounds)).toBe(true)
+      expect(
+        sameBox(absoluteBoxes(draw)[0], withinMesh(draw, tileBounds))
+      ).toBe(true)
     }
     await settle(renderer)
   })

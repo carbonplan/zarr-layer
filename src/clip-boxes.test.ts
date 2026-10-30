@@ -58,7 +58,8 @@ describe('tileClipPasses', () => {
     const rows = absolute(pass, mesh)
     expect(rows).toHaveLength(3)
     for (const row of rows) {
-      expect(row.x0).toBeCloseTo(0, 6)
+      // The rows start on the mesh's west edge, which opens.
+      expect(row.x0).toBeLessThan(0)
       expect(row.x1).toBeCloseTo(0.5, 6)
     }
 
@@ -66,6 +67,24 @@ describe('tileClipPasses', () => {
     for (let y = 0; y < MAX_CLIP_BOXES + 8; y++) column.push(tile(6, 0, y))
     const passes = tileClipPasses(mesh, column)
     expect(passes.map((p) => p.length / 4)).toEqual([MAX_CLIP_BOXES, 8])
+  })
+
+  it('opens box edges that lie on the mesh edge, so neighbours leave no gap', () => {
+    // A region whose east edge is a tile edge: the box there would decide
+    // the region's edge pixels by a rounding error against the delta the
+    // shader interpolates, so it moves out a mesh width. Its west edge,
+    // inside the mesh, still clips.
+    const owner = tile(2, 1, 1)
+    const bounds = getTileBounds(owner.tileId)
+    const mesh = { x0: 0.2, y0: 0.2, x1: bounds.x1, y1: 0.6 }
+
+    const [pass] = tileClipPasses(mesh, [owner])
+
+    const [box] = absolute(pass, mesh)
+    expect(box.x0).toBeCloseTo(bounds.x0, 6)
+    expect(box.y0).toBeCloseTo(bounds.y0, 6)
+    expect(box.y1).toBeCloseTo(bounds.y1, 6)
+    expect(box.x1).toBeCloseTo(mesh.x1 + (mesh.x1 - mesh.x0), 6)
   })
 
   it('meets tiles across the antimeridian through the next world copy', () => {
