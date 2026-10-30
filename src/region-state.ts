@@ -14,6 +14,9 @@ export interface RegionState {
   height: number
   loading: boolean
   requestId: number | null
+  // Selector version whose fetch failed. The region is not requested again
+  // under that selector; it draws nothing and counts as settled.
+  failedSelectorVersion: number | null
   channels: number
   // WebGL resources
   texture: WebGLTexture | null

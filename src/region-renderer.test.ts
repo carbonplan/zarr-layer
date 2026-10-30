@@ -1,12 +1,18 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { RegionRenderer } from './region-renderer'
-import { createRegionState, type RegionCache } from './region-cache'
+import {
+  createRegionState,
+  makeRegionKey,
+  regionByteLength,
+  type RegionCache,
+} from './region-cache'
 import { ZarrStore } from './zarr-store'
 import {
   buildMemoryZarrStore,
   type ArraySpec,
 } from './__fixtures__/memory-zarr'
 import type { MapLike, NormalizedSelector } from './types'
+import type { ChunkLoadingDebouncer } from './region-utils'
 import type { RegionRenderState } from './renderer-types'
 import { bandTextureKey } from './render-helpers'
 import type { RegionState } from './region-state'
@@ -101,6 +107,11 @@ type RenderSeam = {
     region: RegionState
   ): void
   regionCache: RegionCache
+  loadingDebouncer: ChunkLoadingDebouncer
+  loadLevel(
+    levelIndex: number,
+    options?: { reuseArray?: boolean }
+  ): Promise<unknown>
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as RenderSeam
 
@@ -178,7 +189,12 @@ async function settle(renderer: RegionRenderer): Promise<void> {
 
 async function makeRenderer(
   selector: NormalizedSelector = {},
-  dtype?: ArraySpec['dtype']
+  dtype?: ArraySpec['dtype'],
+  opts: {
+    /** Chunk reads whose key passes this throw, as a failing server would. */
+    failReads?: (key: string) => boolean
+    maxRegionFetches?: number
+  } = {}
 ) {
   const memory = buildMemoryZarrStore({
     arrays: [
@@ -207,7 +223,12 @@ async function makeRenderer(
   const chunkReads: string[] = []
   const counting = {
     get: async (key: string) => {
-      if (key.includes('/temperature/c/')) chunkReads.push(key)
+      if (key.includes('/temperature/c/')) {
+        chunkReads.push(key)
+        if (opts.failReads?.(key)) {
+          throw new Error('Unexpected response status 500')
+        }
+      }
       return memory.get(key)
     },
   }
@@ -225,7 +246,10 @@ async function makeRenderer(
     store,
     'temperature',
     selector,
-    invalidate
+    invalidate,
+    1,
+    0,
+    opts.maxRegionFetches
   )
   await renderer.initialize()
   return {
@@ -654,6 +678,193 @@ describe('RegionRenderer', () => {
  * to commit one itself, or a query on a map that never painted indexes into
  * nothing and comes back empty.
  */
+describe('RegionRenderer with a region whose fetch fails', () => {
+  // Region (1, 0) of the 2x2 grid.
+  const topRight = (key: string) => key.endsWith('/c/0/0/1')
+  const readsOf = (chunkReads: string[]) => chunkReads.filter(topRight).length
+
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    errorSpy.mockRestore()
+  })
+
+  it('requests it once however many frames repaint', async () => {
+    const { renderer, gl, map, chunkReads, invalidate } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: topRight }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(readsOf(chunkReads)).toBe(1)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+
+    // Every invalidate() repaints, and every frame runs update() again.
+    const repaints = invalidate.mock.calls.length
+    for (let i = 0; i < 5; i++) {
+      renderer.update(map, gl)
+      await settle(renderer)
+    }
+    expect(readsOf(chunkReads)).toBe(1)
+    expect(invalidate).toHaveBeenCalledTimes(repaints)
+
+    // The rest of the viewport is drawn; the failed region draws nothing.
+    expect(chunkReads).toHaveLength(4)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+  })
+
+  it('does not hold a fetch slot the other regions need', async () => {
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: topRight, maxRegionFetches: 1 }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    expect(chunkReads).toHaveLength(4)
+    expect(readsOf(chunkReads)).toBe(1)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+  })
+
+  it('settles the loading indicator', async () => {
+    const { renderer, gl, map } = await makeRenderer({}, undefined, {
+      failReads: () => true,
+    })
+    const show = vi.fn()
+    const hide = vi.fn()
+    seam(renderer).loadingDebouncer = { show, hide }
+
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    const last = (calls: number[]) => calls[calls.length - 1]
+    expect(show).toHaveBeenCalled()
+    expect(hide).toHaveBeenCalled()
+    expect(last(hide.mock.invocationCallOrder)).toBeGreaterThan(
+      last(show.mock.invocationCallOrder)
+    )
+  })
+
+  it('retries it after a selector change', async () => {
+    let failing = true
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: (key) => failing && topRight(key) }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+
+    failing = false
+    await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    expect(readsOf(chunkReads)).toBe(2)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+  })
+
+  it('retries it when the level is reloaded', async () => {
+    let failing = true
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: (key) => failing && topRight(key) }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    failing = false
+    // A zoom change reopens the level's array before fetching from it.
+    await seam(renderer).loadLevel(0, { reuseArray: false })
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    expect(readsOf(chunkReads)).toBe(2)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(4)
+  })
+
+  it('forgets it with the entry when the region is evicted', async () => {
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: topRight }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    const key = makeRegionKey(0, 1, 0)
+    expect(cache.get(key)?.failedSelectorVersion).toBe(0)
+
+    // The fixture's grid never leaves the viewport's margin, so the region
+    // is unprotected by hand, as leaving the viewport would.
+    cache.rebuildProtection(
+      [...cache.entries()].map(([k]) => k).filter((k) => k !== key),
+      { retainKeysNotMatching: '' }
+    )
+    cache.evict(gl, 0)
+    expect(cache.get(key)).toBeUndefined()
+
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(readsOf(chunkReads)).toBe(2)
+  })
+
+  it('frees the textures of an uploaded region whose refetch fails', async () => {
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: (key) => key.endsWith('/c/0/0/0') }
+    )
+    // Region (0, 0) was fetched and drawn under the first selector.
+    const region = seedFallbackRegion(renderer, { levelIndex: 0 })
+    const texture = region.texture!
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(chunkReads.filter((k) => k.endsWith('/c/0/0/0'))).toHaveLength(0)
+
+    await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    expect(region.failedSelectorVersion).toBe(1)
+    expect(gl.deleteTexture).toHaveBeenCalledWith(texture)
+    expect(region.texture).toBeNull()
+    expect(regionByteLength(region)).toBe(0)
+    expect(seam(renderer).getRegionStates(gl)).toHaveLength(3)
+  })
+
+  it('does not hold fallback coverage on screen forever', async () => {
+    const { renderer, gl, map } = await makeRenderer({}, undefined, {
+      failReads: topRight,
+    })
+    const fallback = seedFallbackRegion(renderer)
+    const cache = seam(renderer).regionCache
+
+    renderer.update(map, gl)
+    await settle(renderer)
+    // Until a frame uploads what arrived, the fallback still carries the view.
+    renderer.update(map, gl)
+    expect(cache.isProtected(fallback.key)).toBe(true)
+
+    seam(renderer).getRegionStates(gl)
+    renderer.update(map, gl)
+    expect(cache.isProtected(fallback.key)).toBe(false)
+    const states = seam(renderer).getRegionStates(gl)
+    expect(states).toHaveLength(3)
+    expect(states.map((s) => s.texture)).not.toContain(fallback.texture)
+  })
+})
+
 describe('RegionRenderer queries before the render loop runs', () => {
   async function makeMultiscaleRenderer() {
     const store = new ZarrStore({

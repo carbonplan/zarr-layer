@@ -64,8 +64,10 @@ import {
   RegionCache,
   hasRegionData,
   isRegionCpuReady,
+  isRegionFailed,
   isRegionGpuReady,
   makeRegionKey,
+  releaseRegionTextures,
 } from './region-cache'
 import { bandFormatForDtype, type BandFormat } from './band-format'
 import { RegionFetcher } from './region-fetcher'
@@ -230,7 +232,11 @@ export class RegionRenderer {
           this.loadingDebouncer.hide()
         }
       },
-      onNewArrayCommitted: () => this.resetVisibleRegions(),
+      onNewArrayCommitted: () => {
+        this.resetVisibleRegions()
+        // A freshly opened level is a new attempt at its regions.
+        this.regionCache.clearFailures()
+      },
       onLoadErrorChange: (error) => {
         this.loadingManager.error = error
         this.emitLoadingState()
@@ -483,6 +489,9 @@ export class RegionRenderer {
     for (const { regionX, regionY } of this.lastVisibleRegions) {
       const key = this.makeRegionKey(levelIndex, regionX, regionY)
       const region = this.regionCache.get(key)
+      // A failed region is settled: nothing more will arrive for it, so it
+      // must not hold the previous level's fallbacks on screen forever.
+      if (region && isRegionFailed(region, this.selectorVersion)) continue
       if (
         !region ||
         !isRegionGpuReady(region, this.requiredBands(), this.bandFormat())
@@ -811,6 +820,7 @@ export class RegionRenderer {
       }
 
       if (!cached || !hasRegionData(cached)) {
+        if (cached && isRegionFailed(cached, this.selectorVersion)) continue
         // No data yet - this is a new region (viewport change)
         newRegions.push({ regionX, regionY })
       } else if (cached.selectorVersion !== this.selectorVersion) {
@@ -877,6 +887,10 @@ export class RegionRenderer {
         this.computeRegionMercatorBounds(bounds),
       createRegionGeometry: (regionX, regionY, region) =>
         this.createRegionGeometry(regionX, regionY, region),
+      // Textures exist only once a frame has run, and every frame caches gl.
+      releaseRegionTextures: (region) => {
+        if (this.cachedGl) releaseRegionTextures(this.cachedGl, region)
+      },
       invalidate: this.invalidate,
     })
     await fetcher.fetchRegions(regions)
