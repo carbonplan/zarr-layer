@@ -157,6 +157,42 @@ describe('resolveProjectionParams — Mapbox', () => {
         .name
     ).toBe('globe')
   })
+
+  it('carries the public render parameters of mapbox-gl >= 3.32', () => {
+    const renderParameters = {
+      projectionMatrix: new Float64Array(MATRIX),
+      viewMatrix: new Float64Array(MATRIX),
+      globeClippingPlane: null,
+      globeCenterInScreenPixels: null,
+    }
+
+    const resolved = resolveProjectionParams(
+      MATRIX,
+      { name: 'globe' },
+      MATRIX,
+      0,
+      renderParameters
+    )
+
+    expect(resolved.mapbox?.renderParameters?.projectionMatrix).toBe(
+      renderParameters.projectionMatrix
+    )
+    expect(resolved.mapbox?.renderParameters?.viewMatrix).toBe(
+      renderParameters.viewMatrix
+    )
+  })
+
+  it('reports no render parameters on an older mapbox', () => {
+    // Pre-3.32 Mapbox stops at the seventh argument; the direct globe path
+    // stays off and the layer keeps its draped tiles.
+    const resolved = resolveProjectionParams(
+      MATRIX,
+      { name: 'globe' },
+      MATRIX,
+      0
+    )
+    expect(resolved.mapbox?.renderParameters).toBeUndefined()
+  })
 })
 
 describe('computeWorldOffsets', () => {

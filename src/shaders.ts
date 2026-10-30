@@ -54,6 +54,10 @@ uniform mat4 u_globe_to_merc;
 uniform float u_globe_transition;
 uniform int u_tile_render;`
 
+/** The direct Mapbox globe path only needs the world-to-clip matrix. */
+const UNIFORMS_MAPBOX_ECEF = `
+uniform mat4 matrix;`
+
 /** Common vertex inputs and outputs */
 const INPUTS_OUTPUTS = `
 in vec2 pix_coord_in;
@@ -207,12 +211,14 @@ const VERTEX_WGS84_TO_ECEF_MAPBOX = `
   float normLon = mercX;
   float normLat = latRad / PI + 0.5;`
 
-/** Mapbox ECEF projection output for the direct globe path. */
+/** Mapbox ECEF projection output for the direct globe path. `matrix` is the
+ *  globe-world to clip product of Mapbox's public render parameters, so the
+ *  Y-down ECEF vertex projects without passing through mercator. */
 const PROJECT_MAPBOX_ECEF = `
   // This path is only used at the fully-globe endpoint. During Mapbox's
   // globe->mercator zoom morph, the layer switches back to the draped path so
   // Mapbox can handle the transition with its internal globe/mercator matrices.
-  gl_Position = matrix * (u_globe_to_merc * vec4(ecef, 1.0));
+  gl_Position = matrix * vec4(ecef, 1.0);
   gl_Position.z -= ${MAPBOX_ECEF_DEPTH_BIAS.toExponential(6)} * gl_Position.w;`
 
 /** MapLibre ECEF projection output with globe/flat transition blend.
@@ -270,9 +276,8 @@ export function createVertexShader(options: VertexShaderOptions): string {
   let prelude = ''
   let define = ''
 
-  if (isDirectEcef && projection === 'mapbox') {
-    // Mapbox ECEF: no prelude, use Mapbox uniforms
-    uniforms = UNIFORMS_COMMON + UNIFORMS_MAPBOX_GLOBE
+  if (isMapboxDirectEcef) {
+    uniforms = UNIFORMS_COMMON + UNIFORMS_MAPBOX_ECEF
   } else if (isDirectEcef || projection === 'maplibre') {
     // MapLibre paths (both projectTile and direct ECEF) use the prelude which
     // declares PI, projection uniforms, and projectTile(). The ECEF path

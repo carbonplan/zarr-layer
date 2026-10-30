@@ -41,22 +41,13 @@ import {
   isGlobeProjection as checkGlobeProjection,
 } from './map-utils'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
+import {
+  mapboxEcefClipMatrix,
+  parseMapboxRenderParameters,
+} from './mapbox-globe-matrix'
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
 import { ZarrLayerNotReadyError } from './errors'
-
-type MapboxInternals = {
-  transform?: {
-    expandedFarZProjMatrix?: Float32Array | Float64Array | number[]
-    worldSize?: number
-  }
-  painter?: {
-    transform?: {
-      expandedFarZProjMatrix?: Float32Array | Float64Array | number[]
-      worldSize?: number
-    }
-  }
-}
 
 /** Scale-mismatch ratio beyond which a locked fixedDataScale is re-derived
  *  from the clim and cached tiles are re-normalized. Conservative: float32
@@ -64,33 +55,6 @@ type MapboxInternals = {
  *  but refetches go through the decoded-chunk cache so an eager threshold
  *  costs little. */
 const DATA_SCALE_REFRESH_RATIO = 1e6
-
-/** Extract Mapbox's internal expandedFarZ projection matrix and worldSize.
- *  Falls back per-field: transform may exist without the expanded matrix,
- *  while painter.transform carries it (or vice versa across Mapbox versions). */
-function getMapboxGlobeInternals(map: MapLike) {
-  const m = map as MapLike & MapboxInternals
-  return {
-    expandedFarZProjMatrix:
-      m.transform?.expandedFarZProjMatrix ??
-      m.painter?.transform?.expandedFarZProjMatrix,
-    worldSize: m.transform?.worldSize ?? m.painter?.transform?.worldSize,
-  }
-}
-
-function scaleMercatorMatrix(
-  matrix: number[] | Float32Array | Float64Array,
-  scale: number
-): Float32Array {
-  // Mapbox's customLayerMatrix() is the projection matrix scaled from world
-  // pixels to normalized Mercator units. To mimic its expanded-far variant,
-  // scale the basis columns but leave translation unchanged.
-  const out = new Float32Array(matrix)
-  for (let i = 0; i < 4; i++) out[i] *= scale
-  for (let i = 4; i < 8; i++) out[i] *= scale
-  for (let i = 8; i < 12; i++) out[i] *= scale
-  return out
-}
 
 /** Settle as soon as `signal` aborts, so a caller tearing the layer down isn't
  *  held by a wait it can no longer cancel from the inside. */
@@ -244,30 +208,55 @@ export class ZarrLayer {
   private renderPoles: boolean
   private lastIsGlobe: boolean | null = null
   private usingDirectMapboxGlobePath: boolean = false
-  private mapboxDirectGlobePathAvailable: boolean = false
+  private renderPathSwitchPending: boolean = false
+  private mapboxRenderParametersSeen: boolean = false
 
-  private canUseMapboxDirectGlobePath(): boolean {
-    if (this.mapboxDirectGlobePathAvailable) {
-      return true
+  /** Latch whether this map hands the public render parameters (mapbox-gl >=
+   *  3.32) to render/prerender. The gate below also runs from map events and
+   *  renderToTile, which never see them, so the latest callback decides.
+   *  Until the first callback the layer is draped, which is also the path an
+   *  older Mapbox keeps for good. */
+  private noteMapboxRenderParameters(renderParameters: unknown): void {
+    if (
+      !this.mapboxRenderParametersSeen &&
+      parseMapboxRenderParameters(renderParameters)
+    ) {
+      this.mapboxRenderParametersSeen = true
+      this.configureMapboxRenderPath()
     }
-    if (!this.map || !this.isGlobeProjection()) {
-      return false
-    }
-
-    // Probe for internal matrix — may not be populated yet during early
-    // lifecycle events. Failed probes keep retrying until it appears.
-    const { expandedFarZProjMatrix, worldSize } = getMapboxGlobeInternals(
-      this.map
-    )
-    if (expandedFarZProjMatrix && worldSize) {
-      this.mapboxDirectGlobePathAvailable = true
-      return true
-    }
-    return false
   }
 
+  /** MapLibre calls render with a single params object, so the render
+   *  parameters are only ever seen on Mapbox; this doubles as the Mapbox
+   *  discriminator for the direct globe path. */
+  private canUseMapboxDirectGlobePath(): boolean {
+    return this.mapboxRenderParametersSeen
+  }
+
+  /** Mapbox sorts custom layers into draped batches at the start of every
+   *  frame, before prerender/render/renderToTile run, and only re-reads
+   *  `renderToTile` for the next frame. Flipping it from inside a callback
+   *  would leave this frame with a batch that no longer matches the layer and
+   *  nothing drawn, so the switch is applied on a microtask: Mapbox's frame is
+   *  synchronous, so that lands after the frame is drawn and before the next
+   *  one is batched. The decision is re-evaluated when it runs, so a stale
+   *  verdict is never applied. */
   private configureMapboxRenderPath(): void {
-    if (!this.map || !this.regionRenderer) return
+    if (this.renderPathSwitchPending) return
+    if (
+      this.shouldUseMapboxDirectGlobePath() === this.usingDirectMapboxGlobePath
+    )
+      return
+    this.renderPathSwitchPending = true
+    queueMicrotask(() => {
+      this.renderPathSwitchPending = false
+      if (this.isRemoved) return
+      this.applyMapboxRenderPath(this.shouldUseMapboxDirectGlobePath())
+    })
+  }
+
+  private shouldUseMapboxDirectGlobePath(): boolean {
+    if (!this.map || !this.regionRenderer) return false
 
     const resolvedProj4 = this.zarrStore?.proj4 ?? this.proj4
     const resolvedCrs = this.zarrStore?.crs ?? this.crs
@@ -278,40 +267,48 @@ export class ZarrLayer {
         ? mapboxGlobeToMercatorTransition(this.map.getZoom())
         : 1
     // FRAGILE: Mapbox classifies a custom layer as draped whenever renderToTile
-    // exists. We use the direct globe path only for terrain-off, ECEF-eligible
-    // datasets at the fully-globe endpoint. During the zoom morph,
-    // restore the draped path so Mapbox handles the transition itself with its
-    // internal globe/mercator matrices. This means polar coverage can snap back
-    // to the draped path near the 5-6 zoom morph window; that is intentional,
-    // and is currently more stable than trying to carry the direct ECEF path
-    // through Mapbox's custom-layer transition contract.
-    // canUseMapboxDirectGlobePath() probes for Mapbox-only internals, so it
-    // doubles as the Mapbox discriminator — MapLibre will never pass this gate.
-    const shouldUseDirectGlobePath =
+    // exists (undocumented behaviour with no public alternative). We use the
+    // direct globe path only for terrain-off, ECEF-eligible datasets at the
+    // fully-globe endpoint on a Mapbox that passes the public render
+    // parameters. During the zoom morph, restore the draped path so Mapbox
+    // handles the transition itself with its internal globe/mercator matrices.
+    // This means polar coverage can snap back to the draped path near the 5-6
+    // zoom morph window; that is intentional, and is currently more stable
+    // than trying to carry the direct ECEF path through Mapbox's custom-layer
+    // transition contract.
+    return (
       this.renderPoles &&
       isEcefEligible &&
       !this.map.getTerrain?.() &&
       isGlobe &&
       this.canUseMapboxDirectGlobePath() &&
       transition <= 1e-3
+    )
+  }
 
-    if (shouldUseDirectGlobePath === this.usingDirectMapboxGlobePath) return
-    this.usingDirectMapboxGlobePath = shouldUseDirectGlobePath
+  private applyMapboxRenderPath(useDirectGlobePath: boolean): void {
+    if (useDirectGlobePath === this.usingDirectMapboxGlobePath) return
+    this.usingDirectMapboxGlobePath = useDirectGlobePath
 
-    if (shouldUseDirectGlobePath) {
+    if (useDirectGlobePath) {
       Object.defineProperty(this, 'renderToTile', {
         value: undefined,
         configurable: true,
         writable: true,
       })
-      this.map.triggerRepaint?.()
     } else if (Object.prototype.hasOwnProperty.call(this, 'renderToTile')) {
       delete (this as { renderToTile?: unknown }).renderToTile
-      // Re-entering the draped path requires fresh tile draws; otherwise Mapbox
-      // can show a one-frame gap before renderToTile repopulates tile textures.
-      this.tileNeedsRender = true
-      this.map.triggerRepaint?.()
     }
+    // Mapbox caches each draped batch's texture and reuses it while the
+    // source tiles are unchanged, so after the layer leaves or joins a batch
+    // the cached texture still shows the old membership: stale draped pixels
+    // under the direct draw one way, a one-frame gap the other. Right after
+    // batching, Mapbox asks visible custom layers (draped or not, stopping at
+    // the first yes) whether they need a re-drape via shouldRerenderTiles(),
+    // and a yes drops the whole cache for that frame. A hidden layer keeps
+    // the flag until it is visible again.
+    this.tileNeedsRender = true
+    this.map?.triggerRepaint?.()
   }
 
   get fillValue(): number | null {
@@ -812,9 +809,18 @@ export class ZarrLayer {
 
   prerender(
     _gl: WebGL2RenderingContext | WebGLRenderingContext,
-    _params: unknown
+    _params: unknown,
+    _projection?: { name: string },
+    _projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
+    _projectionToMercatorTransition?: number,
+    _centerInMercator?: number[],
+    _pixelsPerMeterRatio?: number,
+    renderParameters?: unknown
   ) {
     if (this.isRemoved || !this.gl || !this.regionRenderer || !this.map) return
+    // Mapbox runs prerender for draped layers too, so this is where the
+    // render parameters first show up when the layer starts out draped.
+    this.noteMapboxRenderParameters(renderParameters)
     if (!this.isZoomInRange()) return
 
     this.syncProjectionState()
@@ -828,7 +834,8 @@ export class ZarrLayer {
     projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
     projectionToMercatorTransition?: number,
     _centerInMercator?: number[],
-    _pixelsPerMeterRatio?: number
+    _pixelsPerMeterRatio?: number,
+    renderParameters?: unknown
   ) {
     if (
       this.isRemoved ||
@@ -840,6 +847,7 @@ export class ZarrLayer {
       return
     }
 
+    this.noteMapboxRenderParameters(renderParameters)
     if (!this.isZoomInRange()) {
       return
     }
@@ -850,7 +858,8 @@ export class ZarrLayer {
       params,
       projection,
       projectionToMercatorMatrix,
-      projectionToMercatorTransition
+      projectionToMercatorTransition,
+      renderParameters
     )
 
     if (!projectionParams.matrix) {
@@ -871,22 +880,15 @@ export class ZarrLayer {
     const isGlobe = this.isGlobeProjection()
     const worldOffsets = computeWorldOffsets(this.map, isGlobe)
     const colormapTexture = this.colormap.ensureTexture(this.gl)
-    let expandedFarZMercatorMatrix: Float32Array | undefined
-    if (projectionParams.mapbox?.projection.name === 'globe') {
-      // FRAGILE: Mapbox's internal globe raster pass uses expandedFarZProjMatrix,
-      // while customLayerMatrix() uses the regular far plane. Scale the
-      // projection matrix by worldSize so the direct ECEF path shares the globe
-      // surface's depth behavior.
-      const { expandedFarZProjMatrix, worldSize } = getMapboxGlobeInternals(
-        this.map
-      )
-      if (expandedFarZProjMatrix && worldSize) {
-        expandedFarZMercatorMatrix = scaleMercatorMatrix(
-          expandedFarZProjMatrix,
-          worldSize
-        )
-      }
-    }
+    // The direct globe path draws straight onto the sphere, so it needs the
+    // per-frame globe-world-to-clip matrix; without one this frame it falls
+    // back to the regular globe program rather than drawing with a mercator
+    // matrix.
+    const ecefClipMatrix =
+      this.usingDirectMapboxGlobePath &&
+      projectionParams.mapbox?.renderParameters
+        ? mapboxEcefClipMatrix(projectionParams.mapbox.renderParameters)
+        : undefined
 
     const context: RenderContext = {
       gl: this.gl,
@@ -906,12 +908,12 @@ export class ZarrLayer {
       projectionData: projectionParams.projectionData,
       mapbox: projectionParams.mapbox
         ? {
-            ...projectionParams.mapbox,
-            directGlobePathActive: this.usingDirectMapboxGlobePath,
-            expandedFarZMercatorMatrix:
-              projectionParams.mapbox.projection.name === 'globe'
-                ? expandedFarZMercatorMatrix
-                : undefined,
+            projection: projectionParams.mapbox.projection,
+            globeToMercatorMatrix:
+              projectionParams.mapbox.globeToMercatorMatrix,
+            transition: projectionParams.mapbox.transition,
+            directGlobePathActive: !!ecefClipMatrix,
+            ecefClipMatrix,
           }
         : legacyMapboxFallback,
     }

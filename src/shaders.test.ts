@@ -96,9 +96,11 @@ describe('createVertexShader — structure', () => {
       inputSpace: 'wgs84-direct',
       projection: 'mapbox',
     })
-    expect(src).toContain('u_globe_to_merc')
     expect(src).toContain('mercatorYToLatRad')
     expect(src).toContain('-GLOBE_RADIUS * sin(latRad)')
+    // Projects globe-world space directly; no mercator round trip.
+    expect(src).toContain('matrix * vec4(ecef, 1.0)')
+    expect(src).not.toContain('u_globe_to_merc')
   })
 
   it('throws when a maplibre variant is missing shaderData', () => {

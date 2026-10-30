@@ -163,8 +163,9 @@ export interface ZarrLayerOptions {
    * tile draping. Only activates at the fully-globe zoom endpoint; during
    * the globe-to-mercator zoom morph the layer falls back to the standard
    * draped path. Incompatible with Mapbox terrain — when terrain is enabled
-   * the layer uses the draped tile path. Relies on Mapbox internal APIs and
-   * may break across Mapbox GL JS versions.
+   * the layer uses the draped tile path. Projects with the public render
+   * parameters Mapbox GL JS passes to custom layers since 3.32; older
+   * versions keep the draped path.
    *
    * Default: `false`
    */

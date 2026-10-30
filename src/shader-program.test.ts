@@ -154,7 +154,9 @@ describe('projection mode -> compiled vertex shader', () => {
   it('mapbox globe uses the Y-DOWN ECEF sphere with a depth bias', () => {
     const { source } = buildProgram('mapbox-ecef')
     expect(source.vertex).toContain('-GLOBE_RADIUS * sin(latRad)')
-    expect(source.vertex).toContain('matrix * (u_globe_to_merc * vec4(ecef')
+    // `matrix` is projection * view from Mapbox's public render parameters,
+    // which already map the ECEF sphere to clip space.
+    expect(source.vertex).toContain('matrix * vec4(ecef, 1.0)')
     // Keeps the custom layer off the globe surface it z-fights with.
     expect(source.vertex).toContain('gl_Position.z -=')
   })
@@ -180,11 +182,14 @@ describe('projection mode -> compiled vertex shader', () => {
     }
   })
 
-  it('gives mapbox modes the globe-to-mercator matrix and maplibre modes none', () => {
+  it('gives the draped mapbox modes the globe-to-mercator matrix and maplibre modes none', () => {
     for (const mode of ALL_MODES) {
       const { shaderProgram } = buildProgram(mode)
       const isMapbox = mode.startsWith('mapbox')
-      expect(!!shaderProgram.globeToMercMatrixLoc).toBe(isMapbox)
+      // The direct globe path projects ECEF with a single world-to-clip
+      // matrix, so it has no mercator detour to feed.
+      const drapedMapbox = isMapbox && mode !== 'mapbox-ecef'
+      expect(!!shaderProgram.globeToMercMatrixLoc).toBe(drapedMapbox)
       expect(!!shaderProgram.projMatrixLoc).toBe(!isMapbox)
     }
   })
@@ -207,7 +212,7 @@ describe('projection mode -> compiled vertex shader', () => {
 
 describe('applyProjectionUniforms', () => {
   const MATRIX = Array.from({ length: 16 }, (_, i) => i)
-  const EXPANDED = new Float32Array(16).fill(9)
+  const ECEF_CLIP = new Float32Array(16).fill(9)
   const GLOBE_TO_MERC = new Float32Array(16).fill(3)
 
   const projectionData = {
@@ -222,7 +227,7 @@ describe('applyProjectionUniforms', () => {
     projection: { name: 'globe' },
     globeToMercatorMatrix: GLOBE_TO_MERC,
     transition: 0.25,
-    expandedFarZMercatorMatrix: EXPANDED,
+    ecefClipMatrix: ECEF_CLIP,
   }
 
   const apply = (
@@ -290,12 +295,12 @@ describe('applyProjectionUniforms', () => {
     expect(uploadFor(gl, 'u_globe_transition')?.args[1]).toBe(1)
   })
 
-  it('gives the direct globe path the expanded far-plane matrix', () => {
-    // Mapbox's globe raster pass uses expandedFarZProjMatrix; the public
-    // custom-layer matrix uses the regular far plane, so the ECEF path would
-    // z-fight against the globe surface without this swap.
+  it('gives the direct globe path the ECEF clip matrix', () => {
+    // The custom-layer matrix expects mercator input and carries the regular
+    // far plane; the ECEF path needs the globe-world product with the
+    // infinite far plane or it z-fights against the globe surface.
     const { gl } = apply('mapbox-ecef')
-    expect(uploadFor(gl, 'matrix')?.args[1]).toBe(EXPANDED)
+    expect(uploadFor(gl, 'matrix')?.args[1]).toBe(ECEF_CLIP)
   })
 
   it('keeps the tile matrix when the direct globe path renders a tile', () => {
@@ -303,10 +308,10 @@ describe('applyProjectionUniforms', () => {
     expect(uploadFor(gl, 'matrix')?.args[1]).toEqual(new Float32Array(MATRIX))
   })
 
-  it('never swaps in the expanded matrix on the draped mapbox modes', () => {
+  it('never swaps in the ECEF clip matrix on the draped mapbox modes', () => {
     for (const mode of ['mapbox', 'mapbox-proj4'] as const) {
       const { gl } = apply(mode)
-      expect(uploadFor(gl, 'matrix')?.args[1]).not.toBe(EXPANDED)
+      expect(uploadFor(gl, 'matrix')?.args[1]).not.toBe(ECEF_CLIP)
     }
   })
 
