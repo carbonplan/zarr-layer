@@ -12,6 +12,7 @@ export type {
   RequestParameters,
 } from './types'
 export type { UniformValue } from './renderer-types'
+export type { MapProjection } from './world-mapping'
 
 // Query interface exports
 export type {

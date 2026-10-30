@@ -11,7 +11,11 @@ import mapboxgl from 'mapbox-gl'
 import { layers, namedFlavor } from '@protomaps/basemaps'
 import { Protocol } from 'pmtiles'
 import { useAppStore, type DemoProjection } from '../lib/store'
-import { ANTARCTIC_PROJECTION, setAntarctic } from './antarctic-projection'
+import {
+  ANTARCTIC_CRS,
+  ANTARCTIC_PROJECTION,
+  setAntarctic,
+} from './antarctic-projection'
 import type { LayerProps } from '../datasets/types'
 import MapZoomControls, { useAttributionStyles } from './map-controls'
 
@@ -255,6 +259,7 @@ export const useMapLayer = (map: MapInstance | null, isMapLoaded: boolean) => {
         proj4: datasetModule.proj4,
         onLoadingStateChange: setLoadingState,
         renderPoles,
+        mapProjections: [ANTARCTIC_CRS],
       }
 
       if (datasetModule.store) {

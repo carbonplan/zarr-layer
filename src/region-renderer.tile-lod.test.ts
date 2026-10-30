@@ -1404,8 +1404,6 @@ describe('registered projections', () => {
   // Plate carrée over the top half of the world square, standing in for a
   // map projection registered with addProjection.
   const PLATE: WorldMapping = {
-    name: 'custom:plate',
-    extentAtZoom0: 360,
     toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
     toLngLat: (x, y) => {
       const lat = 90 - y * 360

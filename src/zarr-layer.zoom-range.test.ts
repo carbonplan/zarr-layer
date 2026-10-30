@@ -3,6 +3,7 @@ import { ZarrLayer } from './zarr-layer'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
 import { createRecordingGl } from './__fixtures__/fake-gl'
 import type { MapLike } from './types'
+import type { MapProjection } from './world-mapping'
 
 /**
  * A layer outside its zoom range must not fetch. The per-frame path checks
@@ -90,14 +91,9 @@ function countingStore(times?: number, pyramid = false) {
   }
 }
 
-function fakeMap(
-  zoom: number,
-  projection = 'mercator',
-  worldCoordinateHelper?: unknown
-) {
+function fakeMap(zoom: number, projection = 'mercator') {
   const state = { zoom, projection }
   const map = {
-    style: { projection: { worldCoordinateHelper } },
     getProjection: () => ({ type: state.projection }),
     getTerrain: () => null,
     getZoom: () => state.zoom,
@@ -125,15 +121,11 @@ async function addLayer(
     pyramid?: boolean
     selector?: ConstructorParameters<typeof ZarrLayer>[0]['selector']
     projection?: string
-    worldCoordinateHelper?: unknown
+    mapProjections?: MapProjection[]
   } = {}
 ) {
   const { store, chunkReads } = countingStore(opts.times, opts.pyramid)
-  const { map, state } = fakeMap(
-    zoom,
-    opts.projection,
-    opts.worldCoordinateHelper
-  )
+  const { map, state } = fakeMap(zoom, opts.projection)
   const gl = createRecordingGl()
 
   let ready: () => void
@@ -153,6 +145,7 @@ async function addLayer(
     latIsAscending: false,
     minzoom,
     selector: opts.selector,
+    mapProjections: opts.mapProjections,
     onLoadingStateChange: (loadingState) => {
       if (!loadingState.metadata) ready()
     },
@@ -230,28 +223,24 @@ describe('zoom range', () => {
 })
 
 describe('custom projection', () => {
-  it('fetches in a registered projection whose mapping the map exposes', async () => {
+  it('fetches in a registered projection the layer was given', async () => {
     const { chunkReads } = await addLayer(6, 0, {
       projection: 'custom:plate',
-      worldCoordinateHelper: {
-        name: 'custom:plate',
-        wraps: false,
-        tileMatrixSet: { origin: [-180, 180], extentAtZoom0: 360 },
-        worldFromLngLat: (lng: number, lat: number) => ({
-          x: (lng + 180) / 360,
-          y: (90 - lat) / 360,
-        }),
-        lngLatFromWorld: (x: number, y: number) => ({
-          lng: x * 360 - 180,
-          lat: 90 - y * 360,
-        }),
-        hasLngLat: () => true,
-      },
+      mapProjections: [
+        {
+          name: 'custom:plate',
+          projection: {
+            forward: ([lng, lat]) => [lng, lat],
+            inverse: ([x, y]) => [x, y],
+          },
+          tileMatrixSet: { origin: [-180, 90], extentAtZoom0: 360 },
+        },
+      ],
     })
     expect(chunkReads.length).toBeGreaterThan(0)
   })
 
-  it('fetches nothing and warns once while the map hides its projection', async () => {
+  it('fetches nothing and warns once in a registered projection it was not given', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const { layer, gl, chunkReads } = await addLayer(6, 0, {
@@ -271,7 +260,7 @@ describe('custom projection', () => {
     }
   })
 
-  it('fetches once the map returns to a built-in projection from a hidden one', async () => {
+  it('fetches once the map returns to a built-in projection from one it was not given', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const { layer, gl, state, chunkReads } = await addLayer(6, 0, {

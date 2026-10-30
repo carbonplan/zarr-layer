@@ -42,7 +42,11 @@ import {
   customProjectionName,
 } from './map-utils'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
-import { readWorldMapping } from './world-mapping'
+import {
+  worldMappingFor,
+  type MapProjection,
+  type WorldMapping,
+} from './world-mapping'
 import {
   mapboxEcefClipMatrix,
   parseMapboxRenderParameters,
@@ -219,6 +223,7 @@ export class ZarrLayer {
   private onAuthError: OnAuthError | undefined
   private customStore: Readable | undefined
   private renderPoles: boolean
+  private mapProjections: readonly MapProjection[]
   private lastIsGlobe: boolean | null = null
   private lastShouldDraw: boolean | null = null
   private warnedProjection: string | null = null
@@ -372,6 +377,7 @@ export class ZarrLayer {
     onAuthError,
     store,
     renderPoles = false,
+    mapProjections = [],
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -444,6 +450,7 @@ export class ZarrLayer {
     this.onAuthError = onAuthError
     this.customStore = store
     this.renderPoles = renderPoles
+    this.mapProjections = mapProjections
   }
 
   /**
@@ -828,26 +835,31 @@ export class ZarrLayer {
   /**
    * Whether the layer fetches and draws this frame: inside its zoom range and
    * in a projection it can place data in. A projection registered with
-   * MapLibre's `addProjection` needs the map's mapping into its world, which
-   * the map may not expose.
+   * MapLibre's `addProjection` has to be among `mapProjections`.
    */
   private shouldDraw(): boolean {
     const customProjection = customProjectionName(this.map?.getProjection?.())
     const unplaceable =
-      customProjection && !readWorldMapping(this.map) ? customProjection : null
+      customProjection && !this.worldMapping() ? customProjection : null
     if (unplaceable && unplaceable !== this.warnedProjection) {
       console.warn(
-        `[ZarrLayer] The map does not expose its ${unplaceable} projection, ` +
-          `so the layer is hidden while it is active.`
+        `[ZarrLayer] The map is in the ${unplaceable} projection, which is ` +
+          `not among the layer's mapProjections, so the layer is hidden ` +
+          `while it is active.`
       )
     }
     this.warnedProjection = unplaceable
     return !unplaceable && this.isZoomInRange()
   }
 
+  /** The world of the map's projection, when it is a registered one. */
+  private worldMapping(): WorldMapping | null {
+    return worldMappingFor(this.map, this.mapProjections)
+  }
+
   /** Place regions in the world of the map's current projection. */
   private syncWorldMapping(): void {
-    this.regionRenderer?.setWorldMapping(readWorldMapping(this.map))
+    this.regionRenderer?.setWorldMapping(this.worldMapping())
   }
 
   prerender(
@@ -1009,7 +1021,7 @@ export class ZarrLayer {
     // A registered projection's world is drawn once, without copies.
     const worldOffsets = computeWorldOffsets(
       this.map,
-      isGlobe || !!readWorldMapping(this.map)
+      isGlobe || !!this.worldMapping()
     )
     const colormapTexture = this.colormap.ensureTexture(this.gl)
     // The direct globe path draws straight onto the sphere, so it needs the

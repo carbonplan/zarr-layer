@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import proj4 from 'proj4'
 import {
-  readWorldMapping,
   worldBoundsOf,
+  worldMappingFor,
   worldFractionOf,
+  type MapProjection,
   type WorldMapping,
 } from './world-mapping'
 import { getRegionsInWorldBox, selectLevelForZoom } from './region-math'
@@ -13,13 +15,11 @@ import type { MapLike } from './types'
 /**
  * A map in a projection registered with MapLibre's `addProjection` places
  * custom layers in the world square of its tile matrix set. These fixtures
- * stand in for MapLibre's mapping with closed forms.
+ * stand in for a registered projection's mapping with closed forms.
  */
 
 /** Plate carrée over the top half of the world square. */
 const PLATE: WorldMapping = {
-  name: 'custom:plate',
-  extentAtZoom0: 360,
   toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
   toLngLat: (x, y) => {
     const lat = 90 - y * 360
@@ -29,8 +29,6 @@ const PLATE: WorldMapping = {
 
 /** A south polar azimuthal projection, centered in the world square. */
 const POLAR: WorldMapping = {
-  name: 'custom:polar',
-  extentAtZoom0: 1,
   toWorld: (lng, lat) => {
     const r = (lat + 90) / 360
     const a = (lng * Math.PI) / 180
@@ -48,8 +46,6 @@ const POLAR: WorldMapping = {
  * distance away, as proj4 places it.
  */
 const STEREO: WorldMapping = {
-  name: 'custom:stereo',
-  extentAtZoom0: 1,
   toWorld: (lng, lat) => {
     const r = Math.tan((((lat + 90) / 2) * Math.PI) / 180) / 4
     const a = (lng * Math.PI) / 180
@@ -70,71 +66,79 @@ const IDENTITY_4326 = {
   inverse: (x: number, y: number): [number, number] => [x, y],
 }
 
-function helper(overrides: Record<string, unknown> = {}) {
-  return {
-    name: 'EPSG:3031',
-    wraps: false,
-    tileMatrixSet: { origin: [-1, 1], extentAtZoom0: 2 },
-    worldFromLngLat: (lng: number, lat: number) => ({
-      x: lng / 10,
-      y: lat / 10,
-    }),
-    lngLatFromWorld: (x: number, y: number) => ({ lng: x * 10, lat: y * 10 }),
-    hasLngLat: () => true,
+/** Plate carrée in degrees, tile 0/0/0 spanning lon -180..180 from lat 90 down. */
+const plateCarree = (
+  overrides: Partial<MapProjection['projection']> = {}
+): MapProjection => ({
+  name: 'custom:plate',
+  projection: {
+    forward: ([lng, lat]) => [lng, lat],
+    inverse: ([x, y]) => [x, y],
     ...overrides,
-  }
-}
+  },
+  tileMatrixSet: { origin: [-180, 90], extentAtZoom0: 360 },
+})
 
-const mapIn = (type: string, worldCoordinateHelper?: unknown) =>
-  ({
-    getProjection: () => ({ type }),
-    style: { projection: { worldCoordinateHelper } },
-  } as unknown as MapLike)
+const mapIn = (type: string) =>
+  ({ getProjection: () => ({ type }) } as unknown as MapLike)
 
-describe('readWorldMapping', () => {
-  it('reads the mapping of a registered projection from the style', () => {
-    const mapping = readWorldMapping(mapIn('EPSG:3031', helper()))
+describe('worldMappingFor', () => {
+  it('maps the projection the map is in from its definition', () => {
+    const mapping = worldMappingFor(mapIn('custom:plate'), [plateCarree()])!
 
-    expect(mapping?.name).toBe('EPSG:3031')
-    expect(mapping?.extentAtZoom0).toBe(2)
-    expect(mapping?.toWorld(10, 20)).toEqual([1, 2])
-    expect(mapping?.toLngLat(1, 2)).toEqual([10, 20])
+    // World y grows downwards from the tile matrix set's top-left origin.
+    expect(mapping.toWorld(0, 90)).toEqual([0.5, 0])
+    expect(mapping.toWorld(-180, 0)).toEqual([0, 0.25])
+    expect(mapping.toLngLat(0.75, 0.125)).toEqual([90, 45])
   })
 
   it('gives the same mapping each frame for the same projection', () => {
-    const h = helper()
-    expect(readWorldMapping(mapIn('EPSG:3031', h))).toBe(
-      readWorldMapping(mapIn('EPSG:3031', h))
+    const projections = [plateCarree()]
+    expect(worldMappingFor(mapIn('custom:plate'), projections)).toBe(
+      worldMappingFor(mapIn('custom:plate'), projections)
     )
   })
 
-  it('returns null for built-in projections and unreadable ones', () => {
-    expect(readWorldMapping(mapIn('mercator', helper()))).toBe(null)
-    expect(readWorldMapping(mapIn('globe', helper()))).toBe(null)
-    expect(readWorldMapping(mapIn('EPSG:3031'))).toBe(null)
-    expect(readWorldMapping(mapIn('EPSG:3031', helper({ wraps: true })))).toBe(
-      null
-    )
-    expect(readWorldMapping(null)).toBe(null)
+  it('returns null for built-in projections and ones it was not given', () => {
+    const projections = [plateCarree()]
+    expect(worldMappingFor(mapIn('mercator'), projections)).toBe(null)
+    expect(worldMappingFor(mapIn('globe'), projections)).toBe(null)
+    expect(worldMappingFor(mapIn('EPSG:3031'), projections)).toBe(null)
+    expect(worldMappingFor(null, projections)).toBe(null)
   })
 
   it('reports positions the projection cannot place', () => {
-    const mapping = readWorldMapping(
-      mapIn(
-        'EPSG:3031',
-        helper({
-          worldFromLngLat: (lng: number) => {
-            if (lng > 90) throw new Error('outside')
-            return { x: lng > 45 ? Infinity : 0, y: 0 }
-          },
-          hasLngLat: (x: number) => x < 1,
-        })
-      )
-    )!
+    const mapping = worldMappingFor(mapIn('custom:plate'), [
+      plateCarree({
+        forward: ([lng, lat]) => {
+          if (lng > 90) throw new Error('outside')
+          return [lng > 45 ? Infinity : lng, lat]
+        },
+        inverse: ([x, y]) => (x > 0 ? null : [x, y]),
+      }),
+    ])!
 
     expect(mapping.toWorld(60, 0)).toEqual([NaN, NaN])
     expect(mapping.toWorld(120, 0)).toEqual([NaN, NaN])
-    expect(mapping.toLngLat(2, 0)).toBe(null)
+    expect(mapping.toLngLat(0.75, 0.25)).toBe(null)
+  })
+
+  it('has no answer where the inverse does not lead back to the position', () => {
+    const mapping = worldMappingFor(mapIn('custom:plate'), [
+      plateCarree({ inverse: ([x, y]) => (x > 0 ? [x - 360, y] : [x, y]) }),
+    ])!
+
+    expect(mapping.toLngLat(0.25, 0.25)).toEqual([-90, 0])
+    expect(mapping.toLngLat(0.75, 0.25)).toBe(null)
+  })
+
+  it('takes an inverse that only approximately leads back, as MapLibre does', () => {
+    const rounded = (v: number) => Math.round(v * 100) / 100
+    const mapping = worldMappingFor(mapIn('custom:plate'), [
+      plateCarree({ inverse: ([x, y]) => [rounded(x), rounded(y)] }),
+    ])!
+
+    expect(mapping.toLngLat(0.5 + 0.004 / 360, 0.25)).toEqual([0, 0])
   })
 })
 
@@ -462,6 +466,36 @@ describe('createWorldMesh', () => {
       expect(onPolyline(point, byAngle(inner))).toBe(true)
     for (const point of inner)
       expect(onPolyline(point, byAngle(outer))).toBe(true)
+  })
+
+  it('meshes a region reaching the pole the projection sends far away', () => {
+    // Antarctic polar stereographic places the north pole ~1e23 m out, where
+    // proj4's inverse no longer leads back.
+    const antarctic = worldMappingFor(mapIn('EPSG:3031'), [
+      {
+        name: 'EPSG:3031',
+        projection: proj4(
+          'EPSG:4326',
+          '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+        ),
+        tileMatrixSet: {
+          origin: [-4194304, 4194304],
+          extentAtZoom0: 8388608,
+        },
+      },
+    ])!
+    const result = createWorldMesh({
+      geoBounds: { xMin: -36, xMax: 36, yMin: 30, yMax: 90 },
+      width: 360,
+      height: 300,
+      lonSubdivisions: 8,
+      latSubdivisions: 8,
+      toWorld: (x, y) => antarctic.toWorld(x, y),
+      fromWorld: (x, y) => antarctic.toLngLat(x, y) ?? [NaN, NaN],
+      latIsAscending: true,
+    })
+
+    expect(result.indices.length).toBeGreaterThan(0)
   })
 
   it('drops triangles spanning a seam in the projection', () => {

@@ -1,6 +1,7 @@
 import * as zarr from 'zarrita'
 import type { XYLimits } from './map-utils'
 import type { UniformValue } from './renderer-types'
+import type { MapProjection } from './world-mapping'
 
 /** Bounds tuple: [xMin, yMin, xMax, yMax] */
 export type Bounds = [number, number, number, number]
@@ -170,6 +171,15 @@ export interface ZarrLayerOptions {
    * Default: `false`
    */
   renderPoles?: boolean
+  /**
+   * Projections registered with MapLibre's experimental `addProjection`
+   * (maplibre-gl >= 6.15) that the layer can render in: pass the same
+   * objects given to `addProjection`. While the map is in a registered
+   * projection missing from this list, the layer is hidden and warns once.
+   *
+   * Default: `[]`
+   */
+  mapProjections?: MapProjection[]
 }
 
 export type CRS = 'EPSG:4326' | 'EPSG:3857'

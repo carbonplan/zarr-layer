@@ -2,6 +2,7 @@ import proj4 from 'proj4'
 import {
   addProjection,
   addProtocol,
+  type CRS,
   type Map as MapLibreMap,
 } from 'maplibre-gl'
 
@@ -23,24 +24,23 @@ const GIBS_LAYER = 'BlueMarble_ShadedRelief_Bathymetry'
 const GIBS_MATRIX_SET = '500m'
 const GIBS_MAX_LEVEL = 4
 
+/** Passed both to `addProjection` and to the layer's `mapProjections`. */
+export const ANTARCTIC_CRS: CRS = {
+  name: ANTARCTIC_PROJECTION,
+  projection: proj4('EPSG:4326', ANTARCTIC_PROJ4),
+  tileMatrixSet: {
+    origin: [-GIBS_HALF_EXTENT, GIBS_HALF_EXTENT],
+    extentAtZoom0: 2 * GIBS_HALF_EXTENT,
+  },
+  definition: ANTARCTIC_PROJ4,
+}
+
 let registered = false
 
 function register() {
   if (registered) return
   registered = true
-  const converter = proj4('EPSG:4326', ANTARCTIC_PROJ4)
-  addProjection({
-    name: ANTARCTIC_PROJECTION,
-    projection: {
-      forward: (position) => converter.forward(position),
-      inverse: (position) => converter.inverse(position),
-    },
-    tileMatrixSet: {
-      origin: [-GIBS_HALF_EXTENT, GIBS_HALF_EXTENT],
-      extentAtZoom0: 2 * GIBS_HALF_EXTENT,
-    },
-    definition: ANTARCTIC_PROJ4,
-  })
+  addProjection(ANTARCTIC_CRS)
   addProtocol(GIBS_PROTOCOL, async (params, abortController) => {
     const [z, x, y] = params.url.replace(`${GIBS_PROTOCOL}://`, '').split('/')
     const response = await fetch(
