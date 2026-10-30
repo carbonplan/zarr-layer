@@ -857,11 +857,21 @@ export function createHybridMesh(
 }
 
 /**
- * Longest triangle edge a world mesh keeps, in world-square units. Longer
- * edges join vertices on both sides of a seam in the map's projection,
- * such as a world projection's antimeridian, and would draw across the map.
+ * How far, as a share of an edge's length, the projected middle of an edge
+ * may land from the middle of the drawn edge. Past it the edge crosses a seam
+ * or fold in the projection, such as a world projection's antimeridian, and
+ * would draw across the map.
  */
-const MAX_WORLD_TRIANGLE_EDGE = 0.5
+const SEAM_MIDPOINT_RATIO = 0.25
+/**
+ * An edge that strays that far is halved toward its widest part this many
+ * times, homing in on any jump. A seam leaves a gap the data doesn't fill, so
+ * the gap's middle maps back far from the edge; a bend, even one sharpened
+ * without bound like a cone's tip, maps back onto it.
+ */
+const SEAM_BISECTIONS = 30
+/** Under a tenth of a pixel at zoom 24, in world units. */
+const SEAM_MIN_LENGTH = 1e-11
 
 interface WorldMeshOptions {
   geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
@@ -873,6 +883,8 @@ interface WorldMeshOptions {
   toWorld: (x: number, y: number) => [number, number]
   fromWorld: (x: number, y: number) => [number, number]
   latIsAscending: boolean
+  /** Source x is longitude, so positions 360 apart are the same place. */
+  allowUnwrappedLongitudes?: boolean
   maxError?: number
 }
 
@@ -893,6 +905,7 @@ export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
     toWorld,
     fromWorld,
     latIsAscending,
+    allowUnwrappedLongitudes = false,
     maxError = DEFAULT_MESH_MAX_ERROR,
   } = options
   const { xMin, xMax, yMin, yMax } = geoBounds
@@ -935,13 +948,13 @@ export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
   const edgeRows = Math.max(1, Math.ceil(height))
   const uvs = new Float64Array(
     adaptiveUVs.length +
-      (cols + 1) * (rows + 1) * 2 +
+      (cols - 1) * (rows - 1) * 2 +
       (edgeCols + 1 + edgeRows + 1) * 4
   )
   uvs.set(adaptiveUVs)
   let offset = adaptiveUVs.length
-  for (let row = 0; row <= rows; row++) {
-    for (let col = 0; col <= cols; col++) {
+  for (let row = 1; row < rows; row++) {
+    for (let col = 1; col < cols; col++) {
       uvs[offset++] = col / cols
       uvs[offset++] = row / rows
     }
@@ -966,32 +979,103 @@ export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
   let minY = Infinity
   let maxX = -Infinity
   let maxY = -Infinity
+  const sourceAt = (u: number, v: number): [number, number] => [
+    xMin + u * (xMax - xMin),
+    latIsAscending ? yMin + v * (yMax - yMin) : yMax - v * (yMax - yMin),
+  ]
+  const worldAt = (u: number, v: number) => toWorld(...sourceAt(u, v))
   for (let i = 0; i < numVerts; i++) {
-    const u = uvs[i * 2]
-    const v = uvs[i * 2 + 1]
-    const srcX = xMin + u * (xMax - xMin)
-    const srcY = latIsAscending
-      ? yMin + v * (yMax - yMin)
-      : yMax - v * (yMax - yMin)
-    const [x, y] = toWorld(srcX, srcY)
+    const [x, y] = worldAt(uvs[i * 2], uvs[i * 2 + 1])
     world[i * 2] = x
     world[i * 2 + 1] = y
   }
 
   const finite = (i: number) =>
     Number.isFinite(world[i * 2]) && Number.isFinite(world[i * 2 + 1])
-  const longEdge = (a: number, b: number) =>
-    Math.hypot(
-      world[a * 2] - world[b * 2],
-      world[a * 2 + 1] - world[b * 2 + 1]
-    ) > MAX_WORLD_TRIANGLE_EDGE
+  // Each edge is checked once, though up to two triangles share it.
+  const seams = new Map<number, boolean>()
+  const hasGap = (a: number, b: number) => {
+    let u0 = uvs[a * 2]
+    let v0 = uvs[a * 2 + 1]
+    let u1 = uvs[b * 2]
+    let v1 = uvs[b * 2 + 1]
+    let p0 = [world[a * 2], world[a * 2 + 1]]
+    let p1 = [world[b * 2], world[b * 2 + 1]]
+    for (let i = 0; i < SEAM_BISECTIONS; i++) {
+      const um = (u0 + u1) / 2
+      const vm = (v0 + v1) / 2
+      const pm = worldAt(um, vm)
+      if (!Number.isFinite(pm[0]) || !Number.isFinite(pm[1])) return true
+      const before = Math.hypot(pm[0] - p0[0], pm[1] - p0[1])
+      const after = Math.hypot(p1[0] - pm[0], p1[1] - pm[1])
+      if (Math.max(before, after) <= SEAM_MIN_LENGTH) return false
+      if (before >= after) {
+        u1 = um
+        v1 = vm
+        p1 = pm
+      } else {
+        u0 = um
+        v0 = vm
+        p0 = pm
+      }
+    }
+    const [sx, sy] = fromWorld((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return true
+    const [jx, jy] = sourceAt((u0 + u1) / 2, (v0 + v1) / 2)
+    let dx = sx - jx
+    if (allowUnwrappedLongitudes) dx -= 360 * Math.round(dx / 360)
+    return (
+      Math.hypot(dx / (xMax - xMin), (sy - jy) / (yMax - yMin)) >
+      Math.hypot(uvs[a * 2] - uvs[b * 2], uvs[a * 2 + 1] - uvs[b * 2 + 1])
+    )
+  }
+  const crossesSeam = (a: number, b: number) => {
+    const key = Math.min(a, b) * numVerts + Math.max(a, b)
+    let crosses = seams.get(key)
+    if (crosses === undefined) {
+      const [mx, my] = worldAt(
+        (uvs[a * 2] + uvs[b * 2]) / 2,
+        (uvs[a * 2 + 1] + uvs[b * 2 + 1]) / 2
+      )
+      const length = Math.hypot(
+        world[a * 2] - world[b * 2],
+        world[a * 2 + 1] - world[b * 2 + 1]
+      )
+      crosses =
+        !(
+          Math.hypot(
+            mx - (world[a * 2] + world[b * 2]) / 2,
+            my - (world[a * 2 + 1] + world[b * 2 + 1]) / 2
+          ) <=
+          length * SEAM_MIDPOINT_RATIO
+        ) && hasGap(a, b)
+      seams.set(key, crosses)
+    }
+    return crosses
+  }
+  // The map draws nothing past the edge of its tile matrix set.
+  const outside = (a: number, b: number, c: number) =>
+    [0, 1].some(
+      (axis) =>
+        Math.max(
+          world[a * 2 + axis],
+          world[b * 2 + axis],
+          world[c * 2 + axis]
+        ) < 0 ||
+        Math.min(
+          world[a * 2 + axis],
+          world[b * 2 + axis],
+          world[c * 2 + axis]
+        ) > 1
+    )
   const kept: number[] = []
   for (let t = 0; t < triangles.length; t += 3) {
     const a = triangles[t]
     const b = triangles[t + 1]
     const c = triangles[t + 2]
     if (!finite(a) || !finite(b) || !finite(c)) continue
-    if (longEdge(a, b) || longEdge(b, c) || longEdge(c, a)) continue
+    if (outside(a, b, c)) continue
+    if (crossesSeam(a, b) || crossesSeam(b, c) || crossesSeam(c, a)) continue
     kept.push(a, b, c)
     for (const i of [a, b, c]) {
       minX = Math.min(minX, world[i * 2])

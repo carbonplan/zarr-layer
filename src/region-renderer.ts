@@ -1553,13 +1553,12 @@ export class RegionRenderer {
           geoBounds,
           width: region.width,
           height: region.height,
-          // The world square is flat: adaptive refinement follows the
-          // projection's bends, with no globe curvature to tessellate for.
-          lonSubdivisions: MIN_SUBDIVISIONS,
-          latSubdivisions: MIN_SUBDIVISIONS,
+          lonSubdivisions,
+          latSubdivisions,
           toWorld: sourceToWorld(this.worldMapping, this.projection.to4326),
           fromWorld: worldToSource(this.worldMapping, this.projection.to4326),
           latIsAscending: this.latIsAscending,
+          allowUnwrappedLongitudes: this.projection.kind === 'epsg4326',
         })
       : createHybridMesh({
           geoBounds,

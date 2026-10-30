@@ -418,13 +418,13 @@ describe('createWorldMesh', () => {
     expect(result.meshBounds.x1).toBeCloseTo(0.25, 9)
   })
 
-  it('meets the neighboring region along a curved edge without a gap', () => {
-    const region = (yMin: number, yMax: number) =>
+  it('meets the neighboring region along a curved edge without a gap, at any density', () => {
+    const region = (yMin: number, yMax: number, lonSubdivisions: number) =>
       createWorldMesh({
         geoBounds: { xMin: -90, xMax: 0, yMin, yMax },
         width: 16,
         height: 8,
-        lonSubdivisions: 4,
+        lonSubdivisions,
         latSubdivisions: 4,
         toWorld: (x, y) => POLAR.toWorld(x, y),
         fromWorld: (x, y) => POLAR.toLngLat(x, y) ?? [NaN, NaN],
@@ -437,8 +437,6 @@ describe('createWorldMesh', () => {
         .filter((i) => result.texCoords[i * 2 + 1] === v)
         .map((i) => points[i])
     }
-    const inner = edge(region(-90, -60), 1)
-    const outer = edge(region(-60, -30), 0)
     const onPolyline = (
       [x, y]: [number, number],
       polyline: Array<[number, number]>
@@ -462,13 +460,21 @@ describe('createWorldMesh', () => {
           Math.atan2(b[0] - 0.5, 0.5 - b[1])
       )
 
-    for (const point of outer)
-      expect(onPolyline(point, byAngle(inner))).toBe(true)
-    for (const point of inner)
-      expect(onPolyline(point, byAngle(outer))).toBe(true)
+    // Neighbors meshed at the same density and at different ones.
+    for (const [innerCells, outerCells] of [
+      [4, 4],
+      [4, 7],
+    ]) {
+      const inner = edge(region(-90, -60, innerCells), 1)
+      const outer = edge(region(-60, -30, outerCells), 0)
+      for (const point of outer)
+        expect(onPolyline(point, byAngle(inner))).toBe(true)
+      for (const point of inner)
+        expect(onPolyline(point, byAngle(outer))).toBe(true)
+    }
   })
 
-  it('meshes a region reaching the pole the projection sends far away', () => {
+  it('meshes a region reaching the pole the projection sends far away, past the grid', () => {
     // Antarctic polar stereographic places the north pole ~1e23 m out, where
     // proj4's inverse no longer leads back.
     const antarctic = worldMappingFor(mapIn('EPSG:3031'), [
@@ -495,8 +501,112 @@ describe('createWorldMesh', () => {
       latIsAscending: true,
     })
 
-    expect(result.indices.length).toBeGreaterThan(0)
+    // All of it lies past the edge of the tile matrix set.
+    expect(result.indices.length).toBe(0)
   })
+
+  it('keeps the part of a region inside a grid far smaller than the region', () => {
+    // A regional grid: the world square spans 36 by 36 degrees, so the
+    // western hemisphere covers five squares across and its cells are wider
+    // than the square.
+    const regional: WorldMapping = {
+      toWorld: (lng, lat) => [(lng + 108) / 36, (54 - lat) / 36],
+      toLngLat: (x, y) => [x * 36 - 108, 54 - y * 36],
+    }
+    const result = mesh(regional)
+    const points = worldPositions(result)
+
+    expect(result.indices.length).toBeGreaterThan(0)
+    for (let t = 0; t < result.indices.length; t += 3) {
+      const xs = [0, 1, 2].map((k) => points[result.indices[t + k]][0])
+      const ys = [0, 1, 2].map((k) => points[result.indices[t + k]][1])
+      expect(Math.max(...xs)).toBeGreaterThanOrEqual(0)
+      expect(Math.min(...xs)).toBeLessThanOrEqual(1)
+      expect(Math.max(...ys)).toBeGreaterThanOrEqual(0)
+      expect(Math.min(...ys)).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('drops triangles crossing a seam, however short their edges', () => {
+    // Lambert conformal conic cuts the world along lon 180. Near the cone's
+    // tip, triangles crossing the cut have edges shorter than most others.
+    const lcc = proj4(
+      'EPSG:4326',
+      '+proj=lcc +lat_0=0 +lon_0=0 +lat_1=30 +lat_2=60 +datum=WGS84 +units=m'
+    )
+    const toWorld = (lng: number, lat: number): [number, number] => {
+      const [x, y] = lcc.forward([lng, lat])
+      return [0.5 + x / 4e7, 0.75 - y / 4e7]
+    }
+    const result = createWorldMesh({
+      geoBounds: { xMin: 0, xMax: 360, yMin: 0, yMax: 90 },
+      width: 360,
+      height: 90,
+      lonSubdivisions: 128,
+      latSubdivisions: 90,
+      toWorld,
+      fromWorld: (x, y) => {
+        const [lng, lat] = lcc.inverse([(x - 0.5) * 4e7, (0.75 - y) * 4e7])
+        const [bx, by] = toWorld(lng, lat)
+        return Math.hypot(bx - x, by - y) <= 1e-3 ? [lng, lat] : [NaN, NaN]
+      },
+      latIsAscending: true,
+      allowUnwrappedLongitudes: true,
+    })
+
+    expect(result.indices.length).toBeGreaterThan(0)
+    for (let t = 0; t < result.indices.length; t += 3) {
+      const lngs = [0, 1, 2].map(
+        (k) => result.texCoords[result.indices[t + k] * 2] * 360
+      )
+      expect(Math.min(...lngs) <= 180 && Math.max(...lngs) > 180).toBe(false)
+    }
+  })
+
+  // Equal Earth bends hard near its pole line; a cone with standard parallels
+  // near the equator stretches without bound toward its tip. Long diagonal
+  // edges there stray from their chords without crossing anything.
+  it.each([
+    ['Equal Earth', '+proj=eqearth +datum=WGS84', 90, 180, 34487920],
+    [
+      'a sharp cone',
+      '+proj=lcc +lat_0=90 +lon_0=0 +lat_1=5 +lat_2=10 +datum=WGS84',
+      0,
+      90,
+      1e8,
+    ],
+  ])(
+    'keeps triangles where %s bends sharply but has no seam',
+    (_, definition, lngMin, lngMax, scale) => {
+      const converter = proj4('EPSG:4326', definition)
+      const result = createWorldMesh({
+        geoBounds: { xMin: lngMin, xMax: lngMax, yMin: 60, yMax: 90 },
+        width: 256,
+        height: 256,
+        lonSubdivisions: 4,
+        latSubdivisions: 4,
+        toWorld: (lng, lat) => {
+          const [x, y] = converter.forward([lng, lat])
+          return [0.5 + x / scale, 0.5 - y / scale]
+        },
+        fromWorld: (x, y) =>
+          converter.inverse([(x - 0.5) * scale, (0.5 - y) * scale]),
+        latIsAscending: true,
+      })
+
+      let area = 0
+      for (let t = 0; t < result.indices.length; t += 3) {
+        const [a, b, c] = [0, 1, 2].map((k) => result.indices[t + k] * 2)
+        const uv = result.texCoords
+        area +=
+          Math.abs(
+            (uv[b] - uv[a]) * (uv[c + 1] - uv[a + 1]) -
+              (uv[c] - uv[a]) * (uv[b + 1] - uv[a + 1])
+          ) / 2
+      }
+      expect(area).toBeCloseTo(1, 9)
+    }
+  )
 
   it('drops triangles spanning a seam in the projection', () => {
     // East of lon -90 the world wraps to the far side, as past a seam.
