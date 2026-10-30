@@ -1628,8 +1628,8 @@ export class RegionRenderer {
         if (draw.ready) continue
         for (const region of draw.regions) retained.add(region.key)
       }
-      this.regionCache.rebuildProtection(wantedKeys, {
-        retain: (key) => retained.has(key),
+      this.regionCache.rebuildProtection([...wantedKeys, ...retained], {
+        retainKeysNotMatching: '',
       })
     } else if (wantedKeys.size > 0) {
       const pending = this.wantedCovered() ? [] : this.pendingAreas()

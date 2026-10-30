@@ -648,6 +648,46 @@ describe('per-tile level selection', () => {
     expect(draws.every((d) => d.region.levelIndex === 0)).toBe(true)
   })
 
+  it('protects a released fallback again once a tile shows it', async () => {
+    // A fine tile is drawn, so the coarse regions under it are released.
+    // Panning to a neighbouring fine tile shows those coarse regions again
+    // while its own regions load; they must be protected again too, or
+    // cache pressure evicts them while they are on screen.
+    const { renderer, gl } = await rendererAtZoom(0)
+    await updateWithCover(renderer, viewportAt(0), gl, [FAR_EAST])
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+
+    const fine = viewportAt(1)
+    renderer.setCoveringTiles([NEAR_IN_FAR_EAST])
+    renderer.update(fine, gl)
+    await waitForActive(renderer, 1)
+    renderer.update(fine, gl)
+    await settle(renderer)
+    seam(renderer).plannedDraws(gl)
+    renderer.update(fine, gl)
+    const cache = seam(renderer).regionCache
+    const coarseKeys = [...cache]
+      .map(([key]) => key)
+      .filter((key) => key.startsWith('0:'))
+    expect(coarseKeys.length).toBeGreaterThan(0)
+    expect(coarseKeys.every((key) => !cache.isProtected(key))).toBe(true)
+
+    const neighbour: TileRequest = { tileId: { z: 6, x: 10, y: 21 }, zoom: 1 }
+    renderer.setCoveringTiles([neighbour])
+    renderer.update(fine, gl)
+    const draws = seam(renderer).plannedDraws(gl)
+    expect(draws.length).toBeGreaterThan(0)
+    expect(draws.every((d) => d.region.levelIndex === 0)).toBe(true)
+    for (const draw of draws) {
+      expect(cache.isProtected(draw.region.key)).toBe(true)
+    }
+
+    cache.evict(gl, { maxBytes: 1 })
+    for (const draw of draws) expect(cache.get(draw.region.key)).toBeDefined()
+    await settle(renderer)
+  })
+
   it('shows what a tile has of its own level when no other level covers it', async () => {
     const { renderer, map, gl } = await rendererAtZoom(1)
     await updateWithCover(renderer, map, gl, [NEAR])
