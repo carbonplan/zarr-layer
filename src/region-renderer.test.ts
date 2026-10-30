@@ -832,6 +832,7 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     )
     // Region (0, 0) was fetched and drawn under the first selector.
     const region = seedFallbackRegion(renderer, { levelIndex: 0 })
+    region.textureBytes = region.data!.byteLength
     const texture = region.texture!
     renderer.update(map, gl)
     await settle(renderer)

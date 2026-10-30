@@ -206,6 +206,7 @@ export function releaseRegionTextures(
   if (region.bandTexture) gl.deleteTexture(region.bandTexture)
   region.texture = null
   region.textureUploaded = false
+  region.textureBytes = 0
   region.bandTexture = null
   region.bandTextureKey = null
   region.bandTextureBytes = 0
