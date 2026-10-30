@@ -102,6 +102,26 @@ describe('createVertexShader — structure', () => {
     expect(src).not.toContain('u_globe_to_merc')
   })
 
+  // A steeply pitched camera can sit over a loaded region, putting part of
+  // its mesh behind the camera (w <= 0). The GPU clips that part only if
+  // gl_Position still carries w; divided in the shader, it comes back as
+  // streaks and misplaced triangles across the screen.
+  it.each([
+    ['mercator', 'matrix * vec4(merc, 0.0, 1.0)'],
+    ['wgs84', 'u_anchor_clip + deltaClip'],
+  ] as const)(
+    'mapbox %s leaves the flat endpoint undivided for the GPU to clip',
+    (inputSpace, flatClip) => {
+      const src = createVertexShader({ inputSpace, projection: 'mapbox' })
+      const flatBranch = src.match(
+        /if \(u_tile_render == 1 \|\| u_globe_transition >= 0\.999999\) \{([^}]*)\}/
+      )
+      expect(flatBranch).not.toBeNull()
+      expect(flatBranch![1]).toContain(`gl_Position = ${flatClip};`)
+      expect(flatBranch![1]).not.toContain('/')
+    }
+  )
+
   it('throws when a maplibre variant is missing shaderData', () => {
     expect(() =>
       createVertexShader({ inputSpace: 'mercator', projection: 'maplibre' })

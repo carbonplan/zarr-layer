@@ -158,25 +158,21 @@ const PROJECT_MAPLIBRE_GLOBE = `
  * eye-coords sum (u_anchor_clip + deltaClip), which is sub-pixel precise at
  * high zoom. During the globe morph, keep Mapbox's existing absolute Mercator
  * path because the ECEF blend is nonlinear and only active at low/mid zoom.
+ *
+ * The flat/tile endpoint leaves the perspective divide to the GPU: a pitched
+ * camera can sit over a region's mesh, and only an undivided position lets
+ * the GPU clip the part behind the camera (w <= 0) and interpolate the
+ * varyings with perspective.
  */
 const projectMapboxGlobe = (eyeCoords: boolean): string => {
   const flatClip = eyeCoords
     ? 'u_anchor_clip + deltaClip'
     : 'matrix * vec4(merc, 0.0, 1.0)'
-  const mercClip = eyeCoords ? 'matrix * vec4(merc, 0.0, 1.0)' : flatClip
-  const flatEndpoint = eyeCoords
-    ? `
-  } else if (u_globe_transition >= 0.999999) {
-    vec4 flatClip = ${flatClip};
-    flatClip /= flatClip.w;
-    gl_Position = flatClip;`
-    : ''
   return `
-  if (u_tile_render == 1) {
+  if (u_tile_render == 1 || u_globe_transition >= 0.999999) {
     gl_Position = ${flatClip};
-${flatEndpoint}
   } else {
-    vec4 mercClip = ${mercClip};
+    vec4 mercClip = matrix * vec4(merc, 0.0, 1.0);
     mercClip /= mercClip.w;
 
     float lonRad = (merc.x - 0.5) * 2.0 * PI;
