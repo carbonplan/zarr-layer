@@ -482,7 +482,9 @@ export class ZarrStore {
     return handle
   }
 
-  private isConsolidatedStore(store: ZarrStoreType | null): store is {
+  private isConsolidatedStore(
+    store: ZarrStoreType | null
+  ): store is ZarrStoreType & {
     contents(): { path: `/${string}`; kind: 'array' | 'group' }[]
   } {
     return (

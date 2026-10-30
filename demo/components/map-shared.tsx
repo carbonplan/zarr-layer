@@ -6,7 +6,7 @@ import {
   ZarrLayerOptions,
   QueryGeometry,
 } from '@carbonplan/zarr-layer'
-import maplibregl from 'maplibre-gl'
+import { Map as MapLibreMap, addProtocol, setWorkerUrl } from 'maplibre-gl'
 import mapboxgl from 'mapbox-gl'
 import { layers, namedFlavor } from '@protomaps/basemaps'
 import { Protocol } from 'pmtiles'
@@ -16,7 +16,7 @@ import MapZoomControls, { useAttributionStyles } from './map-controls'
 
 export type MapProvider = 'maplibre' | 'mapbox'
 
-// Minimal interface for map methods we use. Using a union of maplibregl.Map | mapboxgl.Map
+// Minimal interface for map methods we use. Using a union of MapLibreMap | mapboxgl.Map
 // doesn't work because their overloaded on()/off() signatures are incompatible in a union.
 export interface MapInstance {
   on(event: string, handler: (e: any) => void): unknown
@@ -90,10 +90,16 @@ export interface MapConfig {
 
 const mapLibreConfig: MapConfig = {
   createMap: (container: HTMLDivElement, globeProjection: boolean) => {
+    setWorkerUrl(
+      new URL(
+        'maplibre-gl/dist/maplibre-gl-worker.mjs',
+        import.meta.url
+      ).toString()
+    )
     const protocol = new Protocol()
-    maplibregl.addProtocol('pmtiles', protocol.tile)
+    addProtocol('pmtiles', protocol.tile)
 
-    return new maplibregl.Map({
+    return new MapLibreMap({
       container,
       style: {
         projection: globeProjection ? { type: 'globe' } : { type: 'mercator' },
@@ -115,7 +121,7 @@ const mapLibreConfig: MapConfig = {
     }) as MapInstance
   },
   setProjection: (map: MapInstance, globeProjection: boolean) => {
-    ;(map as maplibregl.Map).setProjection(
+    ;(map as MapLibreMap).setProjection(
       globeProjection ? { type: 'globe' } : { type: 'mercator' }
     )
   },

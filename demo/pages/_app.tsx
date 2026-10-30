@@ -1,7 +1,7 @@
 import React from 'react'
 import type { AppProps } from 'next/app'
 import Script from 'next/script'
-import { ThemeProvider } from 'theme-ui'
+import { ThemeUIProvider } from 'theme-ui'
 import theme from '@carbonplan/theme'
 import '@carbonplan/components/fonts.css'
 import '@carbonplan/components/globals.css'
@@ -10,7 +10,7 @@ import 'mapbox-gl/dist/mapbox-gl.css'
 
 const App = ({ Component, pageProps }: AppProps) => {
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeUIProvider theme={theme}>
       {process.env.NEXT_PUBLIC_VERCEL_ENV === 'production' && (
         <Script
           data-domain='carbonplan.org'
@@ -19,7 +19,7 @@ const App = ({ Component, pageProps }: AppProps) => {
         />
       )}
       <Component {...pageProps} />
-    </ThemeProvider>
+    </ThemeUIProvider>
   )
 }
 

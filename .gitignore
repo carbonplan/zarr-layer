@@ -3,6 +3,7 @@ node_modules/
 .DS_Store
 demo/node_modules/
 demo/.next/
+demo/next-env.d.ts
 demo/.env.local
 dist/
 test-results.json
