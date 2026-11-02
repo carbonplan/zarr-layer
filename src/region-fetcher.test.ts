@@ -429,13 +429,13 @@ describe('RegionFetcher', () => {
       expect(Array.from(data.slice(0, 4))).toEqual([0, 1, NaN, 3])
     })
 
-    it('nowhere on a level that declares no fill', async () => {
+    it("at the dataset's fill on a level that declares none", async () => {
       const { fetcher, cache, context } = await makeHarness({ fillValue: 0 })
       context.levels.push({ asset: 'temperature', fillValue: null })
       await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
 
       const data = cache.get(makeRegionKey(0, 0, 0))!.data!
-      expect(data[0]).toBe(0)
+      expect(data[0]).toBeNaN()
     })
 
     it("in the shader, at the layer's fillValue, for raw integer bands", async () => {

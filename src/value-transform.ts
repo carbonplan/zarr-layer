@@ -17,8 +17,8 @@ export interface ValueTransform {
 
 /**
  * The transform for reads of an array of `dtype` at `level`. A layer's
- * `fillValue` option replaces the store's fill; otherwise a level that
- * declares its own metadata uses its own fill, even when that is none.
+ * `fillValue` option replaces the store's fill; otherwise the level's own
+ * metadata wins, falling back to the dataset's where the level has none.
  */
 export function resolveValueTransform(
   dtype: string,
@@ -30,9 +30,7 @@ export function resolveValueTransform(
   },
   fillOverride: number | null
 ): ValueTransform {
-  const fill =
-    fillOverride ??
-    (level?.fillValue !== undefined ? level.fillValue : dataset.fill_value)
+  const fill = fillOverride ?? level?.fillValue ?? dataset.fill_value
   return {
     scale: level?.scaleFactor ?? dataset.scaleFactor,
     offset: level?.addOffset ?? dataset.addOffset,

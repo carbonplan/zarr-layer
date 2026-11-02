@@ -29,9 +29,11 @@ describe('resolveValueTransform', () => {
     })
   })
 
-  it('keeps a level that declares no fill without one', () => {
+  it("uses the dataset's fill for a level that declares none", () => {
     const level = { asset: '1', fillValue: null }
-    expect(resolveValueTransform('int16', level, dataset, null).fill).toBe(null)
+    expect(resolveValueTransform('int16', level, dataset, null).fill).toBe(
+      -9999
+    )
   })
 
   it('lets the layer option replace any store fill', () => {
