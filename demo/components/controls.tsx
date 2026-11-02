@@ -153,7 +153,6 @@ const clamp = (value: number, min: number, max: number) =>
 
 const collectNumbers = (
   values: QueryDataValues | undefined,
-  fillValue: number,
   depth: number = 0
 ): number[] => {
   if (!values) return []
@@ -167,9 +166,7 @@ const collectNumbers = (
   if (Array.isArray(values)) {
     return values.filter(
       (value): value is number =>
-        value !== fillValue &&
-        typeof value === 'number' &&
-        Number.isFinite(value)
+        typeof value === 'number' && Number.isFinite(value)
     )
   }
 
@@ -180,20 +177,13 @@ const collectNumbers = (
   for (const entry of Object.values(values)) {
     if (entry === values) continue // Skip circular references
     // Use concat instead of spread to avoid stack overflow with large arrays
-    const collected = collectNumbers(
-      entry as QueryDataValues,
-      fillValue,
-      depth + 1
-    )
+    const collected = collectNumbers(entry as QueryDataValues, depth + 1)
     results = results.concat(collected)
   }
   return results
 }
 
-const getRegionMean = (
-  result: QueryResult | null,
-  fillValue: number
-): number | null => {
+const getRegionMean = (result: QueryResult | null): number | null => {
   if (!result) return null
 
   let numbers: number[] = []
@@ -208,9 +198,7 @@ const getRegionMean = (
     // This is the variable data - collect all numbers from it
     try {
       // Use concat instead of spread to avoid stack overflow with large arrays
-      numbers = numbers.concat(
-        collectNumbers(value as QueryDataValues, fillValue, 0)
-      )
+      numbers = numbers.concat(collectNumbers(value as QueryDataValues))
     } catch (error) {
       console.error('Error collecting numbers from', key, error)
     }
@@ -327,8 +315,6 @@ const Controls = () => {
   const regionResult = useAppStore((state) => state.regionResult)
   const mapInstance = useAppStore((state) => state.mapInstance)
   const zarrLayer = useAppStore((state) => state.zarrLayer)
-  const fillValue =
-    zarrLayer?.fillValue ?? datasetModule.fillValue ?? Number.NaN
   const [zoomLevel, setZoomLevel] = useState<number | null>(() =>
     mapInstance ? mapInstance.getZoom() : null
   )
@@ -425,29 +411,16 @@ const Controls = () => {
     const filtered =
       months.length > 0 && !Array.isArray(data)
         ? months.flatMap((m) =>
-            collectNumbers(
-              (data as Record<number, QueryDataValues>)[m] ?? [],
-              fillValue
-            )
+            collectNumbers((data as Record<number, QueryDataValues>)[m] ?? [])
           )
-        : collectNumbers(data, fillValue)
+        : collectNumbers(data)
 
     if (filtered.length === 0) return null
     const mean = filtered.reduce((acc, v) => acc + v, 0) / filtered.length
     return Number.isFinite(mean) ? mean : null
-  }, [
-    currentVariable,
-    fillValue,
-    pointResult,
-    isRangeBand,
-    monthStart,
-    monthEnd,
-  ])
+  }, [currentVariable, pointResult, isRangeBand, monthStart, monthEnd])
 
-  const regionMean = useMemo(
-    () => getRegionMean(regionResult, fillValue),
-    [regionResult, fillValue]
-  )
+  const regionMean = useMemo(() => getRegionMean(regionResult), [regionResult])
 
   const [terrainInfo, setTerrainInfo] = useState(false)
   const [renderPolesInfo, setRenderPolesInfo] = useState(false)
