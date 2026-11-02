@@ -81,14 +81,13 @@ describe('createVertexShader — structure', () => {
     expect(src).toContain('GLOBE_RADIUS')
   })
 
-  it('wgs84-direct (maplibre) takes the ECEF path and carries wgs84 pos', () => {
+  it('wgs84-direct (maplibre) takes the ECEF path', () => {
     const src = createVertexShader({
       inputSpace: 'wgs84-direct',
       projection: 'maplibre',
       shaderData: FAKE_SHADER_DATA,
     })
     expect(src).toContain('u_projection_matrix')
-    expect(src).toContain('v_wgs84Pos = vec2(normLon, normLat);')
   })
 
   it('wgs84-direct (mapbox) inverts mercator deltas onto the Y-DOWN ECEF sphere', () => {
@@ -249,19 +248,16 @@ describe('createFragmentShaderSource — structure', () => {
 
 describe('mercator math parity (GPU shader <-> CPU map-utils)', () => {
   // The mercator FORWARD runs on the CPU (mesh encoding via latToMercatorNorm);
-  // the shaders only INVERT (fragment texture lookup, ECEF vertex paths). If
-  // the GPU inverse and CPU forward disagree, texture lookups shift.
+  // the shaders only INVERT (ECEF vertex paths, fragment latitude lookup). If
+  // the GPU inverse and CPU forward disagree, vertices or texture rows shift.
 
-  // Faithful JS port of the fragment shader's mercator inverse
-  // (FRAGMENT_SHADER_REPROJECT + FUNC_MERCATOR_INVERT in shaders.ts).
+  // Faithful JS port of FUNC_MERCATOR_Y_TO_LAT in shaders.ts.
   function shaderInvertLatDeg(mercYNorm: number): number {
-    const PI = Math.PI
-    const y = PI * (1 - 2 * mercYNorm)
-    const phi = 2 * Math.atan(Math.exp(y)) - PI / 2
-    return (180 / PI) * phi
+    const t = Math.PI * (1 - 2 * mercYNorm)
+    return (180 / Math.PI) * Math.atan(Math.sinh(t))
   }
 
-  it('fragment-shader inverse matches mercatorNormToLat', () => {
+  it('vertex-shader inverse matches mercatorNormToLat', () => {
     for (const mercY of [0.05, 0.25, 0.5, 0.75, 0.95]) {
       expect(shaderInvertLatDeg(mercY)).toBeCloseTo(
         mercatorNormToLat(mercY),
@@ -276,21 +272,25 @@ describe('mercator math parity (GPU shader <-> CPU map-utils)', () => {
     }
   })
 
-  it('pins the GLSL formulas the JS port mirrors', () => {
-    // If these substrings change, the JS ports above must be updated in lockstep.
+  it('pins the GLSL formulas the JS ports mirror', () => {
+    // If these substrings change, the JS ports (here and in
+    // renderable-region.test.ts) must be updated in lockstep.
     const vtx = createVertexShader({
       inputSpace: 'wgs84-direct',
       projection: 'mapbox',
     })
-    // Vertex-side inverse (FUNC_MERCATOR_Y_TO_LAT, used by the ECEF paths).
     expect(vtx).toContain('float t = PI * (1.0 - 2.0 * y);')
     expect(vtx).toContain('atan(sinh(t))')
-    // Fragment-side inverse (FUNC_MERCATOR_INVERT).
-    expect(maplibreFragmentShaderSource).toContain(
-      '2.0 * atan(exp(y)) - PI / 2.0'
-    )
-    expect(maplibreFragmentShaderSource).toContain(
-      'PI * (1.0 - 2.0 * v_mercatorPos.y)'
-    )
+    for (const line of [
+      'float dy = -2.0 * PI * v_clipPos.y;',
+      'float sh = zl_sinh(0.5 * dy);',
+      'float dTan = 2.0 * u_latAnchor.x * sh * sh + u_latAnchor.y * zl_sinh(dy);',
+      'float dLat = atan(dTan, 1.0 + u_latAnchor.x * (u_latAnchor.x + dTan));',
+      'sample_coord.y = u_latAnchor.z + dLat * u_latAnchor.w;',
+      'return x * (1.0 + x2 * (1.0 / 6.0 + x2 * (1.0 / 120.0 + x2 / 5040.0)));',
+    ]) {
+      expect(maplibreFragmentShaderSource).toContain(line)
+      expect(createFragmentShaderSource({ bands: ['a'] })).toContain(line)
+    }
   })
 })

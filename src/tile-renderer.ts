@@ -112,7 +112,8 @@ export function renderTile({
       bandTransform: region.bandTransform,
       indexBuffer: region.indexBuffer,
       meshBounds: region.meshBounds,
-      latIsAscending: region.latIsAscending,
+      // Tiles are Mercator, wherever they are draped
+      texLatEdges: region.texLatEdges,
     }
 
     const rendered = renderRegion(

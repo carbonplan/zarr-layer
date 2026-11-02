@@ -38,6 +38,9 @@ export interface RegionState {
   mercatorBounds: MercatorBounds | null
   // Normalized-Mercator bounds used to reconstruct region-local mesh positions
   meshBounds: MeshMercatorBounds | null
+  // Latitudes (degrees) of the texture's v = 0 and v = 1 edges when texture
+  // rows are linear in latitude (EPSG:4326); null otherwise
+  texLatEdges: [number, number] | null
   // Data orientation: true = row 0 is south
   latIsAscending: boolean
   // Version tracking for selector changes

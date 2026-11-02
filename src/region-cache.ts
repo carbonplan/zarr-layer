@@ -120,6 +120,7 @@ export function createRegionState(
     indexCount: 0,
     mercatorBounds: null,
     meshBounds: null,
+    texLatEdges: null,
     latIsAscending,
     selectorVersion,
     bandData: new Map(),

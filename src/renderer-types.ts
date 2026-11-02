@@ -82,8 +82,8 @@ export interface RegionRenderState {
   mercatorBounds: MercatorBounds
   width: number
   height: number
-  /** Data orientation: true = row 0 is south */
-  latIsAscending: boolean
+  /** Latitudes of the texture's v = 0 and v = 1 edges for EPSG:4326 data */
+  texLatEdges: [number, number] | null
   /** Band texture array for multi-band custom shaders */
   bandTexture: WebGLTexture | null
   bandTextureKey: string | null

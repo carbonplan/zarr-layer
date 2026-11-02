@@ -65,9 +65,8 @@ export interface ShaderProgram {
   tileRenderLoc?: WebGLUniformLocation | null
   dataScaleLoc: WebGLUniformLocation | null
   // EPSG:4326 reprojection uniforms
-  reprojectLoc: WebGLUniformLocation | null
-  latBoundsLoc: WebGLUniformLocation | null
-  latIsAscendingLoc: WebGLUniformLocation | null
+  latLookupLoc: WebGLUniformLocation | null
+  latAnchorLoc: WebGLUniformLocation | null
   // Finer-data clip boxes, see FRAGMENT_CLIP
   clipBoxesLoc: WebGLUniformLocation | null
   clipCountLoc: WebGLUniformLocation | null
@@ -267,14 +266,13 @@ export function createShaderProgram(
     scaleXLoc: mustGetUniformLocation(gl, program, 'scale_x'),
     scaleYLoc: mustGetUniformLocation(gl, program, 'scale_y'),
     // In the source-projected flat (wgs84) shader gl_Position comes from
-    // u_anchor_clip + deltaClip, so shift_x/u_worldXOffset only feed
-    // v_mercatorPos.x, which the default fragment shader never reads. Mesa
-    // (Intel/AMD/llvmpipe) eliminates that chain at link time and reports the
-    // uniforms inactive, which made mustGetUniformLocation throw on every
-    // frame from the moment the map left the globe transition, so the layer
-    // silently vanished at zoom >= 12 on those GPUs. A null location is a
-    // no-op for gl.uniform1f, so look these up without throwing.
-    // shift_y still feeds v_mercatorPos.y in the fragment reprojection branch.
+    // u_anchor_clip + deltaClip, so shift_x/shift_y/u_worldXOffset feed
+    // nothing the fragment shader reads. Mesa (Intel/AMD/llvmpipe) eliminates
+    // that chain at link time and reports the uniforms inactive, which made
+    // mustGetUniformLocation throw on every frame from the moment the map left
+    // the globe transition, so the layer silently vanished at zoom >= 12 on
+    // those GPUs. A null location is a no-op for gl.uniform1f, so look these
+    // up without throwing.
     shiftXLoc: gl.getUniformLocation(program, 'shift_x'),
     shiftYLoc: gl.getUniformLocation(program, 'shift_y'),
     worldXOffsetLoc: gl.getUniformLocation(program, 'u_worldXOffset'),
@@ -326,10 +324,8 @@ export function createShaderProgram(
     globeTransitionLoc: mapboxUniform('u_globe_transition'),
     tileRenderLoc: mapboxUniform('u_tile_render'),
     dataScaleLoc: gl.getUniformLocation(program, 'u_dataScale'),
-    // EPSG:4326 reprojection uniforms
-    reprojectLoc: gl.getUniformLocation(program, 'u_reproject'),
-    latBoundsLoc: gl.getUniformLocation(program, 'u_latBounds'),
-    latIsAscendingLoc: gl.getUniformLocation(program, 'u_latIsAscending'),
+    latLookupLoc: gl.getUniformLocation(program, 'u_latLookup'),
+    latAnchorLoc: gl.getUniformLocation(program, 'u_latAnchor'),
     clipBoxesLoc: gl.getUniformLocation(program, 'u_clip_boxes'),
     clipCountLoc: gl.getUniformLocation(program, 'u_clip_count'),
   }

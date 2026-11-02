@@ -161,16 +161,6 @@ describe('projection mode -> compiled vertex shader', () => {
     expect(source.vertex).toContain('gl_Position.z -=')
   })
 
-  it('only the ECEF variants carry WGS84 coords to the fragment shader', () => {
-    for (const mode of ALL_MODES) {
-      const { source } = buildProgram(mode)
-      const carriesWgs84 = source.vertex.includes(
-        'v_wgs84Pos = vec2(normLon, normLat);'
-      )
-      expect(carriesWgs84).toBe(mode.endsWith('ecef'))
-    }
-  })
-
   it('resolves eye-coords uniforms only on the source-projected flat variants', () => {
     // Other variants never reference them, so the compiler drops them and the
     // per-region uploads in renderRegion become no-ops.
@@ -327,15 +317,14 @@ describe('applyProjectionUniforms', () => {
 })
 
 describe('shader program uniform surface', () => {
-  it('exposes the reprojection uniforms on every mode', () => {
-    // Polar / EPSG:4326 datasets need the fragment-side latitude lookup no
-    // matter which projection is on screen.
+  it('exposes the latitude lookup uniforms on every mode', () => {
+    // Draped tiles are Mercator in every mode, so any program may need the
+    // EPSG:4326 latitude lookup.
     for (const mode of ALL_MODES) {
       const { shaderProgram } = buildProgram(mode)
       const program: ShaderProgram = shaderProgram
-      expect(program.reprojectLoc).not.toBeNull()
-      expect(program.latBoundsLoc).not.toBeNull()
-      expect(program.latIsAscendingLoc).not.toBeNull()
+      expect(program.latLookupLoc).not.toBeNull()
+      expect(program.latAnchorLoc).not.toBeNull()
     }
   })
 })
@@ -349,13 +338,11 @@ describe('driver-eliminated uniforms', () => {
     })
 
   it('builds the flat source-projected shader without the mercator-only uniforms', () => {
-    // In that variant gl_Position is u_anchor_clip + deltaClip, so shift_x
-    // and u_worldXOffset only reach v_mercatorPos.x, which the default fragment
-    // shader never reads. Mesa eliminates the chain at link time and reports
-    // the uniforms inactive; NVIDIA keeps them. Throwing here made the layer
-    // vanish on Intel/AMD GPUs the moment MapLibre left the globe transition
-    // (opengeos/GeoLibre#2357).
-    // shift_y still feeds the fragment's Y reprojection; null is simulated here.
+    // In that variant gl_Position is u_anchor_clip + deltaClip, so shift_x,
+    // shift_y and u_worldXOffset reach nothing the fragment shader reads. Mesa
+    // eliminates the chain at link time and reports the uniforms inactive;
+    // NVIDIA keeps them. Throwing here made the layer vanish on Intel/AMD GPUs
+    // the moment MapLibre left the globe transition (opengeos/GeoLibre#2357).
     const gl = createRecordingGl({
       inactiveUniforms: ['shift_x', 'shift_y', 'u_worldXOffset'],
     })

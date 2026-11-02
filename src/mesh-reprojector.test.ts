@@ -157,3 +157,137 @@ describe('createHybridMesh — real EPSG:3857 reprojection', () => {
     expectAllFinite(mesh.texCoords, 'texCoords')
   })
 })
+
+describe('createHybridMesh — refineInMercator', () => {
+  // ETRS89 LAEA Europe, 1 km pixels: a 1024 km region over central Europe.
+  const def =
+    '+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m +no_defs'
+  const geoBounds = { xMin: 4.0e6, yMin: 3.5e6, xMax: 5.024e6, yMax: 4.524e6 }
+  const size = 1024
+  const transformer = createTransformerTo4326(def, [
+    geoBounds.xMin,
+    geoBounds.yMin,
+    geoBounds.xMax,
+    geoBounds.yMax,
+  ])
+  const build = (refineInMercator: boolean) =>
+    createHybridMesh({
+      geoBounds,
+      width: size,
+      height: size,
+      lonSubdivisions: 8,
+      latSubdivisions: 8,
+      transformer,
+      latIsAscending: false,
+      refineInMercator,
+    })
+
+  /**
+   * Largest gap, in source pixels, between the texel the flat map draws at a
+   * point (texture coordinates interpolated linearly in Mercator, as the GPU
+   * does) and the texel that truly belongs there, over each triangle's
+   * centroid and edge midpoints.
+   */
+  function maxDrawnError(mesh: ReturnType<typeof createHybridMesh>): number {
+    const { x0, y0, x1, y1 } = mesh.meshBounds
+    const cx = (x0 + x1) / 2
+    const cy = (y0 + y1) / 2
+    const hx = (x1 - x0) / 2
+    const hy = (y1 - y0) / 2
+    const weights = [
+      [1 / 3, 1 / 3, 1 / 3],
+      [0.5, 0.5, 0],
+      [0.5, 0, 0.5],
+      [0, 0.5, 0.5],
+    ]
+    let max = 0
+    for (let t = 0; t < mesh.indices.length; t += 3) {
+      const ids = [mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2]]
+      for (const w of weights) {
+        let mx = 0
+        let my = 0
+        let u = 0
+        let v = 0
+        ids.forEach((id, k) => {
+          mx += w[k] * (cx + mesh.positions[id * 2] * hx)
+          my += w[k] * (cy + mesh.positions[id * 2 + 1] * hy)
+          u += w[k] * mesh.texCoords[id * 2]
+          v += w[k] * mesh.texCoords[id * 2 + 1]
+        })
+        const lon = mx * 360 - 180
+        const lat =
+          (Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) * 180) / Math.PI
+        const [sx, sy] = transformer.inverse(lon, lat)
+        const px =
+          ((sx - geoBounds.xMin) / (geoBounds.xMax - geoBounds.xMin)) * size
+        const py =
+          ((geoBounds.yMax - sy) / (geoBounds.yMax - geoBounds.yMin)) * size
+        max = Math.max(max, Math.hypot(px - u * size, py - v * size))
+      }
+    }
+    return max
+  }
+
+  it('bounds the drawn error on the flat map', () => {
+    expect(maxDrawnError(build(true))).toBeLessThan(0.15)
+  })
+
+  it('tightens a mesh refined against WGS84', () => {
+    const wgs84 = maxDrawnError(build(false))
+    expect(wgs84).toBeGreaterThan(0.25)
+    expect(maxDrawnError(build(true))).toBeLessThan(wgs84 / 2)
+  })
+
+  it('adds no vertices for EPSG:3857 data, already linear in Mercator', () => {
+    const merc = {
+      xMin: 0,
+      yMin: 5.0e6,
+      xMax: 2.0e6,
+      yMax: 7.0e6,
+    }
+    const t = createTransformerTo4326('EPSG:3857', [
+      merc.xMin,
+      merc.yMin,
+      merc.xMax,
+      merc.yMax,
+    ])
+    const options = {
+      geoBounds: merc,
+      width: 512,
+      height: 512,
+      lonSubdivisions: 8,
+      latSubdivisions: 8,
+      transformer: t,
+      latIsAscending: false,
+    }
+    const uniformVerts = 9 * 9
+    const refined = createHybridMesh({ ...options, refineInMercator: true })
+    const wgs84 = createHybridMesh({ ...options, refineInMercator: false })
+    expect(refined.positions.length / 2).toBeLessThan(uniformVerts + 8)
+    expect(wgs84.positions.length / 2).toBeGreaterThan(
+      refined.positions.length / 2
+    )
+  })
+
+  it('stays bounded over a pole', () => {
+    const polar = { xMin: -2.0e6, yMin: -2.0e6, xMax: 2.0e6, yMax: 2.0e6 }
+    const stere =
+      '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+    const options = {
+      geoBounds: polar,
+      width: 512,
+      height: 512,
+      lonSubdivisions: 8,
+      latSubdivisions: 8,
+      transformer: createTransformerTo4326(
+        stere,
+        [-2.0e6, -2.0e6, 2.0e6, 2.0e6]
+      ),
+      latIsAscending: false,
+    }
+    const refined = createHybridMesh({ ...options, refineInMercator: true })
+    const wgs84 = createHybridMesh({ ...options, refineInMercator: false })
+    expectValidMesh(refined)
+    expect(refined.positions.length).toBeLessThan(wgs84.positions.length * 1.5)
+  })
+})

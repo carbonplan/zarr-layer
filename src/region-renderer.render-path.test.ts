@@ -94,6 +94,7 @@ function seedRegion(renderer: RegionRenderer): RegionState {
     latMax: 85,
   }
   region.meshBounds = { x0: 0, y0: 0, x1: 1, y1: 1 }
+  region.texLatEdges = [85, -85]
   region.levelMeta = { width: 2, height: 2, regionSize: [2, 2] }
 
   const cache = (renderer as unknown as Seam).regionCache
@@ -210,6 +211,10 @@ const drawnWorldOffsets = (gl: ReturnType<typeof createRecordingGl>) =>
     .filter((call) => call.args[0] === 'u_worldXOffset')
     .map((call) => call.args[1])
 
+/** Whether the EPSG:4326 latitude lookup was on for the drawn region. */
+const latLookup = (gl: ReturnType<typeof createRecordingGl>) =>
+  gl.calls.find((call) => call.args[0] === 'u_latLookup')?.args[1]
+
 const eyeMatrixUpload = (gl: ReturnType<typeof createRecordingGl>) =>
   gl.calls.find((call) => call.args[0] === 'u_eye_matrix')?.args[1]
 
@@ -262,9 +267,8 @@ describe('MapLibre render path', () => {
 
   it('still draws in mercator when the driver drops the mercator-only uniforms', async () => {
     // The flat source-projected shader positions vertices from
-    // u_anchor_clip + deltaClip; shift_x/u_worldXOffset only feed
-    // v_mercatorPos.x, which the default fragment shader ignores.
-    // shift_y still feeds the fragment's Y reprojection; null is simulated here.
+    // u_anchor_clip + deltaClip; shift_x/shift_y/u_worldXOffset feed nothing
+    // the fragment shader reads.
     // The frame must draw anyway rather than throw out of render().
     const { gl, mode } = await frame((g) => maplibreContext(g, 0), {
       inactiveUniforms: ['shift_x', 'shift_y', 'u_worldXOffset'],
@@ -291,6 +295,18 @@ describe('MapLibre render path', () => {
     // per-region anchor is computed from it at full precision.
     const { gl } = await frame((g) => maplibreContext(g, 0))
     expect(eyeMatrixUpload(gl)).toEqual(new Float32Array(MAIN_MATRIX))
+  })
+
+  it('looks up EPSG:4326 latitude per fragment in mercator', async () => {
+    const { gl } = await frame((g) => maplibreContext(g, 0))
+    expect(latLookup(gl)).toBe(1)
+  })
+
+  it('samples mesh texture coordinates on the globe', async () => {
+    const { gl } = await frame((g) => maplibreContext(g, 0.5), {
+      isGlobe: true,
+    })
+    expect(latLookup(gl)).toBe(0)
   })
 
   it('uploads no eye matrix on the globe', async () => {
@@ -356,6 +372,19 @@ describe('Mapbox render path', () => {
     expect(drawnWorldOffsets(gl)).toEqual([0])
   })
 
+  it('looks up EPSG:4326 latitude per fragment in mercator', async () => {
+    const { gl } = await frame((g) => mapboxContext(g))
+    expect(latLookup(gl)).toBe(1)
+  })
+
+  it('samples mesh texture coordinates on the direct globe path', async () => {
+    const { gl } = await frame(
+      (g) => mapboxContext(g, { globe: true, directGlobePathActive: true }),
+      { isGlobe: true }
+    )
+    expect(latLookup(gl)).toBe(0)
+  })
+
   it('keeps world copies while draped in mercator', async () => {
     const { gl } = await frame((g) =>
       mapboxContext(g, { worldOffsets: [0, 1] })
@@ -393,7 +422,7 @@ describe('tile render path', () => {
 
     const calls = vi.mocked(stub.renderer.applyCommonUniforms).mock.calls
     const [, , , , , mapbox, matrix, tileRender] = calls[calls.length - 1]
-    return { mapbox, matrix: matrix as Float32Array, tileRender, stub }
+    return { mapbox, matrix: matrix as Float32Array, tileRender, stub, gl }
   }
 
   const project = (m: Float32Array, x: number, y: number) => [
@@ -429,6 +458,12 @@ describe('tile render path', () => {
     expect(mapbox?.projection.name).toBe('mercator')
     expect(tileRender).toBe(true)
     expect(stub.mode()).toBe('mapbox-proj4')
+  })
+
+  it('looks up EPSG:4326 latitude per fragment on a globe tile', async () => {
+    // Draped tiles are Mercator textures whatever surface they land on.
+    const { gl } = await tile(false, { isGlobe: true, contextIsGlobe: true })
+    expect(latLookup(gl)).toBe(1)
   })
 
   it('keeps the globe blend for a Mapbox globe tile', async () => {
