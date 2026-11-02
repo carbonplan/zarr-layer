@@ -529,31 +529,24 @@ export class RegionFetcher {
         }
 
         let bandData = band
+        const scaled = scaleFactor !== 1 || addOffset !== 0
 
-        // Apply scale/offset if needed (converts raw to physical values)
-        if (scaleFactor !== 1 || addOffset !== 0) {
-          const scaled = new Float32Array(bandData.length)
-          for (let i = 0; i < bandData.length; i++) {
-            const raw = bandData[i]
-            // Scale all values including fill - normalizeDataForTexture will filter by scaled fill
-            if (!Number.isFinite(raw)) {
-              scaled[i] = raw // Keep NaN/Inf as-is
-            } else {
-              scaled[i] = raw * scaleFactor + addOffset
-            }
+        // The fill is matched on the raw value: float32 cannot hold the
+        // scaled fill exactly, so scaled data never equals it.
+        if (scaled) {
+          bandData = new Float32Array(band.length)
+          for (let i = 0; i < band.length; i++) {
+            const raw = band[i]
+            bandData[i] =
+              raw === fillValue || !Number.isFinite(raw)
+                ? NaN
+                : raw * scaleFactor + addOffset
           }
-          bandData = scaled
         }
-
-        // Compute the fill value in the same space as the data
-        const effectiveFillValue =
-          fillValue !== null && (scaleFactor !== 1 || addOffset !== 0)
-            ? fillValue * scaleFactor + addOffset
-            : fillValue
 
         const { normalized: bandNormalized } = normalizeDataForTexture(
           bandData,
-          effectiveFillValue,
+          scaled ? null : fillValue,
           this.context.fixedDataScale
         )
         region.bandData.set(bandName, bandNormalized)

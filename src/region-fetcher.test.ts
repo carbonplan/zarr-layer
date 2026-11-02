@@ -84,7 +84,8 @@ function makeMultiBandStore(
 function makeMemoryStore(
   attributes: Record<string, unknown> = {},
   dtype?: ArraySpec['dtype'],
-  fillValue?: number
+  fillValue?: number,
+  firstChunk: number[] = chunkData(0, 0)
 ) {
   return buildMemoryZarrStore({
     arrays: [
@@ -97,7 +98,7 @@ function makeMemoryStore(
         dtype,
         fillValue,
         chunks: {
-          '0/0': chunkData(0, 0),
+          '0/0': firstChunk,
           '0/1': chunkData(0, 1),
           '1/0': chunkData(1, 0),
           '1/1': chunkData(1, 1),
@@ -113,6 +114,8 @@ async function makeHarness(
     gateReads?: boolean
     dtype?: ArraySpec['dtype']
     fillValue?: number
+    /** Data of chunk (0, 0) of a single-band array, in place of the ramp. */
+    firstChunk?: number[]
     bandTextures?: boolean
     /** Chunk reads whose key passes this throw, as a failing server would. */
     failReads?: (key: string) => boolean
@@ -132,7 +135,12 @@ async function makeHarness(
         opts.attributes,
         opts.fillValue
       )
-    : makeMemoryStore(opts.attributes, opts.dtype, opts.fillValue)
+    : makeMemoryStore(
+        opts.attributes,
+        opts.dtype,
+        opts.fillValue,
+        opts.firstChunk
+      )
   let releaseReads = () => {}
   const readsReleased = new Promise<void>((res) => {
     releaseReads = res
@@ -358,6 +366,40 @@ describe('RegionFetcher', () => {
     expect(Array.from(region.data!)).toEqual(
       chunkData(0, 0).map((v) => v * 2 + 10)
     )
+  })
+
+  describe('masks the raw fill value of scaled data', () => {
+    // float32 cannot hold the scaled fill exactly, so only a comparison of
+    // the raw value finds it.
+    const cases: {
+      dtype: ArraySpec['dtype']
+      fill: number
+      scale: number
+      offset: number
+    }[] = [
+      { dtype: 'int16', fill: -32768, scale: 1e-4, offset: 0 },
+      { dtype: 'float32', fill: -9999, scale: 0.01, offset: 273.15 },
+    ]
+
+    for (const { dtype, fill, scale, offset } of cases) {
+      it(`${dtype} with fill ${fill}`, async () => {
+        const firstChunk = chunkData(0, 0).map((v) => (v === 0 ? fill : v))
+        const { fetcher, cache } = await makeHarness({
+          dtype,
+          fillValue: fill,
+          firstChunk,
+          attributes: { scale_factor: scale, add_offset: offset },
+        })
+        await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
+
+        const region = cache.get(makeRegionKey(0, 0, 0))!
+        expect(Array.from(region.data!)).toEqual(
+          firstChunk.map((v) =>
+            v === fill ? NaN : Math.fround(v * scale + offset)
+          )
+        )
+      })
+    }
   })
 
   it('regenerates geometry when a refetch changes the region size', async () => {
