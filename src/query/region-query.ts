@@ -92,9 +92,9 @@ export interface ResultBuilder {
  * Accumulate per-pixel samples from one fetched window into the
  * carbonplan/maps result shape: { [variable]: values, dimensions, coordinates }.
  *
- * Missing (NaN) values are left out. Results nest by
- * channel label when the selector holds more than one value along any
- * non-spatial dimension.
+ * Cells with no finite value are left out; a multi-channel cell missing some
+ * channels keeps NaN in their place. Results nest by channel label when the
+ * selector holds more than one value along any non-spatial dimension.
  */
 export function createResultBuilder(
   params: ResultBuilderParams

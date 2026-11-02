@@ -356,12 +356,6 @@ describe('queryData', () => {
   })
 })
 
-/**
- * Merge semantics for antimeridian two-strip queries: west-strip pixels then
- * east-strip pixels, spatial coordinate arrays concatenated, non-spatial
- * coordinates taken from the first strip.
- */
-
 describe('queryData — missing values', () => {
   const world = rect(-180, -90, 180, 90)
   // The time-10 plane of the ramp, without pixel (0, 0).
@@ -460,6 +454,11 @@ describe('queryData with a per-level extent', () => {
   })
 })
 
+/**
+ * Merge semantics for antimeridian two-strip queries: west-strip pixels then
+ * east-strip pixels, spatial coordinate arrays concatenated, non-spatial
+ * coordinates taken from the first strip.
+ */
 describe('mergeQueryResults', () => {
   it('concatenates values and spatial coordinates', () => {
     const west: QueryResult = {
