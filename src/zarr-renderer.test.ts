@@ -7,9 +7,6 @@ import { createRecordingGl, FAKE_SHADER_DATA } from './__fixtures__/fake-gl'
 const uniforms: RendererUniforms = {
   clim: [0, 1],
   opacity: 1,
-  fillValue: null,
-  scaleFactor: 1,
-  offset: 0,
   fixedDataScale: 1,
 }
 

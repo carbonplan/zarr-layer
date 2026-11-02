@@ -124,15 +124,6 @@ export class ZarrRenderer {
     }
 
     gl.uniform1f(shaderProgram.opacityLoc, uniforms.opacity)
-    if (shaderProgram.fillValueLoc) {
-      gl.uniform1f(shaderProgram.fillValueLoc, uniforms.fillValue ?? NaN)
-    }
-    if (shaderProgram.scaleFactorLoc) {
-      gl.uniform1f(shaderProgram.scaleFactorLoc, uniforms.scaleFactor)
-    }
-    if (shaderProgram.addOffsetLoc) {
-      gl.uniform1f(shaderProgram.addOffsetLoc, uniforms.offset)
-    }
     if (shaderProgram.dataScaleLoc) {
       gl.uniform1f(shaderProgram.dataScaleLoc, uniforms.fixedDataScale)
     }

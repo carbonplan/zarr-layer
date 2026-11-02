@@ -116,6 +116,8 @@ async function makeHarness(
     fillValue?: number
     /** Data of chunk (0, 0) of a single-band array, in place of the ramp. */
     firstChunk?: number[]
+    /** The layer's `fillValue` option. */
+    fillValueOption?: number
     bandTextures?: boolean
     /** Chunk reads whose key passes this throw, as a failing server would. */
     failReads?: (key: string) => boolean
@@ -215,6 +217,7 @@ async function makeHarness(
     xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
     latIsAscending: false,
     fixedDataScale: 1,
+    fillValue: opts.fillValueOption ?? null,
     regionCache: cache,
     requestCanceller,
     loadingDebouncer: {
@@ -368,9 +371,10 @@ describe('RegionFetcher', () => {
     )
   })
 
-  describe('masks the raw fill value of scaled data', () => {
-    // float32 cannot hold the scaled fill exactly, so only a comparison of
-    // the raw value finds it.
+  describe('masks missing data', () => {
+    // Each fill is one float32 rounding cannot carry through: a scaled fill,
+    // a float32 fill written with too few digits, a float64 fill float32
+    // cannot hold.
     const cases: {
       dtype: ArraySpec['dtype']
       fill: number
@@ -379,10 +383,12 @@ describe('RegionFetcher', () => {
     }[] = [
       { dtype: 'int16', fill: -32768, scale: 1e-4, offset: 0 },
       { dtype: 'float32', fill: -9999, scale: 0.01, offset: 273.15 },
+      { dtype: 'float32', fill: 9.96921e36, scale: 1, offset: 0 },
+      { dtype: 'float64', fill: 1e20, scale: 1, offset: 0 },
     ]
 
     for (const { dtype, fill, scale, offset } of cases) {
-      it(`${dtype} with fill ${fill}`, async () => {
+      it(`of ${dtype} with fill ${fill}, scale ${scale}`, async () => {
         const firstChunk = chunkData(0, 0).map((v) => (v === 0 ? fill : v))
         const { fetcher, cache } = await makeHarness({
           dtype,
@@ -400,6 +406,51 @@ describe('RegionFetcher', () => {
         )
       })
     }
+
+    it('of infinite values', async () => {
+      const firstChunk = chunkData(0, 0)
+      firstChunk[1] = Infinity
+      firstChunk[2] = -Infinity
+      const { fetcher, cache } = await makeHarness({ firstChunk })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
+
+      const data = cache.get(makeRegionKey(0, 0, 0))!.data!
+      expect(Array.from(data.slice(0, 4))).toEqual([0, NaN, NaN, 3])
+    })
+
+    it("at the layer's fillValue in place of the store's", async () => {
+      const { fetcher, cache } = await makeHarness({
+        fillValue: 0,
+        fillValueOption: 2,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
+
+      const data = cache.get(makeRegionKey(0, 0, 0))!.data!
+      expect(Array.from(data.slice(0, 4))).toEqual([0, 1, NaN, 3])
+    })
+
+    it('nowhere on a level that declares no fill', async () => {
+      const { fetcher, cache, context } = await makeHarness({ fillValue: 0 })
+      context.levels.push({ asset: 'temperature', fillValue: null })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
+
+      const data = cache.get(makeRegionKey(0, 0, 0))!.data!
+      expect(data[0]).toBe(0)
+    })
+
+    it("in the shader, at the layer's fillValue, for raw integer bands", async () => {
+      const { fetcher, cache } = await makeHarness({
+        dtype: 'int16',
+        fillValue: -1,
+        fillValueOption: 3,
+        attributes: { scale_factor: 2 },
+        bandTextures: true,
+      })
+      await fetcher.fetchRegions([{ regionX: 0, regionY: 0 }], 0)
+
+      const region = cache.get(makeRegionKey(0, 0, 0))!
+      expect(region.bandTransform).toEqual({ scale: 2, offset: 0, fill: 3 })
+    })
   })
 
   it('regenerates geometry when a refetch changes the region size', async () => {
@@ -772,6 +823,7 @@ describe('RegionFetcher', () => {
       xyLimits: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
       latIsAscending: false,
       fixedDataScale: 1,
+      fillValue: null,
       regionCache: cache,
       requestCanceller: createRequestCanceller(),
       loadingDebouncer: { show: () => {}, hide: () => {} },

@@ -106,18 +106,6 @@ export type AreaQueryGeometry =
 export type QueryGeometry = AreaQueryGeometry | GeoJSONLineString
 
 /**
- * Transform options for query results to match rendered values.
- */
-export interface QueryTransformOptions {
-  /** Scale factor to apply: value * scaleFactor */
-  scaleFactor?: number
-  /** Offset to add: value + addOffset (applied after scaleFactor) */
-  addOffset?: number
-  /** Fill value to filter out (along with NaN/Infinity) */
-  fillValue?: number | null
-}
-
-/**
  * Options for queryData calls.
  */
 /**

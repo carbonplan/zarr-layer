@@ -441,16 +441,13 @@ const FRAGMENT_SAMPLE_COORD = `
 `
 
 /**
- * Fragment shader for tile rendering with colormap and fillValue handling.
+ * Fragment shader for tile rendering with a colormap. Fill values arrive as NaN.
  */
 export const maplibreFragmentShaderSource = `#version 300 es
 precision highp float;
 
 uniform vec2 clim;
 uniform float opacity;
-uniform float fillValue;
-uniform float u_scaleFactor;
-uniform float u_addOffset;
 uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
@@ -473,17 +470,11 @@ ${FRAGMENT_CLIP}
 ${FRAGMENT_SAMPLE_COORD}
   float texVal = texture(tex, sample_coord).r;
 
-  // NaN check (fill values converted to NaN during normalization)
   if (isnan(texVal)) {
     discard;
   }
 
-  float raw = texVal * u_dataScale;
-  float value = raw * u_scaleFactor + u_addOffset;
-
-  if (isnan(value)) {
-    discard;
-  }
+  float value = texVal * u_dataScale;
 
   float rescaled = (value - clim.x) / (clim.y - clim.x);
   vec4 c = texture(cmap, vec2(rescaled, 0.5));
@@ -588,7 +579,7 @@ export function createFragmentShaderSource(
     .map((name, layer) =>
       native
         ? `  float ${name}_tex = zl_readBand(sample_coord, ${layer}.0);\n  float ${name}_raw = ${name}_tex;\n  float ${name}_val = ${name}_raw * u_bandScale + u_bandOffset;`
-        : `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw * u_scaleFactor + u_addOffset;`
+        : `  float ${name}_tex = texture(${BAND_SAMPLER}, vec3(sample_coord, ${layer}.0)).r;\n  float ${name}_raw = ${name}_tex * u_dataScale;\n  float ${name}_val = ${name}_raw;`
     )
     .join('\n')
 
@@ -606,9 +597,6 @@ precision highp ${samplerType};
 
 uniform float opacity;
 uniform vec2 clim;
-uniform float fillValue;
-uniform float u_scaleFactor;
-uniform float u_addOffset;
 uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;

@@ -85,8 +85,8 @@ describe('queryRegion — coverage', () => {
 })
 
 describe('queryRegion — value handling', () => {
-  it('filters fill values / NaN and applies scale + offset', () => {
-    const data = new Float32Array([10, -9999, 20, NaN]) // 2x2, row-major
+  it('leaves out missing and infinite values', () => {
+    const data = new Float64Array([21, NaN, 41, Infinity]) // 2x2, row-major
     const result = queryRegion(
       'v',
       rect(-180, -90, 180, 90),
@@ -101,33 +101,9 @@ describe('queryRegion — value handling', () => {
       1,
       undefined,
       undefined,
-      false,
-      { scaleFactor: 2, addOffset: 1, fillValue: -9999 }
+      false
     )
-    // 10*2+1 = 21, 20*2+1 = 41; -9999 (fill) and NaN dropped.
     expect(result.v).toEqual([21, 41])
-  })
-
-  it('drops a value that scale and offset push out of the finite range', () => {
-    const data = new Float32Array([1, 3e38]) // 2x1
-    const result = queryRegion(
-      'v',
-      rect(-180, -90, 180, 90),
-      {},
-      data,
-      2,
-      1,
-      ['lat', 'lon'],
-      {},
-      WORLD,
-      'EPSG:4326',
-      1,
-      undefined,
-      undefined,
-      false,
-      { scaleFactor: 1e300 }
-    )
-    expect(result.v).toEqual([1e300])
   })
 
   it('keeps multi-value series aligned with coordinates when a cell is fill in only some', () => {

@@ -15,7 +15,8 @@ import {
   isNativeBandArray,
   type BandArray,
 } from './band-format'
-import { interleaveBands, normalizeDataForTexture } from './webgl-utils'
+import { interleaveBands } from './webgl-utils'
+import { decodeValues, resolveValueTransform } from './value-transform'
 import {
   type ChunkLoadingDebouncer,
   type RequestCanceller,
@@ -135,6 +136,8 @@ export type RegionFetcherContext = {
   xyLimits: XYLimits | null
   latIsAscending: boolean
   fixedDataScale: number
+  /** The layer's `fillValue` option, which replaces the store's fill. */
+  fillValue: number | null
   regionCache: RegionCache
   requestCanceller: RequestCanceller
   loadingDebouncer: ChunkLoadingDebouncer
@@ -369,8 +372,13 @@ export class RegionFetcher {
 
       const desc = this.context.zarrStore.describe()
       // Use per-level metadata if available (for heterogeneous pyramids)
-      const currentLevel = this.context.levels[snapshot.index]
-      const fillValue = currentLevel?.fillValue ?? desc.fill_value
+      const dtype = snapshot.zarrArray.dtype
+      const transform = resolveValueTransform(
+        dtype,
+        this.context.levels[snapshot.index],
+        desc,
+        this.context.fillValue
+      )
 
       const { combinations: channelCombinations } = buildChannelCombinations(
         snapshot.baseMultiValueDims
@@ -378,7 +386,7 @@ export class RegionFetcher {
       const numChannels = channelCombinations.length || 1
       // Only typed numeric arrays split into band views; bool arrays are
       // read band by band.
-      const contiguousRange = NUMERIC_DTYPES.has(snapshot.zarrArray.dtype)
+      const contiguousRange = NUMERIC_DTYPES.has(dtype)
         ? contiguousBandRange(
             snapshot.baseMultiValueDims,
             baseSliceArgs,
@@ -387,14 +395,19 @@ export class RegionFetcher {
         : null
 
       // Band-sampling shaders read small integer dtypes straight from
-      // integer textures; everything else is converted to float32 here.
+      // integer textures and transform them themselves; everything else is
+      // transformed here, from the stored dtype, into float32.
       const native =
-        this.context.usesBandTextures() &&
-        bandFormatForDtype(snapshot.zarrArray.dtype) !== 'float'
+        this.context.usesBandTextures() && bandFormatForDtype(dtype) !== 'float'
       const toBand = (data: ArrayLike<number>): BandArray =>
         native && isNativeBandArray(data)
           ? data
-          : new Float32Array(data as ArrayLike<number>)
+          : decodeValues(
+              data,
+              transform,
+              new Float32Array(data.length),
+              this.context.fixedDataScale
+            )
 
       // Fetch data for all channels
       const bandArrays: BandArray[] = []
@@ -503,11 +516,6 @@ export class RegionFetcher {
           this.context.computeRegionMercatorBounds(geoBounds)
       }
 
-      // Apply per-level scale/offset to convert raw values to physical units
-      // Fall back to dataset-level scale/offset for pyramids that only define them at the root
-      const scaleFactor = currentLevel?.scaleFactor ?? desc.scaleFactor
-      const addOffset = currentLevel?.addOffset ?? desc.addOffset
-
       region.bandData.clear()
       region.bandTextureKey = null
       region.bandTransform = null
@@ -516,41 +524,10 @@ export class RegionFetcher {
       for (let c = 0; c < bandArrays.length; c++) {
         const bandName = snapshot.bandNames[c] || `band_${c}`
         const band = bandArrays[c]
-
+        region.bandData.set(bandName, band)
         // Raw integers are transformed in the shader, per region.
-        if (!(band instanceof Float32Array)) {
-          region.bandData.set(bandName, band)
-          region.bandTransform = {
-            scale: scaleFactor,
-            offset: addOffset,
-            fill: fillValue,
-          }
-          continue
-        }
-
-        let bandData = band
-        const scaled = scaleFactor !== 1 || addOffset !== 0
-
-        // The fill is matched on the raw value: float32 cannot hold the
-        // scaled fill exactly, so scaled data never equals it.
-        if (scaled) {
-          bandData = new Float32Array(band.length)
-          for (let i = 0; i < band.length; i++) {
-            const raw = band[i]
-            bandData[i] =
-              raw === fillValue || !Number.isFinite(raw)
-                ? NaN
-                : raw * scaleFactor + addOffset
-          }
-        }
-
-        const { normalized: bandNormalized } = normalizeDataForTexture(
-          bandData,
-          scaled ? null : fillValue,
-          this.context.fixedDataScale
-        )
-        region.bandData.set(bandName, bandNormalized)
-        normalizedBands.push(bandNormalized)
+        if (band instanceof Float32Array) normalizedBands.push(band)
+        else region.bandTransform = transform
       }
 
       // Interleaved data exists only to feed the main texture. Band-sampling

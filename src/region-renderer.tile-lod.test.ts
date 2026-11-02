@@ -300,6 +300,7 @@ async function makeRenderer({
     1,
     grown ? 128 : 0,
     undefined,
+    null,
     limits
   )
   await renderer.initialize()

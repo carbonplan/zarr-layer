@@ -13,7 +13,6 @@ import type {
   QueryOptions,
   QueryResult,
   QueryDataValues,
-  QueryTransformOptions,
 } from './types'
 import {
   transformGeometryToPixelSpace,
@@ -51,35 +50,16 @@ function checkAborted(signal?: AbortSignal) {
   }
 }
 
-/**
- * Apply scale_factor/add_offset transforms and filter invalid values.
- * Returns null if value should be filtered out.
- */
-function transformValue(
-  value: number,
-  transforms?: QueryTransformOptions
-): number | null {
-  if (!Number.isFinite(value)) return null
-
-  if (transforms?.fillValue !== undefined && transforms.fillValue !== null) {
-    if (value === transforms.fillValue) return null
-  }
-
-  let result = value
-  if (transforms?.scaleFactor !== undefined && transforms.scaleFactor !== 1) {
-    result *= transforms.scaleFactor
-  }
-  if (transforms?.addOffset !== undefined && transforms.addOffset !== 0) {
-    result += transforms.addOffset
-  }
-
-  return Number.isFinite(result) ? result : null
+/** Missing values arrive as NaN; nothing non-finite is reported. */
+function valueOrNull(value: number): number | null {
+  return Number.isFinite(value) ? value : null
 }
 
 export interface ResultBuilderParams {
   variable: string
   selector: Selector
-  data: Float32Array
+  /** Values already transformed, with missing values as NaN. */
+  data: Float32Array | Float64Array
   width: number
   height: number
   dimensions: string[]
@@ -89,7 +69,6 @@ export interface ResultBuilderParams {
   channelLabels?: (string | number)[][]
   multiValueDimNames?: string[]
   latIsAscending?: boolean
-  transforms?: QueryTransformOptions
   includeSpatialCoordinates: boolean
   dimIndices?: DimIndicesProps
 }
@@ -113,7 +92,7 @@ export interface ResultBuilder {
  * Accumulate per-pixel samples from one fetched window into the
  * carbonplan/maps result shape: { [variable]: values, dimensions, coordinates }.
  *
- * Values are scale/offset transformed and fill filtered. Results nest by
+ * Missing (NaN) values are left out. Results nest by
  * channel label when the selector holds more than one value along any
  * non-spatial dimension.
  */
@@ -133,7 +112,6 @@ export function createResultBuilder(
     channelLabels,
     multiValueDimNames,
     latIsAscending,
-    transforms,
     includeSpatialCoordinates,
     dimIndices,
   } = params
@@ -211,11 +189,11 @@ export function createResultBuilder(
     const baseIndex = (y * width + x) * channels
 
     if (channels === 1 && !useNestedResults) {
-      const transformed = transformValue(data[baseIndex], transforms)
-      if (transformed === null) return false
+      const value = valueOrNull(data[baseIndex])
+      if (value === null) return false
 
       if (includeSpatialCoordinates) emitCoords(x, y)
-      ;(results as number[]).push(transformed)
+      ;(results as number[]).push(value)
       return true
     }
 
@@ -224,9 +202,9 @@ export function createResultBuilder(
     const values: number[] = new Array(channels)
     let hasValid = false
     for (let c = 0; c < channels; c++) {
-      const transformed = transformValue(data[baseIndex + c], transforms)
-      values[c] = transformed ?? NaN
-      if (transformed !== null) hasValid = true
+      const value = valueOrNull(data[baseIndex + c])
+      values[c] = value ?? NaN
+      if (value !== null) hasValid = true
     }
     if (!hasValid) return false
 
@@ -290,7 +268,7 @@ export function queryRegion(
   variable: string,
   geometry: AreaQueryGeometry,
   selector: Selector,
-  data: Float32Array | null,
+  data: Float32Array | Float64Array | null,
   width: number,
   height: number,
   dimensions: string[],
@@ -301,7 +279,6 @@ export function queryRegion(
   channelLabels?: (string | number)[][],
   multiValueDimNames?: string[],
   latIsAscending?: boolean,
-  transforms?: QueryTransformOptions,
   options?: QueryOptions,
   dimIndices?: DimIndicesProps,
   cachedTransformer?: CachedTransformer
@@ -321,7 +298,6 @@ export function queryRegion(
     channelLabels,
     multiValueDimNames,
     latIsAscending,
-    transforms,
     includeSpatialCoordinates,
     dimIndices,
   })

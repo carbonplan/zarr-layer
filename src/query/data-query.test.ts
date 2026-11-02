@@ -9,7 +9,12 @@ import {
 import type { NestedValues, QueryGeometry, QueryResult } from './types'
 import { ZarrStore } from '../zarr-store'
 import { createProjectionContext } from '../projection-utils'
-import { buildMemoryZarrStore, ramp } from '../__fixtures__/memory-zarr'
+import {
+  buildMemoryZarrStore,
+  ramp,
+  type ArraySpec,
+} from '../__fixtures__/memory-zarr'
+import { rect } from '../__fixtures__/geometry'
 import { normalizeSelector } from '../zarr-utils'
 import { SelectorResolutionError } from '../selector-resolution'
 
@@ -31,9 +36,16 @@ async function makeQueryHarness(
     gateReads?: boolean
     failReads?: boolean
     xyLimits?: typeof WORLD
+    dtype?: ArraySpec['dtype']
+    fillValue?: number
+    attributes?: Record<string, unknown>
+    /** Value stored at pixel (0, 0) of the first time plane. */
+    firstValue?: number
   } = {}
 ) {
   const xyLimits = opts.xyLimits ?? WORLD
+  const data = ramp(2 * 4 * 8)
+  if (opts.firstValue !== undefined) data[0] = opts.firstValue
   const memory = buildMemoryZarrStore({
     arrays: [
       {
@@ -41,7 +53,10 @@ async function makeQueryHarness(
         shape: [2, 4, 8],
         chunkShape: [2, 4, 8],
         dimensionNames: ['time', 'lat', 'lon'],
-        chunks: { '0/0/0': ramp(2 * 4 * 8) },
+        dtype: opts.dtype,
+        fillValue: opts.fillValue,
+        attributes: opts.attributes,
+        chunks: { '0/0/0': data },
       },
       {
         name: 'time',
@@ -103,6 +118,7 @@ async function makeQueryHarness(
     isMultiscale: false,
     coordLevelIndex: 0,
     warnedDimensions: new Set(),
+    fillValue: null,
   }
 
   return { context, releaseReads }
@@ -345,6 +361,40 @@ describe('queryData', () => {
  * east-strip pixels, spatial coordinate arrays concatenated, non-spatial
  * coordinates taken from the first strip.
  */
+
+describe('queryData — missing values', () => {
+  const world = rect(-180, -90, 180, 90)
+  // The time-10 plane of the ramp, without pixel (0, 0).
+  const rest = ramp(32).slice(1)
+
+  it('drops the raw fill of scaled data and keeps full precision', async () => {
+    const { context } = await makeQueryHarness({
+      dtype: 'int16',
+      fillValue: -32768,
+      firstValue: -32768,
+      attributes: { scale_factor: 1e-4 },
+    })
+    const result = await queryData(context, world, { time: 10 })
+    expect(result.temp).toEqual(rest.map((v) => v * 1e-4))
+  })
+
+  it('drops a float32 fill written with fewer digits than float32 holds', async () => {
+    const { context } = await makeQueryHarness({
+      fillValue: 9.96921e36,
+      firstValue: 9.96921e36,
+    })
+    const result = await queryData(context, world, { time: 10 })
+    expect(result.temp).toEqual(rest)
+  })
+
+  it("drops the layer's fillValue in place of the store's", async () => {
+    const { context } = await makeQueryHarness({ fillValue: 5 })
+    const result = await queryData({ ...context, fillValue: 0 }, world, {
+      time: 10,
+    })
+    expect(result.temp).toEqual(rest)
+  })
+})
 
 describe('queryData with a per-level extent', () => {
   it('maps through the level extent rather than the dataset one', async () => {
@@ -619,6 +669,7 @@ describe('queryData — query selector over the layer selector', () => {
       isMultiscale: false,
       coordLevelIndex: 0,
       warnedDimensions: new Set(),
+      fillValue: null,
     }
   }
 

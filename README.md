@@ -120,7 +120,7 @@ map.on('load', () => {
 | zarrVersion | `2` \| `3` | auto | Zarr format version (tries v3 first, falls back to v2) |
 | minzoom | number | `0` | Minimum zoom level for rendering |
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
-| fillValue | number | auto | No-data value (from metadata if not set) |
+| fillValue | number | auto | Stored value treated as no data, in place of the metadata `fill_value`. Compared with raw values, before `scale_factor`/`add_offset`. Cleared by `setVariable` |
 | maxRegionFetches | number | `16` | Region fetches in flight at once; the rest wait in a queue, nearest the viewport center first. Raise it for viewports of many small, quick regions |
 | minRegionSize | number | one chunk | Smallest region, in pixels per axis, loaded and drawn as a unit. Regions are whole numbers of chunks, so this groups small chunks into fewer, larger regions. Growth stops at 2048 px per axis |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |

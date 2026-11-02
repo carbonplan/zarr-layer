@@ -122,6 +122,11 @@ export interface ZarrLayerOptions {
    */
   crs?: string
   latIsAscending?: boolean | null
+  /**
+   * Stored value that marks missing data, in place of the store's
+   * `fill_value`. Compared with raw values, before `scale_factor` and
+   * `add_offset`. Applies to the initial variable only.
+   */
   fillValue?: number
   /**
    * Smallest region, in pixels per axis, the layer loads and draws as a unit.

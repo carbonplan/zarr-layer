@@ -150,9 +150,6 @@ function stubRenderer(gl: ReturnType<typeof createRecordingGl>) {
 const uniforms: RenderContext['uniforms'] = {
   clim: [0, 1],
   opacity: 1,
-  fillValue: null,
-  scaleFactor: 1,
-  offset: 0,
   fixedDataScale: 1,
 }
 

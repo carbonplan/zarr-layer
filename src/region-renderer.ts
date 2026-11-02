@@ -284,6 +284,8 @@ export class RegionRenderer {
   private isGlobeProjection: boolean = false
   // Fixed data scale for normalization (set at initialization, passed from ZarrLayer)
   private fixedDataScale: number = 1
+  // The layer's `fillValue` option, which replaces the store's fill.
+  private fillValue: number | null
   private minRegionSize: number
 
   constructor(
@@ -294,8 +296,10 @@ export class RegionRenderer {
     fixedDataScale: number = 1,
     minRegionSize: number = 0,
     maxRegionFetches: number = MAX_ACTIVE_REGION_FETCHES,
+    fillValue: number | null = null,
     cacheLimits: Partial<RegionCacheLimits> = {}
   ) {
+    this.fillValue = fillValue
     this.regionCache = new RegionCache(cacheLimits)
     this.minRegionSize = minRegionSize
     this.requestCanceller = createRequestCanceller(maxRegionFetches)
@@ -565,19 +569,6 @@ export class RegionRenderer {
     regionY: number
   ): string {
     return makeRegionKey(levelIndex, regionX, regionY)
-  }
-
-  /**
-   * Get uniforms for rendering with scale/offset disabled.
-   * Per-level scale/offset is applied in JS while a region is fetched, so the
-   * shader is told to skip its own scale/offset application.
-   */
-  private getUniformsForRender(contextUniforms: RenderContext['uniforms']) {
-    return {
-      ...contextUniforms,
-      scaleFactor: 1.0,
-      offset: 0.0,
-    }
   }
 
   /**
@@ -1736,6 +1727,7 @@ export class RegionRenderer {
       xyLimits: this.xyLimits,
       latIsAscending: this.latIsAscending,
       fixedDataScale: this.fixedDataScale,
+      fillValue: this.fillValue,
       regionCache: this.regionCache,
       requestCanceller: this.requestCanceller,
       loadingDebouncer: this.loadingDebouncer,
@@ -1872,7 +1864,7 @@ export class RegionRenderer {
     renderer.applyCommonUniforms(
       shaderProgram,
       context.colormapTexture,
-      this.getUniformsForRender(context.uniforms),
+      context.uniforms,
       context.customShaderConfig,
       context.projectionData,
       context.mapbox,
@@ -2008,7 +2000,6 @@ export class RegionRenderer {
       tileId: tile.tileId,
       context: {
         ...context,
-        uniforms: this.getUniformsForRender(context.uniforms),
         customShaderConfig: this.shaderConfigForLevel(
           context.customShaderConfig
         ),
@@ -2254,6 +2245,7 @@ export class RegionRenderer {
         isMultiscale: this.isMultiscale,
         coordLevelIndex: level?.index ?? 0,
         warnedDimensions: this.warnedCoordDimensions,
+        fillValue: this.fillValue,
       },
       geometry,
       selector,

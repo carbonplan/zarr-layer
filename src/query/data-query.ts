@@ -42,6 +42,11 @@ import {
   type TracedCell,
 } from './line-query'
 import { QUERY_LINE_RUN_MAX_PX } from '../constants'
+import {
+  decodeValues,
+  resolveValueTransform,
+  type ValueTransform,
+} from '../value-transform'
 import type {
   AreaQueryGeometry,
   NestedValues,
@@ -49,7 +54,6 @@ import type {
   QueryGeometry,
   QueryOptions,
   QueryResult,
-  QueryTransformOptions,
 } from './types'
 
 const DEFAULT_LINE_DISTANCE_KEY = 'distance'
@@ -90,11 +94,14 @@ export type QueryContext = {
   coordLevelIndex: number
   /** Dimensions already warned about after coordinate-read failures. */
   warnedDimensions: Set<string>
+  /** The layer's `fillValue` option, which replaces the store's fill. */
+  fillValue: number | null
 }
 
 /**
  * Unified method to fetch query data for either point or region queries.
- * Handles multi-value dimensions and channel combinations.
+ * Handles multi-value dimensions and channel combinations. Values come back
+ * transformed, with missing values as NaN.
  */
 export async function fetchQueryData(
   context: QueryContext,
@@ -106,9 +113,10 @@ export async function fetchQueryData(
     minY: number
     maxY: number
   },
+  transform: ValueTransform,
   signal?: AbortSignal
 ): Promise<{
-  data: Float32Array
+  data: Float64Array
   width: number
   height: number
   channels: number
@@ -154,7 +162,11 @@ export async function fetchQueryData(
         getOpts
       )) as { data: ArrayLike<number> }
       return {
-        data: new Float32Array(result.data),
+        data: decodeValues(
+          result.data,
+          transform,
+          new Float64Array(result.data.length)
+        ),
         width: fetchWidth,
         height: fetchHeight,
         channels: 1,
@@ -163,7 +175,9 @@ export async function fetchQueryData(
       }
     }
 
-    const packedData = new Float32Array(fetchWidth * fetchHeight * numChannels)
+    const pixelCount = fetchWidth * fetchHeight
+    const packedData = new Float64Array(pixelCount * numChannels)
+    const band = new Float64Array(pixelCount)
     for (let c = 0; c < numChannels; c++) {
       const sliceArgs = [...baseSliceArgs]
       const combo = channelCombinations[c]
@@ -176,8 +190,9 @@ export async function fetchQueryData(
         sliceArgs,
         getOpts
       )) as { data: ArrayLike<number> }
-      for (let pixIdx = 0; pixIdx < fetchWidth * fetchHeight; pixIdx++) {
-        packedData[pixIdx * numChannels + c] = bandData.data[pixIdx]
+      decodeValues(bandData.data, transform, band)
+      for (let pixIdx = 0; pixIdx < pixelCount; pixIdx++) {
+        packedData[pixIdx * numChannels + c] = band[pixIdx]
       }
     }
 
@@ -244,12 +259,12 @@ export async function queryData(
   const projectionDef = context.projection.def
   if (!projectionDef) return emptyResult()
 
-  const currentLevel = context.levels[level.index]
-  const transforms = {
-    scaleFactor: currentLevel?.scaleFactor ?? desc.scaleFactor,
-    addOffset: currentLevel?.addOffset ?? desc.addOffset,
-    fillValue: currentLevel?.fillValue ?? desc.fill_value,
-  }
+  const transform = resolveValueTransform(
+    level.zarrArray.dtype,
+    context.levels[level.index],
+    desc,
+    context.fillValue
+  )
 
   if (geometry.type === 'LineString') {
     return queryLineString(
@@ -259,7 +274,7 @@ export async function queryData(
       sourceBounds,
       projectionDef,
       normalizedSelector,
-      transforms,
+      transform,
       emptyResult,
       lineDistanceKey!,
       options
@@ -279,6 +294,7 @@ export async function queryData(
       level,
       normalizedSelector,
       pixelBounds,
+      transform,
       opts?.signal
     )
     const subsetSourceBounds = pixelRectToSourceBounds(
@@ -304,7 +320,6 @@ export async function queryData(
       fetched.channelLabels,
       fetched.multiValueDimNames,
       context.latIsAscending,
-      transforms,
       opts,
       desc.dimIndices,
       context.projection.toWGS84 ?? undefined
@@ -455,7 +470,7 @@ async function queryLineString(
   sourceBounds: Bounds,
   projectionDef: string,
   selector: NormalizedSelector,
-  transforms: QueryTransformOptions,
+  transform: ValueTransform,
   emptyResult: () => QueryResult,
   distanceKey: string,
   options?: QueryOptions
@@ -541,6 +556,7 @@ async function queryLineString(
       level,
       selector,
       run.rect,
+      transform,
       signal
     )
     const builder = createResultBuilder({
@@ -562,7 +578,6 @@ async function queryLineString(
       channelLabels: fetched.channelLabels,
       multiValueDimNames: fetched.multiValueDimNames,
       latIsAscending: context.latIsAscending,
-      transforms,
       includeSpatialCoordinates,
       dimIndices: desc.dimIndices,
     })
