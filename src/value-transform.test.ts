@@ -58,6 +58,24 @@ describe('resolveValueTransform', () => {
   })
 })
 
+// Present wherever zarrita can read float16.
+const Float16 = (
+  globalThis as unknown as { Float16Array?: Float32ArrayConstructor }
+).Float16Array
+
+describe.runIf(Float16)('float16 fills', () => {
+  it('match stored values once rounded to float16', () => {
+    const t = resolveValueTransform(
+      'float16',
+      undefined,
+      { ...dataset, fill_value: 0.1 },
+      null
+    )
+    const out = decodeValues(new Float16!([0.1, 0.5]), t, new Float32Array(2))
+    expect(Array.from(out)).toEqual([NaN, 0.5 * 2 + 1])
+  })
+})
+
 const identity: ValueTransform = { scale: 1, offset: 0, fill: null }
 
 describe('decodeValues', () => {

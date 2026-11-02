@@ -40,12 +40,17 @@ export function resolveValueTransform(
   }
 }
 
+// zarrita reads float16 only where Float16Array exists, which ships with it.
+const f16round = (Math as { f16round?: (x: number) => number }).f16round
+
 /**
- * Metadata may write a float32 fill with fewer digits than it takes to
- * round-trip, so the value the array holds is the fill rounded to float32.
+ * Metadata may write a float fill with fewer digits than it takes to
+ * round-trip, so the value the array holds is the fill rounded to its dtype.
  */
 function storedFill(fill: number, dtype: string): number {
-  return dtype === 'float32' ? Math.fround(fill) : fill
+  if (dtype === 'float32') return Math.fround(fill)
+  if (dtype === 'float16' && f16round) return f16round(fill)
+  return fill
 }
 
 /**
