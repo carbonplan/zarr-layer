@@ -13,6 +13,7 @@ import { maplibreFragmentShaderSource } from './shaders'
 import type { RenderContext } from './renderer-types'
 import type { ZarrRenderer } from './zarr-renderer'
 import type { RegionState } from './region-state'
+import type { WorldMapping } from './world-mapping'
 
 /**
  * Per-frame render-path selection: the branch in RegionRenderer.render() that
@@ -202,6 +203,14 @@ function mapboxContext(
   }
 }
 
+/** Plate carrée over the top half of a registered projection's world square. */
+const PLATE: WorldMapping = {
+  name: 'custom:plate',
+  extentAtZoom0: 360,
+  toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
+  toLngLat: (x, y) => [x * 360 - 180, 90 - y * 360],
+}
+
 /** World offsets actually drawn, read back off the u_worldXOffset uploads. */
 const drawnWorldOffsets = (gl: ReturnType<typeof createRecordingGl>) =>
   gl.calls
@@ -220,11 +229,17 @@ async function frame(
   {
     isGlobe = false,
     inactiveUniforms,
-  }: { isGlobe?: boolean; inactiveUniforms?: string[] } = {}
+    registeredProjection = false,
+  }: {
+    isGlobe?: boolean
+    inactiveUniforms?: string[]
+    registeredProjection?: boolean
+  } = {}
 ) {
   const renderer = await makeRenderer()
   seedRegion(renderer)
   renderer.onProjectionChange(isGlobe)
+  if (registeredProjection) renderer.setWorldMapping(PLATE)
 
   const gl = createRecordingGl({ inactiveUniforms })
   const stub = stubRenderer(gl)
@@ -297,6 +312,23 @@ describe('MapLibre render path', () => {
   it('looks up EPSG:4326 latitude per fragment in mercator', async () => {
     const { gl } = await frame((g) => maplibreContext(g, 0))
     expect(latLookup(gl)).toBe(1)
+  })
+
+  it('samples mesh texture coordinates in a registered projection', async () => {
+    const { gl } = await frame((g) => maplibreContext(g, 0), {
+      registeredProjection: true,
+    })
+    expect(gl.callsTo('drawElements').length).toBeGreaterThan(0)
+    expect(latLookup(gl)).toBe(0)
+  })
+
+  it('drops the latitude lookup in a registered projection, tiles included, and restores it in Mercator', async () => {
+    const renderer = await makeRenderer()
+    const region = seedRegion(renderer)
+    renderer.setWorldMapping(PLATE)
+    expect(region.texLatEdges).toBe(null)
+    renderer.setWorldMapping(null)
+    expect(region.texLatEdges).toEqual([90, -90])
   })
 
   it('samples mesh texture coordinates on the globe', async () => {

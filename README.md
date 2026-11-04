@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 Custom layer for rendering Zarr datasets in MapLibre or Mapbox GL, inspired (and borrowing significant code and concepts from)
-[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium), [@carbonplan/maps](https://github.com/carbonplan/maps), and [deck-gl-raster](https://github.com/developmentseed/deck.gl-raster). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports rendering to globe and mercator projections for both MapLibre and Mapbox. Mapbox's other projections (Albers, Equal Earth, etc.) don't render custom layers, so the layer isn't drawn in them. Input data are reprojected on the fly.
+[zarr-gl](https://github.com/carderne/zarr-gl), [zarr-cesium](https://github.com/NOC-OI/zarr-cesium), [@carbonplan/maps](https://github.com/carbonplan/maps), and [deck-gl-raster](https://github.com/developmentseed/deck.gl-raster). Uses [CustomLayerInterface](https://maplibre.org/maplibre-gl-js/docs/API/interfaces/CustomLayerInterface/) to render data directly to the map and supports rendering to globe and mercator projections for both MapLibre and Mapbox. Mapbox's other projections (Albers, Equal Earth, etc.) don't render custom layers, so the layer isn't drawn in them. On MapLibre the layer also renders in custom map projections registered with `addProjection` (see [custom map projections](#custom-map-projections)). Input data are reprojected on the fly.
 
 ## demo
 
@@ -64,6 +64,26 @@ The layer drapes over 3D terrain on both providers, with no configuration needed
 **Mapbox** — Uses Mapbox's `renderToTile` tile draping.
 
 With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom, so a pitched view over terrain gets fine data near the camera and coarse data at the horizon rather than nothing.
+
+## custom map projections
+
+On MapLibre (maplibre-gl 6.15 or later), the layer renders in planar map projections registered with MapLibre's experimental [`addProjection`](https://maplibre.org/maplibre-gl-js/docs/API/functions/addProjection/), such as Antarctic Polar Stereographic (EPSG:3031). Nothing needs to be configured on the layer: it reads the projection from the map, places the data in it, selects the regions each of the map's tiles covers, and reads the pyramid level matching the projection's own scale.
+
+```ts
+import proj4 from 'proj4'
+import { addProjection } from 'maplibre-gl'
+
+const def =
+  '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+addProjection({
+  name: 'EPSG:3031',
+  projection: proj4('EPSG:4326', def),
+  tileMatrixSet: { origin: [-4194304, 4194304], extentAtZoom0: 8388608 },
+})
+map.setProjection({ type: 'EPSG:3031' })
+```
+
+Data in any CRS the layer reads is reprojected into the map's projection. A map in a custom projection draws a single world without copies, and its basemap tiles must be cut in the same projection; the demo's antarctic projection uses NASA GIBS imagery. The layer reads the projection through a MapLibre internal (`map.style.projection.worldCoordinateHelper`), as the experimental API exposes no public accessor yet; if a MapLibre version stops exposing it, the layer is hidden and logs a warning while the custom projection is active.
 
 ## install
 
