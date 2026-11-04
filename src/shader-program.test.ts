@@ -325,6 +325,7 @@ describe('shader program uniform surface', () => {
       const program: ShaderProgram = shaderProgram
       expect(program.latLookupLoc).not.toBeNull()
       expect(program.latAnchorLoc).not.toBeNull()
+      expect(program.latShiftLoc).not.toBeNull()
     }
   })
 })

@@ -64,6 +64,7 @@ export interface ShaderProgram {
   // EPSG:4326 reprojection uniforms
   latLookupLoc: WebGLUniformLocation | null
   latAnchorLoc: WebGLUniformLocation | null
+  latShiftLoc: WebGLUniformLocation | null
   // Finer-data clip boxes, see FRAGMENT_CLIP
   clipBoxesLoc: WebGLUniformLocation | null
   clipCountLoc: WebGLUniformLocation | null
@@ -320,6 +321,7 @@ export function createShaderProgram(
     dataScaleLoc: gl.getUniformLocation(program, 'u_dataScale'),
     latLookupLoc: gl.getUniformLocation(program, 'u_latLookup'),
     latAnchorLoc: gl.getUniformLocation(program, 'u_latAnchor'),
+    latShiftLoc: gl.getUniformLocation(program, 'u_latShift'),
     clipBoxesLoc: gl.getUniformLocation(program, 'u_clip_boxes'),
     clipCountLoc: gl.getUniformLocation(program, 'u_clip_count'),
   }

@@ -404,15 +404,17 @@ const FRAG_CONST_PI = `const float PI = 3.14159265358979323846;`
  * computes v from each fragment's own latitude instead.
  *
  * v_clipPos.y is the fragment's normalized Mercator offset from the region's
- * anchor, so the latitude offset from the anchor is formed without touching
- * an absolute Float32 coordinate, which would lose rows at high zoom:
+ * anchor, and u_latShift moves that anchor to φ0 inside the Mercator world, so
+ * the latitude offset from φ0 is formed without touching an absolute Float32
+ * coordinate, which would lose rows at high zoom:
  *   tan(φ − φ0) = (tan φ − tan φ0) / (1 + tan φ tan φ0),  tan φ = sinh(y0 + dy)
  * with tan φ − tan φ0 = 2 tan φ0 sinh²(dy/2) + sec φ0 sinh(dy).
  * u_latAnchor = (tan φ0, sec φ0, v at φ0, dv/dφ), from latLookupAnchor.
  */
 const UNIFORMS_LAT_LOOKUP = `
 uniform int u_latLookup;
-uniform vec4 u_latAnchor;`
+uniform vec4 u_latAnchor;
+uniform float u_latShift;`
 
 // Builtin sinh is often exp-based and loses all relative precision near zero.
 const FUNC_SINH_SMALL = `
@@ -427,7 +429,7 @@ float zl_sinh(float x) {
 const FRAGMENT_SAMPLE_COORD = `
   vec2 sample_coord = pix_coord;
   if (u_latLookup == 1) {
-    float dy = -2.0 * PI * v_clipPos.y;
+    float dy = -2.0 * PI * (v_clipPos.y - u_latShift);
     float sh = zl_sinh(0.5 * dy);
     float dTan = 2.0 * u_latAnchor.x * sh * sh + u_latAnchor.y * zl_sinh(dy);
     float dLat = atan(dTan, 1.0 + u_latAnchor.x * (u_latAnchor.x + dTan));

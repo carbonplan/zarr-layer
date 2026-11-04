@@ -302,7 +302,7 @@ describe('mercator math parity (GPU shader <-> CPU map-utils)', () => {
     expect(vtx).toContain('float t = PI * (1.0 - 2.0 * y);')
     expect(vtx).toContain('atan(sinh(t))')
     for (const line of [
-      'float dy = -2.0 * PI * v_clipPos.y;',
+      'float dy = -2.0 * PI * (v_clipPos.y - u_latShift);',
       'float sh = zl_sinh(0.5 * dy);',
       'float dTan = 2.0 * u_latAnchor.x * sh * sh + u_latAnchor.y * zl_sinh(dy);',
       'float dLat = atan(dTan, 1.0 + u_latAnchor.x * (u_latAnchor.x + dTan));',

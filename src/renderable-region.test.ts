@@ -31,6 +31,7 @@ const program = new Proxy(
     clipCountLoc: { name: 'u_clip_count' },
     latLookupLoc: { name: 'u_latLookup' },
     latAnchorLoc: { name: 'u_latAnchor' },
+    latShiftLoc: { name: 'u_latShift' },
   } as Record<string, unknown>,
   { get: (target, key) => (key in target ? target[key as string] : null) }
 ) as unknown as ShaderProgram
@@ -190,9 +191,10 @@ describe('latLookupAnchor', () => {
   }
   function shaderV(
     clipY: number,
-    [s0, c0, vAnchor, vPerRad]: [number, number, number, number]
+    [s0, c0, vAnchor, vPerRad]: [number, number, number, number],
+    latShift = 0
   ): number {
-    const dy = f(-2 * f(Math.PI) * f(clipY))
+    const dy = f(-2 * f(Math.PI) * f(f(clipY) - f(latShift)))
     const sh = sinhSmall(f(0.5 * dy))
     const dTan = f(f(2 * f(s0) * sh * sh) + f(f(c0) * sinhSmall(dy)))
     const dLat = f(Math.atan2(dTan, f(1 + f(f(s0) * f(f(s0) + dTan)))))
@@ -229,6 +231,33 @@ describe('latLookupAnchor', () => {
     const a = latLookupAnchor(anchorY, descending)
     const v = shaderV(latToMercatorNorm(46.7) - anchorY, a)
     expect(v).toBeCloseTo((72.6 - 46.7) / 50.7, 5)
+  })
+
+  it('maps rows of a region whose mesh reaches past the Mercator world', () => {
+    // The top row of a global pyramid: its mesh runs nearly to the pole.
+    const edges: [number, number] = [90, 67.5]
+    const meshBounds = { x0: 0.5, y0: -2.45342, x1: 0.625, y1: 0.24298 }
+    const gl = createRecordingGl()
+    renderRegion(
+      gl,
+      program,
+      { ...region(null), meshBounds, texLatEdges: edges },
+      [0],
+      config
+    )
+    const a = gl
+      .callsTo('uniform4f')
+      .find((c) => c.args[0] === 'u_latAnchor')!
+      .args.slice(1) as [number, number, number, number]
+    const latShift = Number(
+      gl.callsTo('uniform1f').find((c) => c.args[0] === 'u_latShift')
+        ?.args[1] ?? 0
+    )
+    const meshY = (meshBounds.y0 + meshBounds.y1) / 2
+    for (let lat = 67.5; lat <= 85; lat += 0.5) {
+      const v = shaderV(latToMercatorNorm(lat) - meshY, a, latShift)
+      expect(Math.abs(v - (90 - lat) / 22.5) * 128).toBeLessThan(1e-3)
+    }
   })
 
   it.each([

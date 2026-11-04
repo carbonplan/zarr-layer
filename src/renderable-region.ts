@@ -115,8 +115,15 @@ export function renderRegion(
     gl.uniform1i(shaderProgram.latLookupLoc, texLatEdges ? 1 : 0)
   }
   if (texLatEdges && shaderProgram.latAnchorLoc !== null) {
-    const [s0, c0, vAnchor, vPerRad] = latLookupAnchor(shiftY, texLatEdges)
+    // A mesh reaching a pole is anchored far past the Mercator world, where
+    // the lookup's Float32 terms cancel, so the lookup anchors to the part of
+    // the region the map can show.
+    const latAnchorY = (clampUnit(meshBounds.y0) + clampUnit(meshBounds.y1)) / 2
+    const [s0, c0, vAnchor, vPerRad] = latLookupAnchor(latAnchorY, texLatEdges)
     gl.uniform4f(shaderProgram.latAnchorLoc, s0, c0, vAnchor, vPerRad)
+    if (shaderProgram.latShiftLoc !== null) {
+      gl.uniform1f(shaderProgram.latShiftLoc, latAnchorY - shiftY)
+    }
   }
 
   if (shaderProgram.clipCountLoc !== null) {
@@ -209,3 +216,5 @@ export function latLookupAnchor(
     180 / Math.PI / span,
   ]
 }
+
+const clampUnit = (y: number) => Math.min(1, Math.max(0, y))
