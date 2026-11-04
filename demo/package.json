@@ -16,7 +16,7 @@
     "@carbonplan/colormaps": "^4.0.0",
     "@carbonplan/components": "^13.4.0",
     "@carbonplan/icons": "^2.0.0",
-    "@carbonplan/layouts": "^5.3.1",
+    "@carbonplan/layouts": "5.1.0",
     "@carbonplan/theme": "^8.1.0",
     "@carbonplan/zarr-layer": "file:../",
     "@protomaps/basemaps": "^5.0.1",
