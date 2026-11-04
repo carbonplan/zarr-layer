@@ -40,9 +40,6 @@ export interface ShaderProgram {
   climLoc: WebGLUniformLocation | null
   /** Null when a custom shader never reads `opacity`. */
   opacityLoc: WebGLUniformLocation | null
-  fillValueLoc: WebGLUniformLocation | null
-  scaleFactorLoc: WebGLUniformLocation | null
-  addOffsetLoc: WebGLUniformLocation | null
   cmapLoc: WebGLUniformLocation | null
   colormapLoc: WebGLUniformLocation | null
   texLoc: WebGLUniformLocation | null
@@ -302,9 +299,6 @@ export function createShaderProgram(
     pixCoordLoc: gl.getAttribLocation(program, 'pix_coord_in'),
 
     climLoc: gl.getUniformLocation(program, 'clim'),
-    fillValueLoc: gl.getUniformLocation(program, 'fillValue'),
-    scaleFactorLoc: gl.getUniformLocation(program, 'u_scaleFactor'),
-    addOffsetLoc: gl.getUniformLocation(program, 'u_addOffset'),
 
     cmapLoc: useCustomShader ? null : gl.getUniformLocation(program, 'cmap'),
     colormapLoc: gl.getUniformLocation(program, 'colormap'),

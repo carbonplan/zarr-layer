@@ -85,6 +85,7 @@ async function makeContext(
     isMultiscale: false,
     coordLevelIndex: 0,
     warnedDimensions: new Set(),
+    fillValue: null,
   }
 }
 

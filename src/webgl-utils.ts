@@ -141,37 +141,6 @@ export function configureDataTexture(
 }
 
 /**
- * Normalize data for texture upload to ensure half-float safe range on mobile GPUs.
- * Uses fixedScale to normalize data (frozen to initial clim).
- * Fill values are converted to NaN for reliable detection.
- *
- * @param data - Raw float data to normalize
- * @param fillValue - Fill value to convert to NaN
- * @param fixedScale - Fixed scale factor for normalization
- * @returns Object with normalized data and scale factor
- */
-export function normalizeDataForTexture(
-  data: Float32Array,
-  fillValue: number | null,
-  fixedScale: number
-): { normalized: Float32Array; scale: number } {
-  const normalized = new Float32Array(data.length)
-
-  for (let i = 0; i < data.length; i++) {
-    const v = data[i]
-    // Convert fill values to NaN (fill values may exceed half-float range on mobile GPUs)
-    // NaN is preserved through texture reads and caught by the shader's NaN check
-    if ((fillValue !== null && v === fillValue) || v !== v) {
-      normalized[i] = NaN
-    } else {
-      normalized[i] = v / fixedScale
-    }
-  }
-
-  return { normalized, scale: fixedScale }
-}
-
-/**
  * Interleave separate band arrays into a single packed array.
  * For single-channel data, returns the band directly (no copy).
  */

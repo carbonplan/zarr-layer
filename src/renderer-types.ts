@@ -1,13 +1,11 @@
-import type { BandFormat, BandTransform } from './band-format'
+import type { BandFormat } from './band-format'
+import type { ValueTransform } from './value-transform'
 import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { ProjectionData, ShaderData } from './shaders'
 
 export interface RendererUniforms {
   clim: [number, number]
   opacity: number
-  fillValue: number | null
-  scaleFactor: number
-  offset: number
   fixedDataScale: number
 }
 
@@ -87,7 +85,7 @@ export interface RegionRenderState {
   /** Band texture array for multi-band custom shaders */
   bandTexture: WebGLTexture | null
   bandTextureKey: string | null
-  bandTransform: BandTransform | null
+  bandTransform: ValueTransform | null
   /** Index buffer for the adaptive mesh */
   indexBuffer: WebGLBuffer
   /** Number of indices to draw */

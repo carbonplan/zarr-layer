@@ -120,7 +120,7 @@ map.on('load', () => {
 | zarrVersion | `2` \| `3` | auto | Zarr format version (tries v3 first, falls back to v2) |
 | minzoom | number | `0` | Minimum zoom level for rendering |
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
-| fillValue | number | auto | No-data value (from metadata if not set) |
+| fillValue | number | auto | Stored value treated as no data, in place of the metadata `fill_value`. Compared with raw values, before `scale_factor`/`add_offset`. Cleared by `setVariable` |
 | maxRegionFetches | number | `16` | Region fetches in flight at once; the rest wait in a queue, nearest the viewport center first. Raise it for viewports of many small, quick regions |
 | minRegionSize | number | one chunk | Smallest region, in pixels per axis, loaded and drawn as a unit. Regions are whole numbers of chunks, so this groups small chunks into fewer, larger regions. Growth stops at 2048 px per axis |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
@@ -214,6 +214,8 @@ Custom fragment shaders let you do math on your data to change how it's displaye
 Band names are automatically sanitized to valid GLSL identifiers: any characters that aren't letters, digits, or underscores are replaced with underscores, and names starting with a digit are prefixed with an underscore. For example, `s2med_harvest:B02` becomes `s2med_harvest_B02` and `123band` becomes `_123band`.
 
 The layer blends with a premultiplied alpha blend function, so your `customFrag` must output premultiplied color. Multiply RGB by your final alpha (e.g. `fragColor = vec4(c.rgb * opacity, opacity)`). Emitting straight `vec4(c.rgb, opacity)` renders correctly only at full opacity.
+
+Band values arrive with `scale_factor`/`add_offset` already applied.
 
 When a `customFrag` is supplied, **it owns discarding**. Missing/fill pixels are surfaced as `NaN` instead of being dropped automatically, so you can aggregate over partial coverage (e.g. a mean over bands with differing coverage) rather than just their intersection. Note that `NaN` propagates through arithmetic (even `NaN * 0.0` is `NaN`), so guard values before multiplying or accumulating, e.g. `isnan(x) ? 0.0 : x`. Add your own `discard` for pixels you want to drop:
 

@@ -7,7 +7,7 @@ import {
 import { latToMercatorNorm } from './map-utils'
 import { bandTextureKey } from './render-helpers'
 import { createRecordingGl } from './__fixtures__/fake-gl'
-import type { BandTransform } from './band-format'
+import type { ValueTransform } from './value-transform'
 import type { ShaderProgram } from './zarr-renderer'
 import type { CustomShaderConfig } from './renderer-types'
 
@@ -40,7 +40,7 @@ const config: CustomShaderConfig = {
   bandFormat: 'int',
 } as CustomShaderConfig
 
-function region(bandTransform: BandTransform | null): RenderableRegion {
+function region(bandTransform: ValueTransform | null): RenderableRegion {
   return {
     mercatorBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },
     meshBounds: { x0: 0, y0: 0, x1: 1, y1: 1 },

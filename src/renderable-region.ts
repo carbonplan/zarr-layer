@@ -9,7 +9,7 @@
 import type { MercatorBounds, MeshMercatorBounds } from './map-utils'
 import type { CustomShaderConfig } from './renderer-types'
 import type { ShaderProgram } from './shader-program'
-import type { BandTransform } from './band-format'
+import type { ValueTransform } from './value-transform'
 import { bindBandTexture, bindGeometryBuffers } from './render-helpers'
 
 /**
@@ -42,7 +42,7 @@ export interface RenderableRegion {
   bandTexture: WebGLTexture | null
   bandTextureKey: string | null
   // Scale/offset/fill for raw integer bands; null when bands are float
-  bandTransform: BandTransform | null
+  bandTransform: ValueTransform | null
 
   // Boxes (x0, y0, x1, y1, ...) of the map tiles that show this region, in
   // normalized Mercator relative to the mesh anchor; fragments outside every

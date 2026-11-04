@@ -19,13 +19,6 @@ export type BandArray =
   | Int16Array
   | Uint16Array
 
-/** Per-region values the shader needs to turn raw integer texels into data. */
-export interface BandTransform {
-  scale: number
-  offset: number
-  fill: number | null
-}
-
 const NATIVE_FORMATS: Record<string, BandFormat> = {
   int8: 'int',
   int16: 'int',

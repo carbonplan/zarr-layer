@@ -144,8 +144,7 @@ export class ZarrLayer {
   private selectorHash: string = ''
 
   private _fillValue: number | null = null
-  private scaleFactor: number = 1
-  private offset: number = 0
+  private fillValueOption: number | null = null
   private fixedDataScale: number
   private minRegionSize: number
   private maxRegionFetches: number
@@ -434,7 +433,10 @@ export class ZarrLayer {
 
     this.refreshCustomShaderConfig()
 
-    if (fillValue !== undefined) this._fillValue = fillValue
+    if (fillValue !== undefined) {
+      this.fillValueOption = fillValue
+      this._fillValue = fillValue
+    }
     this.onLoadingStateChange = onLoadingStateChange
     this.proj4 = proj4
     this.transformRequest = transformRequest
@@ -550,6 +552,7 @@ export class ZarrLayer {
       }
       this.dimensionValues = {}
       this._fillValue = null
+      this.fillValueOption = null
       // Reset and recompute fixedDataScale from current clim for the new dataset
       this.dataScaleLocked = false
       this.fixedDataScale = Math.max(
@@ -711,7 +714,8 @@ export class ZarrLayer {
       this.invalidate,
       this.fixedDataScale,
       this.minRegionSize,
-      this.maxRegionFetches
+      this.maxRegionFetches,
+      this.fillValueOption
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()
@@ -755,8 +759,6 @@ export class ZarrLayer {
 
       this.levelAssets = desc.levelAssets
       this.dimIndices = desc.dimIndices
-      this.scaleFactor = desc.scaleFactor
-      this.offset = desc.addOffset
 
       if (
         this._fillValue === null &&
@@ -993,9 +995,6 @@ export class ZarrLayer {
       uniforms: {
         clim: this.clim,
         opacity: this.opacity,
-        fillValue: this._fillValue,
-        scaleFactor: this.scaleFactor,
-        offset: this.offset,
         fixedDataScale: this.fixedDataScale,
       },
       colormapTexture,
@@ -1105,9 +1104,6 @@ export class ZarrLayer {
       uniforms: {
         clim: this.clim,
         opacity: this.opacity,
-        fillValue: this._fillValue,
-        scaleFactor: this.scaleFactor,
-        offset: this.offset,
         fixedDataScale: this.fixedDataScale,
       },
       colormapTexture: this.colormap.ensureTexture(gl),

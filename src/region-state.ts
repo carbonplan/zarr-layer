@@ -1,5 +1,6 @@
 import type * as zarr from 'zarrita'
-import type { BandArray, BandTransform } from './band-format'
+import type { BandArray } from './band-format'
+import type { ValueTransform } from './value-transform'
 import type { MercatorBounds, MeshMercatorBounds, XYLimits } from './map-utils'
 
 /** State for a single region (chunk/shard) in region-based loading */
@@ -48,7 +49,7 @@ export interface RegionState {
   // Multi-band support
   bandData: Map<string, BandArray>
   // Set when bands are raw integers the shader scales and fill-checks itself
-  bandTransform: BandTransform | null
+  bandTransform: ValueTransform | null
   // Every band a custom shader samples, one band per texture array layer
   bandTexture: WebGLTexture | null
   // Band list the resident texture holds (see bandTextureKey); null until uploaded
