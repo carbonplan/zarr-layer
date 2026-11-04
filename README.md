@@ -215,6 +215,8 @@ Band names are automatically sanitized to valid GLSL identifiers: any characters
 
 The layer blends with a premultiplied alpha blend function, so your `customFrag` must output premultiplied color. Multiply RGB by your final alpha (e.g. `fragColor = vec4(c.rgb * opacity, opacity)`). Emitting straight `vec4(c.rgb, opacity)` renders correctly only at full opacity.
 
+Band values arrive with `scale_factor`/`add_offset` already applied.
+
 When a `customFrag` is supplied, **it owns discarding**. Missing/fill pixels are surfaced as `NaN` instead of being dropped automatically, so you can aggregate over partial coverage (e.g. a mean over bands with differing coverage) rather than just their intersection. Note that `NaN` propagates through arithmetic (even `NaN * 0.0` is `NaN`), so guard values before multiplying or accumulating, e.g. `isnan(x) ? 0.0 : x`. Add your own `discard` for pixels you want to drop:
 
 ```ts
