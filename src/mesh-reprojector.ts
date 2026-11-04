@@ -888,12 +888,40 @@ interface WorldMeshOptions {
   maxError?: number
 }
 
+/** The part of a polygon inside the unit square. */
+function clipToUnitSquare(polygon: [number, number][]): [number, number][] {
+  let points = polygon
+  for (const [axis, bound, keepBelow] of [
+    [0, 0, false],
+    [0, 1, true],
+    [1, 0, false],
+    [1, 1, true],
+  ] as const) {
+    const inside = (p: [number, number]) =>
+      keepBelow ? p[axis] <= bound : p[axis] >= bound
+    const clipped: [number, number][] = []
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i]
+      const q = points[(i + 1) % points.length]
+      if (inside(p)) clipped.push(p)
+      if (inside(p) !== inside(q)) {
+        const f = (bound - p[axis]) / (q[axis] - p[axis])
+        clipped.push([p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f])
+      }
+    }
+    points = clipped
+    if (points.length === 0) break
+  }
+  return points
+}
+
 /**
  * Mesh for a map in a projection registered with `addProjection`: vertices
  * go straight from the source CRS to the map's world square, refined where
  * that mapping bends, and are encoded as deltas from the region's own
  * anchor like the Mercator mesh. Triangles with a vertex the map's
- * projection cannot place, or spanning a seam in it, are dropped.
+ * projection cannot place, spanning a seam in it, or wrapping the map
+ * around a point it sends to infinity are dropped.
  */
 export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
   const {
@@ -1068,6 +1096,53 @@ export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
           world[c * 2 + axis]
         ) > 1
     )
+  // A point the projection sends to infinity, like the far pole of a polar
+  // stereographic map, can sit inside a triangle whose corners all land off
+  // the map. The triangle then spans the map though none of its data is
+  // there, so a triangle with every corner off the map is kept only if a
+  // point it draws on the map maps back to it.
+  const offMap = (i: number) =>
+    world[i * 2] < 0 ||
+    world[i * 2] > 1 ||
+    world[i * 2 + 1] < 0 ||
+    world[i * 2 + 1] > 1
+  const wrapsMap = (a: number, b: number, c: number) => {
+    if (!offMap(a) || !offMap(b) || !offMap(c)) return false
+    const onMap = clipToUnitSquare(
+      [a, b, c].map((i): [number, number] => [world[i * 2], world[i * 2 + 1]])
+    )
+    if (onMap.length === 0) return true
+    let px = 0
+    let py = 0
+    for (const [x, y] of onMap) {
+      px += x / onMap.length
+      py += y / onMap.length
+    }
+    let [sx, sy] = fromWorld(px, py)
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return true
+    const us = [a, b, c].map((i) => uvs[i * 2])
+    const vs = [a, b, c].map((i) => uvs[i * 2 + 1])
+    if (allowUnwrappedLongitudes) {
+      const cx = xMin + ((us[0] + us[1] + us[2]) / 3) * (xMax - xMin)
+      sx += 360 * Math.round((cx - sx) / 360)
+    }
+    const u = (sx - xMin) / (xMax - xMin)
+    const v = latIsAscending
+      ? (sy - yMin) / (yMax - yMin)
+      : (yMax - sy) / (yMax - yMin)
+    // The drawn triangle is straight where the data's image curves, so the
+    // point may map back beside the triangle, but not further than its size.
+    const reach = Math.max(
+      Math.max(...us) - Math.min(...us),
+      Math.max(...vs) - Math.min(...vs)
+    )
+    return (
+      u < Math.min(...us) - reach ||
+      u > Math.max(...us) + reach ||
+      v < Math.min(...vs) - reach ||
+      v > Math.max(...vs) + reach
+    )
+  }
   const kept: number[] = []
   for (let t = 0; t < triangles.length; t += 3) {
     const a = triangles[t]
@@ -1076,6 +1151,7 @@ export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
     if (!finite(a) || !finite(b) || !finite(c)) continue
     if (outside(a, b, c)) continue
     if (crossesSeam(a, b) || crossesSeam(b, c) || crossesSeam(c, a)) continue
+    if (wrapsMap(a, b, c)) continue
     kept.push(a, b, c)
     for (const i of [a, b, c]) {
       minX = Math.min(minX, world[i * 2])

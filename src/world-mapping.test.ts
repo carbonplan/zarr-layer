@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import proj4 from 'proj4'
 import {
+  sourceToWorld,
   worldBoundsOf,
   worldMappingFor,
+  worldToSource,
   worldFractionOf,
   type MapProjection,
   type WorldMapping,
@@ -607,6 +609,117 @@ describe('createWorldMesh', () => {
       expect(area).toBeCloseTo(1, 9)
     }
   )
+
+  describe('data the map cannot show', () => {
+    const SOUTH_POLAR =
+      '+proj=stere +lat_0=-90 +lat_ts=-71 +lon_0=0 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+    const ARCTIC =
+      '+proj=stere +lat_0=90 +lat_ts=70 +lon_0=-45 +k=1 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'
+    const CONUS_ALBERS =
+      '+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs'
+    const registered = (
+      definition: string,
+      origin: [number, number],
+      extentAtZoom0: number
+    ) =>
+      worldMappingFor(mapIn('custom:test'), [
+        {
+          name: 'custom:test',
+          projection: proj4('EPSG:4326', definition),
+          tileMatrixSet: { origin, extentAtZoom0 },
+        },
+      ])!
+    const meshOf = (
+      mapping: WorldMapping,
+      sourceDef: string,
+      [xMin, yMin, xMax, yMax]: number[]
+    ) => {
+      const { to4326 } = createProjectionContext({
+        crs: 'EPSG:4326',
+        proj4def: sourceDef,
+        xyLimits: { xMin, xMax, yMin, yMax },
+      })
+      return createWorldMesh({
+        geoBounds: { xMin, xMax, yMin, yMax },
+        width: 128,
+        height: 128,
+        lonSubdivisions: 8,
+        latSubdivisions: 8,
+        toWorld: sourceToWorld(mapping, to4326!),
+        fromWorld: worldToSource(mapping, to4326!),
+        latIsAscending: false,
+      })
+    }
+    const overlapsWorld = (result: ReturnType<typeof createWorldMesh>) => {
+      const points = worldPositions(result)
+      for (let t = 0; t < result.indices.length; t += 3) {
+        const p = [0, 1, 2].map((k) => points[result.indices[t + k]])
+        const xs = p.map(([x]) => x)
+        const ys = p.map(([, y]) => y)
+        if (
+          Math.max(...xs) >= 0 &&
+          Math.min(...xs) <= 1 &&
+          Math.max(...ys) >= 0 &&
+          Math.min(...ys) <= 1
+        ) {
+          return true
+        }
+      }
+      return false
+    }
+    // Antarctic data around the south pole, in polar stereographic metres.
+    const ANTARCTICA = [-3315363, -3316901, 3316909, 3315371]
+
+    it.each([
+      // The south pole lands at infinity; triangles around it would wrap
+      // the whole map.
+      ['an Arctic map', ARCTIC, [-4194304, 4194304], 8388608],
+      ['a CONUS map', CONUS_ALBERS, [-3000000, 4750000], 6000000],
+    ] as const)(
+      'draws nothing of Antarctica on %s',
+      (_, definition, origin, extent) => {
+        const mapping = registered(definition, [...origin], extent)
+        expect(overlapsWorld(meshOf(mapping, SOUTH_POLAR, ANTARCTICA))).toBe(
+          false
+        )
+      }
+    )
+
+    it('keeps a triangle crossing the map with every corner off it', () => {
+      // Coarse global lon/lat data in CONUS Albers: no vertex falls inside
+      // the map, so the triangles spanning it are what draws it.
+      const mapping = registered(CONUS_ALBERS, [-3000000, 4750000], 6000000)
+      const result = createWorldMesh({
+        geoBounds: { xMin: -180, xMax: 180, yMin: -90, yMax: 90 },
+        width: 128,
+        height: 64,
+        lonSubdivisions: 2,
+        latSubdivisions: 2,
+        toWorld: (lng, lat) => mapping.toWorld(lng, lat),
+        fromWorld: (x, y) => mapping.toLngLat(x, y) ?? [NaN, NaN],
+        latIsAscending: false,
+        allowUnwrappedLongitudes: true,
+        maxError: Infinity,
+      })
+      const points = worldPositions(result)
+      const offMap = ([x, y]: [number, number]) =>
+        x < 0 || x > 1 || y < 0 || y > 1
+      const coversCenter = ([a, b, c]: [number, number][]) => {
+        const side = (p: [number, number], q: [number, number]) =>
+          (q[0] - p[0]) * (0.5 - p[1]) - (q[1] - p[1]) * (0.5 - p[0])
+        const s = [side(a, b), side(b, c), side(c, a)]
+        return s.every((v) => v >= 0) || s.every((v) => v <= 0)
+      }
+      const covering = []
+      for (let t = 0; t < result.indices.length; t += 3) {
+        const corners = [0, 1, 2].map((k) => points[result.indices[t + k]])
+        if (coversCenter(corners)) covering.push(corners)
+      }
+
+      expect(covering.length).toBeGreaterThan(0)
+      expect(covering.every((corners) => corners.every(offMap))).toBe(true)
+    })
+  })
 
   it('drops triangles spanning a seam in the projection', () => {
     // East of lon -90 the world wraps to the far side, as past a seam.
