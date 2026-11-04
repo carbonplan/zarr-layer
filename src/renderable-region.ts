@@ -29,12 +29,11 @@ export interface RenderableRegion {
   // Normalized-Mercator bounds used to reconstruct region-local mesh positions
   meshBounds: MeshMercatorBounds
 
-  // Data orientation: true = row 0 is south (latitude ascending)
-  // Resolved by ZarrStore during init
-  latIsAscending: boolean
-
-  // Render-time sampling mode. Defaults to linear.
-  sampleMode?: 'linear' | 'mercator-invert' | 'wgs84-lookup'
+  // Latitudes (degrees) of the texture's v = 0 and v = 1 edges, for a
+  // latitude-linear (EPSG:4326) texture drawn on a flat Mercator surface.
+  // When set, v is computed per fragment from its latitude; otherwise the
+  // mesh's interpolated texture coordinates are sampled directly.
+  texLatEdges?: [number, number] | null
 
   // Main texture (pre-uploaded). Null when band textures are sampled instead.
   texture: WebGLTexture | null
@@ -80,11 +79,6 @@ export function renderRegion(
   const meshBounds = region.meshBounds
   if (!meshBounds) return false
 
-  const hasLatBounds =
-    region.mercatorBounds.latMin !== undefined &&
-    region.mercatorBounds.latMax !== undefined
-  const sampMode = region.sampleMode ?? 'linear'
-
   const scaleX = (meshBounds.x1 - meshBounds.x0) / 2
   const scaleY = (meshBounds.y1 - meshBounds.y0) / 2
   const shiftX = (meshBounds.x0 + meshBounds.x1) / 2
@@ -116,31 +110,13 @@ export function renderRegion(
     )
   }
 
-  // Set fragment shader reprojection uniforms based on sample mode
-  const needsLatLookup =
-    sampMode === 'mercator-invert' || sampMode === 'wgs84-lookup'
-  if (shaderProgram.reprojectLoc !== null) {
-    switch (sampMode) {
-      case 'linear':
-        gl.uniform1i(shaderProgram.reprojectLoc, 0)
-        break
-      case 'mercator-invert':
-        gl.uniform1i(shaderProgram.reprojectLoc, 1)
-        break
-      case 'wgs84-lookup':
-        gl.uniform1i(shaderProgram.reprojectLoc, 2)
-        break
-    }
+  const texLatEdges = region.texLatEdges ?? null
+  if (shaderProgram.latLookupLoc !== null) {
+    gl.uniform1i(shaderProgram.latLookupLoc, texLatEdges ? 1 : 0)
   }
-  if (needsLatLookup && shaderProgram.latBoundsLoc !== null && hasLatBounds) {
-    gl.uniform2f(
-      shaderProgram.latBoundsLoc,
-      region.mercatorBounds.latMin!,
-      region.mercatorBounds.latMax!
-    )
-  }
-  if (needsLatLookup && shaderProgram.latIsAscendingLoc !== null) {
-    gl.uniform1i(shaderProgram.latIsAscendingLoc, region.latIsAscending ? 1 : 0)
+  if (texLatEdges && shaderProgram.latAnchorLoc !== null) {
+    const [s0, c0, vAnchor, vPerRad] = latLookupAnchor(shiftY, texLatEdges)
+    gl.uniform4f(shaderProgram.latAnchorLoc, s0, c0, vAnchor, vPerRad)
   }
 
   if (shaderProgram.clipCountLoc !== null) {
@@ -211,4 +187,25 @@ export function renderRegion(
   }
 
   return true
+}
+
+/**
+ * Per-region constants for the fragment latitude lookup (FRAGMENT_SAMPLE_COORD),
+ * computed in Float64 around the mesh's own Mercator anchor so the shader only
+ * handles small region-local offsets: [tan φ0, sec φ0, v at φ0, dv/dφ (per
+ * radian)], where φ0 is the latitude at normalized Mercator Y `anchorMercY`.
+ */
+export function latLookupAnchor(
+  anchorMercY: number,
+  [latAtV0, latAtV1]: [number, number]
+): [number, number, number, number] {
+  const y0 = Math.PI * (1 - 2 * anchorMercY)
+  const lat0 = (Math.atan(Math.sinh(y0)) * 180) / Math.PI
+  const span = latAtV1 - latAtV0
+  return [
+    Math.sinh(y0),
+    Math.cosh(y0),
+    (lat0 - latAtV0) / span,
+    180 / Math.PI / span,
+  ]
 }

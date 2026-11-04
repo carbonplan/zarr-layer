@@ -64,8 +64,6 @@ in vec2 pix_coord_in;
 in vec2 vertex;
 
 out vec2 pix_coord;
-out vec2 v_mercatorPos;
-out vec2 v_wgs84Pos;
 out vec2 v_clipPos;`
 
 /**
@@ -127,7 +125,7 @@ const VERTEX_TO_MERCATOR = `
  * this multiply would re-quantize the translation and bring the pan/zoom jitter
  * back. The wrap offset folds in here so a wrapped antimeridian copy doesn't
  * cancel two ~one-world clip values. `merc` is reconstructed at low precision
- * ONLY for the fragment varyings.
+ * only for the Mapbox globe morph, which runs at low zoom.
  */
 const VERTEX_TO_WGS84_TO_MERCATOR = `
   vec2 mercDelta = vec2(vertex.x * sx, vertex.y * sy);
@@ -217,11 +215,7 @@ const VERTEX_WGS84_TO_ECEF = `
   vec3 ecef = vec3(sin(lonRad) * cosLat, sin(latRad), cos(lonRad) * cosLat);
 
   // Flat-map fallback for the globe->mercator transition: mercator coords direct.
-  vec2 merc = vec2(mercX, mercY);
-
-  // Geographic normalized coords for the wgs84-lookup fragment path.
-  float normLon = mercX;
-  float normLat = latRad / PI + 0.5;`
+  vec2 merc = vec2(mercX, mercY);`
 
 /**
  * ECEF globe path (Mapbox Y-DOWN + radius). Same mercator-delta input and
@@ -241,11 +235,7 @@ const VERTEX_WGS84_TO_ECEF_MAPBOX = `
     GLOBE_RADIUS * cosLat * sin(lonRad),
     -GLOBE_RADIUS * sin(latRad),
     GLOBE_RADIUS * cosLat * cos(lonRad)
-  );
-
-  // Geographic normalized coords for the wgs84-lookup fragment path.
-  float normLon = mercX;
-  float normLat = latRad / PI + 0.5;`
+  );`
 
 /** Mapbox ECEF projection output for the direct globe path. `matrix` is the
  *  globe-world to clip product of Mapbox's public render parameters, so the
@@ -385,14 +375,6 @@ export function createVertexShader(options: VertexShaderOptions): string {
     projectionOutput = projectMapboxGlobe(inputSpace === 'wgs84')
   }
 
-  // Set v_wgs84Pos: meaningful for direct ECEF, zero for other paths
-  const wgs84PosAssignment = isDirectEcef
-    ? '  v_wgs84Pos = vec2(normLon, normLat);'
-    : '  v_wgs84Pos = vec2(0.0);'
-  const mercatorPosAssignment = isMapboxDirectEcef
-    ? '  v_mercatorPos = vec2(0.0);'
-    : '  v_mercatorPos = merc;'
-
   // Compose final shader
   return `#version 300 es
 ${prelude}
@@ -408,8 +390,6 @@ ${coordTransform}
 ${projectionOutput}
   pix_coord = pix_coord_in;
   v_clipPos = mercDelta;
-${mercatorPosAssignment}
-${wgs84PosAssignment}
 }
 `
 }
@@ -421,60 +401,47 @@ ${wgs84PosAssignment}
 // Fragment shader constants
 const FRAG_CONST_PI = `const float PI = 3.14159265358979323846;`
 
-/** Inverse Mercator projection: (x, y) in radians -> (lon, lat) in degrees */
-const FUNC_MERCATOR_INVERT = `
-vec2 mercatorInvert(float x, float y) {
-  float lambda = x;
-  float phi = 2.0 * atan(exp(y)) - PI / 2.0;
-  return vec2(degrees(lambda), degrees(phi));
-}
-`
+/**
+ * Latitude lookup for latitude-linear (EPSG:4326) textures on a flat Mercator
+ * surface. The mesh interpolates texture coordinates linearly in Mercator,
+ * which places rows between mesh vertices off their true latitude; this
+ * computes v from each fragment's own latitude instead.
+ *
+ * v_clipPos.y is the fragment's normalized Mercator offset from the region's
+ * anchor, so the latitude offset from the anchor is formed without touching
+ * an absolute Float32 coordinate, which would lose rows at high zoom:
+ *   tan(φ − φ0) = (tan φ − tan φ0) / (1 + tan φ tan φ0),  tan φ = sinh(y0 + dy)
+ * with tan φ − tan φ0 = 2 tan φ0 sinh²(dy/2) + sec φ0 sinh(dy).
+ * u_latAnchor = (tan φ0, sec φ0, v at φ0, dv/dφ), from latLookupAnchor.
+ */
+const UNIFORMS_LAT_LOOKUP = `
+uniform int u_latLookup;
+uniform vec4 u_latAnchor;`
 
-/** Fragment shader reprojection logic for EPSG:4326 data */
-const FRAGMENT_SHADER_REPROJECT = `
-  vec2 sample_coord;
-
-  if (u_reproject == 1) {
-    // EPSG:4326 reprojection: invert Mercator to lat/lon for texture lookup
-    // v_mercatorPos is normalized [0,1] where y=0 is north, y=1 is south
-    // Convert to Mercator radians: y=0 -> PI (north), y=1 -> -PI (south)
-    float mercY = PI * (1.0 - 2.0 * v_mercatorPos.y);
-    vec2 lonLat = mercatorInvert(0.0, mercY);
-    float lat = lonLat.y;
-
-    // Map latitude to texture V coordinate based on data orientation
-    float latRange = u_latBounds.y - u_latBounds.x;
-    float texV;
-    if (u_latIsAscending == 1) {
-      // Row 0 = south (latMin), row N = north (latMax)
-      texV = (lat - u_latBounds.x) / latRange;
-    } else {
-      // Row 0 = north (latMax), row N = south (latMin)
-      texV = (u_latBounds.y - lat) / latRange;
-    }
-
-    // X coordinate is linear (longitude)
-    sample_coord = vec2(pix_coord.x, texV) * u_texScale + u_texOffset;
-  } else if (u_reproject == 2) {
-    // WGS84 direct lookup: v_wgs84Pos carries normalized WGS84 coords from ECEF vertex shader
-    float lat = v_wgs84Pos.y * 180.0 - 90.0;
-    float latRange = u_latBounds.y - u_latBounds.x;
-    float texV;
-    if (u_latIsAscending == 1) {
-      texV = (lat - u_latBounds.x) / latRange;
-    } else {
-      texV = (u_latBounds.y - lat) / latRange;
-    }
-    sample_coord = vec2(pix_coord.x, texV) * u_texScale + u_texOffset;
-  } else {
-    // Standard linear texture lookup
-    sample_coord = pix_coord * u_texScale + u_texOffset;
+// Builtin sinh is often exp-based and loses all relative precision near zero.
+const FUNC_SINH_SMALL = `
+float zl_sinh(float x) {
+  if (abs(x) < 0.5) {
+    float x2 = x * x;
+    return x * (1.0 + x2 * (1.0 / 6.0 + x2 * (1.0 / 120.0 + x2 / 5040.0)));
   }
+  return sinh(x);
+}`
+
+const FRAGMENT_SAMPLE_COORD = `
+  vec2 sample_coord = pix_coord;
+  if (u_latLookup == 1) {
+    float dy = -2.0 * PI * v_clipPos.y;
+    float sh = zl_sinh(0.5 * dy);
+    float dTan = 2.0 * u_latAnchor.x * sh * sh + u_latAnchor.y * zl_sinh(dy);
+    float dLat = atan(dTan, 1.0 + u_latAnchor.x * (u_latAnchor.x + dTan));
+    sample_coord.y = u_latAnchor.z + dLat * u_latAnchor.w;
+  }
+  sample_coord = sample_coord * u_texScale + u_texOffset;
 `
 
 /**
  * Fragment shader for tile rendering with colormap and fillValue handling.
- * Supports EPSG:4326 reprojection via Mercator inversion in fragment shader.
  */
 export const maplibreFragmentShaderSource = `#version 300 es
 precision highp float;
@@ -488,27 +455,22 @@ uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
-// EPSG:4326 reprojection uniforms
-uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion, 2 = WGS84 direct lookup
-uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
-uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
+${UNIFORMS_LAT_LOOKUP}
 
 uniform sampler2D tex;
 uniform sampler2D cmap;
 ${UNIFORMS_CLIP}
 
 in vec2 pix_coord;
-in vec2 v_mercatorPos;
-in vec2 v_wgs84Pos;
 in vec2 v_clipPos;
 out vec4 color;
 
 ${FRAG_CONST_PI}
-${FUNC_MERCATOR_INVERT}
+${FUNC_SINH_SMALL}
 
 void main() {
 ${FRAGMENT_CLIP}
-${FRAGMENT_SHADER_REPROJECT}
+${FRAGMENT_SAMPLE_COORD}
   float texVal = texture(tex, sample_coord).r;
 
   // NaN check (fill values converted to NaN during normalization)
@@ -651,10 +613,7 @@ uniform float u_dataScale;
 uniform vec2 u_texScale;
 uniform vec2 u_texOffset;
 
-// EPSG:4326 reprojection uniforms
-uniform int u_reproject;      // 0 = no reprojection, 1 = Mercator inversion, 2 = WGS84 direct lookup
-uniform vec2 u_latBounds;     // (latMin, latMax) in degrees
-uniform int u_latIsAscending; // 1 = row 0 is south, 0 = row 0 is north
+${UNIFORMS_LAT_LOOKUP}
 
 uniform sampler2D colormap;
 ${UNIFORMS_CLIP}
@@ -664,17 +623,15 @@ ${customUniformDecls}
 ${extraUniformsDecl}
 
 in vec2 pix_coord;
-in vec2 v_mercatorPos;
-in vec2 v_wgs84Pos;
 in vec2 v_clipPos;
 out vec4 fragColor;
 
 ${FRAG_CONST_PI}
-${FUNC_MERCATOR_INVERT}
+${FUNC_SINH_SMALL}
 ${native ? NATIVE_BAND_READ : ''}
 void main() {
 ${FRAGMENT_CLIP}
-${FRAGMENT_SHADER_REPROJECT}
+${FRAGMENT_SAMPLE_COORD}
 ${bandReads}
 ${bandAliases}
 ${

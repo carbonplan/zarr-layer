@@ -402,6 +402,19 @@ describe('RegionRenderer', () => {
     expect(region.mercatorBounds).toMatchObject({ x0: 0, x1: 1 })
   })
 
+  it('records the latitudes of an EPSG:4326 texture edges', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle(renderer)
+    // Rows run north to south, so v = 0 is each region's north edge.
+    expect(seam(renderer).regionCache.get('0:0,0')!.texLatEdges).toEqual([
+      90, 0,
+    ])
+    expect(seam(renderer).regionCache.get('0:0,1')!.texLatEdges).toEqual([
+      0, -90,
+    ])
+  })
+
   it('keeps drawing fallback coverage when the current level cannot upload', async () => {
     const { renderer, map } = await makeRenderer()
     const gl = fakeGl({ failTextures: true })

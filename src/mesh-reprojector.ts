@@ -14,7 +14,7 @@ import {
   sourceCRSToPixel,
   type ProjectionTransformer,
 } from './projection-utils'
-import { DEFAULT_MESH_MAX_ERROR } from './constants'
+import { DEFAULT_MESH_MAX_ERROR, MERCATOR_LAT_LIMIT } from './constants'
 
 // ============================================================================
 // Module constants
@@ -53,7 +53,7 @@ interface ReprojectorConfig {
   width: number
   height: number
   latIsAscending: boolean
-  transformer: ProjectionTransformer
+  transformer: Pick<ProjectionTransformer, 'forward' | 'inverse'>
 }
 
 interface AdaptiveMeshResult {
@@ -79,6 +79,12 @@ interface HybridMeshOptions {
   latIsAscending: boolean
   allowUnwrappedLongitudes?: boolean
   maxError?: number
+  /**
+   * Measure adaptive refinement error in Web Mercator rather than WGS84. The
+   * flat map interpolates texture coordinates linearly in Mercator, so this
+   * bounds what is actually drawn there.
+   */
+  refineInMercator?: boolean
 }
 
 // ============================================================================
@@ -165,6 +171,54 @@ function triangleHasLongGlobeEdge(
     angularDistanceDegrees(lon2, lat2, lon0, lat0) >
       MAX_GLOBE_TRIANGLE_EDGE_DEGREES
   )
+}
+
+const MERC_LIMIT_RAD = (MERCATOR_LAT_LIMIT * Math.PI) / 180
+const MERC_LIMIT_Y = Math.log(Math.tan(Math.PI / 4 + MERC_LIMIT_RAD / 2))
+const MERC_LIMIT_SLOPE = 1 / Math.cos(MERC_LIMIT_RAD)
+
+/**
+ * Mercator northing in radians. Past the Web Mercator latitude limit it
+ * continues as a straight line with the limit's slope, so polar data (never
+ * shown on the flat map) refines like WGS84 instead of chasing the pole's
+ * singularity.
+ */
+function latToRefinementY(latDeg: number): number {
+  const phi = (latDeg * Math.PI) / 180
+  if (Math.abs(phi) <= MERC_LIMIT_RAD) {
+    return Math.log(Math.tan(Math.PI / 4 + phi / 2))
+  }
+  const sign = Math.sign(phi)
+  return (
+    sign * (MERC_LIMIT_Y + (Math.abs(phi) - MERC_LIMIT_RAD) * MERC_LIMIT_SLOPE)
+  )
+}
+
+function refinementYToLat(y: number): number {
+  const phi =
+    Math.abs(y) <= MERC_LIMIT_Y
+      ? Math.atan(Math.sinh(y))
+      : Math.sign(y) *
+        (MERC_LIMIT_RAD + (Math.abs(y) - MERC_LIMIT_Y) / MERC_LIMIT_SLOPE)
+  return (phi * 180) / Math.PI
+}
+
+/**
+ * Wrap a source↔WGS84 transformer so its output space is (lon, Mercator
+ * northing). Refinement error is measured against linear interpolation in
+ * the output space, so this sizes triangles for the flat map's Mercator
+ * interpolation.
+ */
+function mercatorRefinementTransformer(
+  transformer: Pick<ProjectionTransformer, 'forward' | 'inverse'>
+): Pick<ProjectionTransformer, 'forward' | 'inverse'> {
+  return {
+    forward: (x, y) => {
+      const [lon, lat] = transformer.forward(x, y)
+      return [lon, latToRefinementY(lat)]
+    },
+    inverse: (lon, y) => transformer.inverse(lon, refinementYToLat(y)),
+  }
 }
 
 /**
@@ -614,6 +668,7 @@ export function createHybridMesh(
     latIsAscending,
     allowUnwrappedLongitudes = false,
     maxError = DEFAULT_MESH_MAX_ERROR,
+    refineInMercator = false,
   } = options
   const { xMin, xMax, yMin, yMax } = geoBounds
   const bounds: [number, number, number, number] = [xMin, yMin, xMax, yMax]
@@ -623,7 +678,9 @@ export function createHybridMesh(
     width,
     height,
     latIsAscending,
-    transformer,
+    transformer: refineInMercator
+      ? mercatorRefinementTransformer(transformer)
+      : transformer,
   })
 
   // Run adaptive refinement with vertex limit to prevent hanging on polar data.

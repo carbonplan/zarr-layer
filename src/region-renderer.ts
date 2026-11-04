@@ -1437,6 +1437,7 @@ export class RegionRenderer {
     // Defensive reset: meshBounds is only set by the geometry producer below.
     // Ensures it's not stale if geometry is recreated.
     region.meshBounds = null
+    region.texLatEdges = null
     region.indexArr = null
     // Whatever this produces is newer than the buffers already on the GPU.
     region.geometryUploaded = false
@@ -1513,6 +1514,9 @@ export class RegionRenderer {
       transformer: this.projection.to4326,
       latIsAscending: this.latIsAscending,
       allowUnwrappedLongitudes: this.projection.kind === 'epsg4326',
+      // EPSG:4326 latitude is resolved per fragment on the flat map
+      // (texLatEdges), so only other projections refine against Mercator.
+      refineInMercator: this.projection.kind !== 'epsg4326',
       // The mesh encodes vertices as deltas from a per-region mercator origin
       // (deriveLocalMercAnchor); renderRegion uploads a matching per-region
       // anchor_clip, keeping the eye origin near the on-screen region for
@@ -1524,6 +1528,11 @@ export class RegionRenderer {
     region.indexArr = meshResult.indices
     region.meshBounds = meshResult.meshBounds
     region.indexCount = region.indexArr.length
+    if (this.projection.kind === 'epsg4326') {
+      region.texLatEdges = this.latIsAscending
+        ? [geoBounds.yMin, geoBounds.yMax]
+        : [geoBounds.yMax, geoBounds.yMin]
+    }
   }
 
   private async buildSliceArgsForSelector(
@@ -1897,12 +1906,18 @@ export class RegionRenderer {
       }
     }
 
+    // A Mapbox globe draws through renderToTile or the direct ECEF path, so
+    // only a non-globe draw here lands on a flat Mercator surface.
+    const flatMercator =
+      !useDirectEcef && !(useMapbox && this.isGlobeProjection)
+
     this.renderRegions(
       renderer,
       shaderProgram,
       worldOffsets,
       context.customShaderConfig,
-      eyeMatrix
+      eyeMatrix,
+      flatMercator
     )
   }
 
@@ -1911,7 +1926,10 @@ export class RegionRenderer {
    * The shader program determines whether the mesh is projected flat or to
    * ECEF; both variants consume the same region-local Mercator encoding.
    */
-  private regionToRenderable(region: RegionState): RenderableRegion {
+  private regionToRenderable(
+    region: RegionState,
+    flatMercator: boolean
+  ): RenderableRegion {
     return {
       mercatorBounds: region.mercatorBounds!,
       vertexBuffer: region.vertexBuffer!,
@@ -1919,7 +1937,7 @@ export class RegionRenderer {
       indexCount: region.indexCount,
       indexBuffer: region.indexBuffer!,
       meshBounds: region.meshBounds!,
-      latIsAscending: region.latIsAscending,
+      texLatEdges: flatMercator ? region.texLatEdges : null,
       texture: region.texture,
       bandTexture: region.bandTexture,
       bandTextureKey: region.bandTextureKey,
@@ -1936,8 +1954,9 @@ export class RegionRenderer {
     renderer: ZarrRenderer,
     shaderProgram: ShaderProgram,
     worldOffsets: number[],
-    customShaderConfig?: CustomShaderConfig,
-    eyeMatrix: number[] | Float32Array | Float64Array | null = null
+    customShaderConfig: CustomShaderConfig | undefined,
+    eyeMatrix: number[] | Float32Array | Float64Array | null,
+    flatMercator: boolean
   ): void {
     const gl = renderer.gl
 
@@ -1945,7 +1964,7 @@ export class RegionRenderer {
     setupBandTextureUniforms(gl, shaderProgram)
 
     for (const { region, clipPasses } of this.plannedDraws(gl, worldOffsets)) {
-      const renderable = this.regionToRenderable(region)
+      const renderable = this.regionToRenderable(region, flatMercator)
       if (!clipPasses) {
         renderRegion(
           gl,
@@ -2019,7 +2038,7 @@ export class RegionRenderer {
       indexBuffer: region.indexBuffer!,
       indexCount: region.indexCount,
       meshBounds: region.meshBounds!,
-      latIsAscending: region.latIsAscending,
+      texLatEdges: region.texLatEdges,
     }
   }
 

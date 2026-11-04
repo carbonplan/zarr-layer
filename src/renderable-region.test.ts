@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { renderRegion, type RenderableRegion } from './renderable-region'
+import {
+  latLookupAnchor,
+  renderRegion,
+  type RenderableRegion,
+} from './renderable-region'
+import { latToMercatorNorm } from './map-utils'
 import { bandTextureKey } from './render-helpers'
 import { createRecordingGl } from './__fixtures__/fake-gl'
 import type { BandTransform } from './band-format'
@@ -24,6 +29,8 @@ const program = new Proxy(
     nanLoc: { name: 'u_zl_nan' },
     clipBoxesLoc: { name: 'u_clip_boxes' },
     clipCountLoc: { name: 'u_clip_count' },
+    latLookupLoc: { name: 'u_latLookup' },
+    latAnchorLoc: { name: 'u_latAnchor' },
   } as Record<string, unknown>,
   { get: (target, key) => (key in target ? target[key as string] : null) }
 ) as unknown as ShaderProgram
@@ -41,7 +48,6 @@ function region(bandTransform: BandTransform | null): RenderableRegion {
     pixCoordBuffer: {} as WebGLBuffer,
     indexBuffer: {} as WebGLBuffer,
     indexCount: 3,
-    latIsAscending: false,
     texture: null,
     bandTexture: {} as WebGLTexture,
     bandTextureKey: bandTextureKey(['band_0'], 'int'),
@@ -137,5 +143,112 @@ describe('renderRegion clip boxes', () => {
       gl.callsTo('uniform1i').find((c) => c.args[0] === 'u_clip_count')?.args
     ).toEqual(['u_clip_count', 0])
     expect(gl.callsTo('uniform4fv')).toHaveLength(0)
+  })
+})
+
+describe('renderRegion latitude lookup', () => {
+  const uniform1i = (gl: ReturnType<typeof createRecordingGl>, name: string) =>
+    gl.callsTo('uniform1i').find((c) => c.args[0] === name)?.args[1]
+
+  it('enables the lookup with the region-anchored constants', () => {
+    const gl = createRecordingGl()
+    const r = {
+      ...region(null),
+      meshBounds: { x0: 0.5, y0: 0.3, x1: 0.6, y1: 0.4 },
+      texLatEdges: [21.9, 72.6] as [number, number],
+    }
+    renderRegion(gl, program, r, [0], config)
+
+    expect(uniform1i(gl, 'u_latLookup')).toBe(1)
+    const anchor = gl
+      .callsTo('uniform4f')
+      .find((c) => c.args[0] === 'u_latAnchor')?.args
+    expect(anchor?.slice(1)).toEqual(latLookupAnchor(0.35, [21.9, 72.6]))
+  })
+
+  it('samples interpolated texture coordinates without lat edges', () => {
+    const gl = createRecordingGl()
+    renderRegion(gl, program, region(null), [0], config)
+
+    expect(uniform1i(gl, 'u_latLookup')).toBe(0)
+    expect(
+      gl.callsTo('uniform4f').find((c) => c.args[0] === 'u_latAnchor')
+    ).toBeUndefined()
+  })
+})
+
+describe('latLookupAnchor', () => {
+  // JS port of FRAGMENT_SAMPLE_COORD's lookup branch, run in Float32 so the
+  // test sees the precision the GPU does.
+  const f = Math.fround
+  function sinhSmall(x: number): number {
+    if (Math.abs(x) < 0.5) {
+      const x2 = f(x * x)
+      return f(x * f(1 + f(x2 * f(1 / 6 + f(x2 * f(1 / 120 + f(x2 / 5040)))))))
+    }
+    return f(Math.sinh(x))
+  }
+  function shaderV(
+    clipY: number,
+    [s0, c0, vAnchor, vPerRad]: [number, number, number, number]
+  ): number {
+    const dy = f(-2 * f(Math.PI) * f(clipY))
+    const sh = sinhSmall(f(0.5 * dy))
+    const dTan = f(f(2 * f(s0) * sh * sh) + f(f(c0) * sinhSmall(dy)))
+    const dLat = f(Math.atan2(dTan, f(1 + f(f(s0) * f(f(s0) + dTan)))))
+    return f(f(vAnchor) + f(dLat * f(vPerRad)))
+  }
+
+  const edges: [number, number] = [21.9, 72.6]
+  const vOf = (lat: number) => (lat - edges[0]) / (edges[1] - edges[0])
+  const anchorY = (latToMercatorNorm(21.9) + latToMercatorNorm(72.6)) / 2
+  const anchor = latLookupAnchor(anchorY, edges)
+
+  it('maps each latitude to its texture row', () => {
+    for (const lat of [21.9, 30, 46.7, 46.8, 60, 72.5, 72.6]) {
+      const v = shaderV(latToMercatorNorm(lat) - anchorY, anchor)
+      // 507 rows: a thousandth of a row
+      expect(Math.abs(v - vOf(lat)) * 507).toBeLessThan(1e-3)
+    }
+  })
+
+  it('stays within a Float32 texture coordinate on a small region', () => {
+    // A 0.5° region of 512 rows: an absolute Float32 Mercator Y would be off
+    // by ~0.01 rows here, the region-local offset by Float32 v rounding only.
+    const small: [number, number] = [46.5, 47]
+    const y0 = (latToMercatorNorm(46.5) + latToMercatorNorm(47)) / 2
+    const a = latLookupAnchor(y0, small)
+    for (let lat = 46.5; lat <= 47; lat += 0.01) {
+      const v = shaderV(latToMercatorNorm(lat) - y0, a)
+      expect(Math.abs(v - (lat - 46.5) / 0.5) * 512).toBeLessThan(1e-4)
+    }
+  })
+
+  it('follows descending rows', () => {
+    const descending: [number, number] = [72.6, 21.9]
+    const a = latLookupAnchor(anchorY, descending)
+    const v = shaderV(latToMercatorNorm(46.7) - anchorY, a)
+    expect(v).toBeCloseTo((72.6 - 46.7) / 50.7, 5)
+  })
+
+  it.each([
+    ['crossing the equator', -30, 30, 720],
+    ['reaching the Mercator limit', 60, 85, 300],
+    ['in the far south', -85, -60, 300],
+    ['spanning the Mercator world', -85, 85, 1700],
+  ])('maps rows of a region %s', (_, south, north, rows) => {
+    const y0 = (latToMercatorNorm(south) + latToMercatorNorm(north)) / 2
+    for (const edges of [
+      [south, north],
+      [north, south],
+    ] as [number, number][]) {
+      const a = latLookupAnchor(y0, edges)
+      for (let i = 0; i <= 20; i++) {
+        const lat = south + ((north - south) * i) / 20
+        const v = shaderV(latToMercatorNorm(lat) - y0, a)
+        const expected = (lat - edges[0]) / (edges[1] - edges[0])
+        expect(Math.abs(v - expected) * rows).toBeLessThan(1e-3)
+      }
+    }
   })
 })
