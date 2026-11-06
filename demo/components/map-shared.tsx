@@ -134,6 +134,7 @@ const mapLibreConfig: MapConfig = {
       },
       center: [0, 20],
       zoom: window.innerWidth < 640 ? 1.2 : 2.4,
+      maxPitch: 85,
     }) as MapInstance
   },
   setProjection: (map: MapInstance, projection: DemoProjection) => {
