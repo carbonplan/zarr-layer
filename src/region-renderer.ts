@@ -80,6 +80,7 @@ import {
   hasRegionData,
   isRegionCpuReady,
   isRegionFailed,
+  isRegionRetryPending,
   isRegionGpuReady,
   makeRegionKey,
   releaseRegionTextures,
@@ -1726,6 +1727,7 @@ export class RegionRenderer {
     // 2. Stale regions (have data, wrong selector) - selector change
     const hashParts: string[] = []
     let dispatched = false
+    const now = Date.now()
     for (const [levelIndex, regions] of wanted) {
       const newRegions: RegionCoordinate[] = []
       const staleRegions: RegionCoordinate[] = []
@@ -1736,6 +1738,9 @@ export class RegionRenderer {
         // Skip if already loading - when the load completes, invalidate()
         // triggers another updateVisibleRegions() check to see if refetch is needed
         if (cached?.loading) {
+          continue
+        }
+        if (cached && isRegionRetryPending(cached, this.selectorVersion, now)) {
           continue
         }
 

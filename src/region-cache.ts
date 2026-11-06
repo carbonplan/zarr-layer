@@ -106,6 +106,7 @@ export function createRegionState(
     loading: false,
     requestId: null,
     failedSelectorVersion: null,
+    retry: null,
     channels: 1,
     texture: null,
     textureUploaded: false,
@@ -153,6 +154,19 @@ export function isRegionFailed(
   selectorVersion: number
 ): boolean {
   return region.failedSelectorVersion === selectorVersion
+}
+
+/** The region failed under this selector and its next attempt is not due. */
+export function isRegionRetryPending(
+  region: RegionState,
+  selectorVersion: number,
+  now: number
+): boolean {
+  return (
+    region.retry !== null &&
+    region.retry.selectorVersion === selectorVersion &&
+    region.retry.at > now
+  )
 }
 
 /**
@@ -262,6 +276,7 @@ export class RegionCache {
   clearFailures(): void {
     for (const region of this.regions.values()) {
       region.failedSelectorVersion = null
+      region.retry = null
     }
   }
 
