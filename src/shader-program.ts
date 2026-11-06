@@ -145,9 +145,7 @@ function uniformVectors(source: string): Map<string, number> {
 
 /**
  * Explains a failed link when uniform arrays are the likely cause, counting
- * the layer's own uniforms beside the custom shader's, since they share the
- * device's budget. The driver counts only uniforms the shader uses, so the
- * limit shows only when linking fails.
+ * the layer's uniforms beside the custom ones.
  */
 function uniformArrayHint(
   gl: WebGL2RenderingContext,

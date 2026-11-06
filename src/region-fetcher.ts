@@ -575,15 +575,9 @@ export class RegionFetcher {
       this.context.invalidate()
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
-        // A failure that may pass is retried after a backoff, during which
-        // the region counts as loading and keeps whatever it already shows.
-        // Otherwise it is final under this selector: the region is not
-        // requested again until something starts a fresh attempt, and any
-        // data it held under an earlier selector is dropped so it draws
-        // nothing rather than the wrong selection. A request that was
-        // cancelled or superseded (every level commit is a new runtime
-        // object, and a reload clears failures) must not record either: its
-        // outcome belongs to an attempt nobody is waiting on.
+        // Retry after a backoff, keeping what the region shows, or record a
+        // final failure and drop data from an earlier selector. A cancelled
+        // or superseded request records neither.
         const superseded =
           controller.signal.aborted ||
           this.context.isRemoved() ||

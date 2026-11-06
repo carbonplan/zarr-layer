@@ -18,9 +18,8 @@ export interface RegionState {
   // Selector version whose fetch failed. The region is not requested again
   // under that selector; it draws nothing and counts as settled.
   failedSelectorVersion: number | null
-  // Failed attempts under one selector still to be retried, and when the
-  // next may start (ms since epoch). Until then the region counts as
-  // loading, so fallbacks stay on screen.
+  // Pending retry: failed attempts under a selector and when the next may
+  // start (ms since epoch).
   retry: { selectorVersion: number; attempts: number; at: number } | null
   channels: number
   // WebGL resources

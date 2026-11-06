@@ -251,9 +251,8 @@ export class ZarrLayer {
   }
 
   /**
-   * Warn once when `renderPoles` cannot take effect because the map is a
-   * Mapbox older than 3.32: only Mapbox passes a projection to prerender,
-   * and from 3.32 the render parameters arrive with it.
+   * Warn once when `renderPoles` cannot apply: Mapbox before 3.32 passes a
+   * projection to prerender but no render parameters.
    */
   private warnIfPolesUnreachable(projection: unknown): void {
     if (!this.renderPoles || this.warnedPolesUnreachable) return
@@ -951,19 +950,14 @@ export class ZarrLayer {
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
         poles,
-        // The globe is one world: tiles past the antimeridian, which the
-        // cover numbers as the next copy, meet regions in whichever copy
-        // their mesh lies.
+        // The globe is one world, so tiles match regions in any copy.
         wrap: globe ? undefined : wrap ?? 0,
       }))
   }
 
   /**
-   * The area of the map the viewport shows, to cut the tile cover down to,
-   * with a margin so regions at its edge are not lost to rounding. Only on
-   * a flat Mercator map without terrain, where the map's bounds are exact
-   * and include its padding; on the globe they are estimated from a few
-   * screen points, and terrain shows ground the flat bounds leave out.
+   * The viewport plus a margin, to cut the tile cover to. Only on a flat
+   * Mercator map without terrain, where `getBounds` is exact.
    */
   private coverViewport(): LonLatBounds | null {
     const map = this.map

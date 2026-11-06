@@ -174,14 +174,12 @@ function intersectLon(
   return parts
 }
 
-/** Points sampled along each edge of the screen to bound the view's area. */
+/** Points sampled along each screen edge in `viewportBounds`. */
 const EDGE_SAMPLES = 8
 
 /**
- * The map's bounds with east past west, widened to the whole screen where
- * `getBounds` leaves the padded edges out (Mapbox): those edges still show
- * the layer. The screen's edges are unprojected, so a rotated or pitched
- * view is bounded by the ground it shows.
+ * The map's bounds with east past west, widened to the whole screen when
+ * the map has padding, which Mapbox's `getBounds` leaves out.
  */
 export function viewportBounds(map: MapLike): LonLatBounds | null {
   const bounds = map.getBounds?.()?.toArray?.()
@@ -667,19 +665,14 @@ export class RegionRenderer {
     return true
   }
 
-  /**
-   * The area the viewport cover was made for, padded edges included, while
-   * selection tiles the viewport itself; null while the map gives a cover.
-   */
+  /** The viewport the layer tiled itself, or null when the map gave a cover. */
   get viewport(): LonLatBounds | null {
     return this.syntheticCover ? this.syntheticViewport : null
   }
 
   /**
    * The map's tile cover for this frame, or null when it has none to give.
-   * With `viewport`, each tile keeps only the parts of it the viewport
-   * shows, so a tile reaching far past the screen's edge wants only the
-   * regions on screen.
+   * With `viewport`, each tile is cut to the part on screen.
    */
   setCoveringTiles(
     tiles: TileRequest[] | null,
@@ -691,11 +684,7 @@ export class RegionRenderer {
         : tiles
   }
 
-  /**
-   * A tile cut down to the parts of it inside the viewport, across every
-   * world copy the viewport meets, so copies sharing a plan agree. A tile
-   * the viewport misses is kept whole rather than left wanting nothing.
-   */
+  /** The tile cut to the viewport in every world copy; whole if missed. */
   private inViewport(tile: TileRequest, viewport: LonLatBounds): TileRequest {
     const b = getTileLonLatBounds(tile.tileId, { toPoles: tile.poles })
     const lons = intersectLon(b.west, b.east, viewport.west, viewport.east)
@@ -927,11 +916,8 @@ export class RegionRenderer {
       this.syntheticCover ?? this.coveringTiles ?? tiles,
       map
     )
-    // The view's own tiles are wanted in full: the fit has already moved
-    // them to coarser levels where the budget asked and a coarser level
-    // exists, and what is left is on screen. Tiles the draped hooks drew
-    // beyond the cover outlive the view that drew them, so they only get
-    // what budget the cover leaves, nearest the map center first.
+    // Cover tiles are wanted in full; the fit already coarsened them to the
+    // budget. Other hook tiles share what budget is left, nearest first.
     const coverKeys = new Set(
       (this.syntheticCover ?? this.coveringTiles ?? []).map(requestKey)
     )

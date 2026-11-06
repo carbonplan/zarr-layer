@@ -1,9 +1,6 @@
 /**
- * How a failed region fetch is retried. Network errors, timeouts,
- * throttling and server errors pass, so they are retried for as long as the
- * region is wanted. A client error other than those will not change on
- * retry, so it is final at once. Anything else, such as a decode error, gets
- * a few attempts before it is final.
+ * Transient failures (network, timeout, throttling, 5xx) retry while the
+ * region is wanted; other 4xx are final; anything else gets a few attempts.
  */
 export type FetchFailureKind = 'transient' | 'permanent' | 'unknown'
 
