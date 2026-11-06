@@ -614,9 +614,37 @@ export class RegionRenderer {
     return true
   }
 
-  /** The map's tile cover for this frame, or null when it has none to give. */
-  setCoveringTiles(tiles: TileRequest[] | null): void {
-    this.coveringTiles = tiles
+  /**
+   * The map's tile cover for this frame, or null when it has none to give.
+   * With `viewport`, each tile keeps only the parts of it the viewport
+   * shows, so a tile reaching far past the screen's edge wants only the
+   * regions on screen.
+   */
+  setCoveringTiles(
+    tiles: TileRequest[] | null,
+    viewport: LonLatBounds | null = null
+  ): void {
+    this.coveringTiles =
+      tiles && viewport && !this.worldMapping
+        ? tiles.map((tile) => this.inViewport(tile, viewport))
+        : tiles
+  }
+
+  /**
+   * A tile cut down to the parts of it inside the viewport, across every
+   * world copy the viewport meets, so copies sharing a plan agree. A tile
+   * the viewport misses is kept whole rather than left wanting nothing.
+   */
+  private inViewport(tile: TileRequest, viewport: LonLatBounds): TileRequest {
+    const b = getTileLonLatBounds(tile.tileId, { toPoles: tile.poles })
+    const lons = intersectLon(b.west, b.east, viewport.west, viewport.east)
+    const south = Math.max(b.south, viewport.south)
+    const north = Math.min(b.north, viewport.north)
+    if (lons.length === 0 || south >= north) return tile
+    return {
+      ...tile,
+      extents: lons.map(([west, east]) => ({ west, east, south, north })),
+    }
   }
 
   /**
@@ -838,37 +866,51 @@ export class RegionRenderer {
       this.syntheticCover ?? this.coveringTiles ?? tiles,
       map
     )
-    const perTile = this.tileTargets(tiles)
+    // The view's own tiles are wanted in full: the fit has already moved
+    // them to coarser levels where the budget asked and a coarser level
+    // exists, and what is left is on screen. Tiles the draped hooks drew
+    // beyond the cover outlive the view that drew them, so they only get
+    // what budget the cover leaves, nearest the map center first.
+    const coverKeys = new Set(
+      (this.syntheticCover ?? this.coveringTiles ?? []).map(requestKey)
+    )
     const budget = this.wantedBudget()
-    let totalRegions = 0
-    let totalBytes = 0
-    for (const target of perTile) {
-      if (target.runtime) {
-        totalRegions += target.regions.length
-        for (const region of target.regions) {
-          totalBytes += this.regionBytes(target.runtime, region)
-        }
-      } else {
-        void this.levelLoader.ensureRuntime(target.levelIndex)
-        this.pendingLevels.add(target.levelIndex)
-      }
-    }
-    // Tiles come in order already: the cover's, then the hooks', nearest
-    // first. When the budget bites, order each tile's regions by distance
-    // from the map center too, so a single tile spanning many regions cannot
-    // spend the budget on its far corner. The first region, the nearest,
-    // is wanted even when it alone exceeds the budget, so the view never
-    // goes blank; past it the budget holds.
-    const truncating =
-      totalRegions > budget.regions || totalBytes > budget.bytes
     const seen = new Set<string>()
     let wantedBytes = 0
-    for (const { levelIndex, runtime, regions } of perTile) {
-      if (!runtime) continue
-      const ordered = truncating
-        ? this.nearestCenterFirst(regions, runtime, map)
-        : regions
-      for (const region of ordered) {
+    const want = (
+      levelIndex: number,
+      runtime: LevelRuntime,
+      region: RegionCoordinate
+    ) => {
+      const key = this.makeRegionKey(levelIndex, region.regionX, region.regionY)
+      if (seen.has(key)) return
+      seen.add(key)
+      wantedBytes += this.regionBytes(runtime, region)
+      let list = wanted.get(levelIndex)
+      if (!list) {
+        list = []
+        wanted.set(levelIndex, list)
+      }
+      list.push(region)
+    }
+    const targets = this.tileTargets(tiles)
+    const extra: TileTarget[] = []
+    targets.forEach((target, i) => {
+      if (!target.runtime) {
+        void this.levelLoader.ensureRuntime(target.levelIndex)
+        this.pendingLevels.add(target.levelIndex)
+        return
+      }
+      if (!coverKeys.has(requestKey(tiles[i]))) {
+        extra.push(target)
+        return
+      }
+      for (const region of target.regions) {
+        want(target.levelIndex, target.runtime, region)
+      }
+    })
+    for (const { levelIndex, runtime, regions } of extra) {
+      for (const region of this.nearestCenterFirst(regions, runtime!, map)) {
         const key = this.makeRegionKey(
           levelIndex,
           region.regionX,
@@ -876,16 +918,9 @@ export class RegionRenderer {
         )
         if (seen.has(key)) continue
         if (seen.size >= budget.regions) return wanted
-        const cost = this.regionBytes(runtime, region)
+        const cost = this.regionBytes(runtime!, region)
         if (seen.size > 0 && wantedBytes + cost > budget.bytes) return wanted
-        seen.add(key)
-        wantedBytes += cost
-        let list = wanted.get(levelIndex)
-        if (!list) {
-          list = []
-          wanted.set(levelIndex, list)
-        }
-        list.push(region)
+        want(levelIndex, runtime!, region)
       }
     }
     return wanted

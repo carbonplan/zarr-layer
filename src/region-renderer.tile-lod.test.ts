@@ -113,6 +113,7 @@ type Seam = {
   wantedCovered(): boolean
   tileLevels: Map<string, number>
   tileLevel(tile: TileRequest): number | null
+  coveringTiles: TileRequest[] | null
 }
 const seam = (renderer: RegionRenderer) => renderer as unknown as Seam
 
@@ -1214,7 +1215,7 @@ describe('region byte budget', () => {
     expect([...seam(renderer).wantedKeys].sort()).toEqual([...all].sort())
   })
 
-  it('holds a dataset of large regions to the byte budget', async () => {
+  it('holds tiles the draped hooks drew to the byte budget', async () => {
     // Regions of 32x64 float32 pixels, 8 KB of data and 8 KB of texture
     // each, against a 1 MB cache: an update may want half of it, 32
     // regions, well short of the region budget. The world tile needs all
@@ -1227,7 +1228,7 @@ describe('region byte budget', () => {
     renderer.update(map, gl)
     await settle(renderer)
 
-    renderer.setCoveringTiles([{ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }])
+    renderer.noteDrawnTile({ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }, 1)
     renderer.update(map, gl)
     expect(seam(renderer).wantedKeys.size).toBe(32)
 
@@ -1241,6 +1242,92 @@ describe('region byte budget', () => {
       bytes += regionByteLength(cache.get(key)!)
     }
     expect(bytes).toBe(512 * 1024)
+  })
+})
+
+describe("the view's own tile cover", () => {
+  it('is wanted in full past the byte budget when no coarser level fits', async () => {
+    // The same regions against the same 1 MB cache: these are on screen,
+    // and leaving most of them blank helps no one.
+    const { renderer, gl } = await makeRenderer({
+      wide: true,
+      limits: { maxBytes: 1024 * 1024 },
+    })
+    const map = { ...viewportAt(0), getCenter: () => ({ lng: 0, lat: 0 }) }
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+    renderer.setCoveringTiles([world])
+    renderer.update(map, gl)
+    const runtime = seam(renderer).levelLoader.runtime(0)!
+    const under = seam(renderer).tileRegions(0, runtime, world)
+    expect(under.length).toBeGreaterThan(32)
+    expect(seam(renderer).wantedKeys.size).toBe(under.length)
+  })
+
+  it('wants only what the viewport shows of each tile', async () => {
+    const { renderer, gl } = await makeRenderer({ single: true })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+
+    renderer.setCoveringTiles([world])
+    renderer.update(map, gl)
+    expect(seam(renderer).wantedKeys.size).toBe(32 * 32)
+
+    // lon 100..105, lat -20..-15: column 25 (lon 101..112) and the column
+    // west of it, rows 17..19.
+    renderer.setCoveringTiles([world], {
+      west: 100,
+      south: -20,
+      east: 105,
+      north: -15,
+    })
+    renderer.update(map, gl)
+    const wanted = [...seam(renderer).wantedKeys]
+    expect(wanted.length).toBeGreaterThan(0)
+    expect(wanted.length).toBeLessThanOrEqual(6)
+    expect(wanted).toContain(makeRegionKey(0, 25, 19))
+  })
+
+  it('counts a tile cut to the viewport as ready once its regions there load', async () => {
+    const { renderer, gl } = await makeRenderer({ single: true })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+    const viewport = { west: 100, south: -20, east: 105, north: -15 }
+
+    renderer.setCoveringTiles([world], viewport)
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.setCoveringTiles([world], viewport)
+    renderer.update(map, gl)
+    seam(renderer).plannedDraws(gl)
+
+    const [tile] = seam(renderer).coveringTiles!
+    const plan = seam(renderer).planTile(tile, () => true)
+    expect(plan.ready).toBe(true)
+    expect(plan.regions.length).toBe(seam(renderer).wantedKeys.size)
+  })
+
+  it('is left whole in a registered projection', async () => {
+    const { renderer, gl } = await makeRenderer({ single: true })
+    renderer.setWorldMapping({
+      toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
+      toLngLat: (x, y) => [x * 360 - 180, 90 - y * 360],
+    })
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+    renderer.setCoveringTiles([world], {
+      west: 100,
+      south: -20,
+      east: 105,
+      north: -15,
+    })
+    expect(seam(renderer).coveringTiles![0].extents).toBeUndefined()
+    void gl
   })
 })
 
@@ -1277,7 +1364,8 @@ describe('region byte estimates', () => {
   })
 
   it('wants the single nearest region when it alone exceeds the budget', async () => {
-    // 16 KB regions under the world tile against an update budget of 8 KB:
+    // 16 KB regions under a world tile the draped hooks drew, against an
+    // update budget of 8 KB:
     // a blank view helps no one, so the region nearest the map center is
     // wanted, and nothing more. The world tile shows what it has.
     const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
@@ -1290,7 +1378,7 @@ describe('region byte estimates', () => {
     renderer.update(map, gl)
     await settle(renderer)
 
-    renderer.setCoveringTiles([world])
+    renderer.noteDrawnTile(world, 1)
     renderer.update(map, gl)
     expect([...seam(renderer).wantedKeys]).toEqual(['0:32,31'])
 
@@ -1321,7 +1409,7 @@ describe('region byte estimates', () => {
     renderer.update(map, gl)
     await settle(renderer)
 
-    renderer.setCoveringTiles([world])
+    renderer.noteDrawnTile(world, 1)
     renderer.update(map, gl)
     // Row 32 (lat 0..-2.8) lies just south of the center.
     expect([...seam(renderer).wantedKeys].sort()).toEqual([
@@ -1332,9 +1420,10 @@ describe('region byte estimates', () => {
 })
 
 describe('single-resolution datasets', () => {
-  it('caps the wanted regions at the cache size, nearest tiles first', async () => {
+  it('caps the regions wanted for hook tiles at the cache size, nearest tiles first', async () => {
     // With no coarser level, far tiles map onto many regions of the only
-    // level. Wanting more than the cache holds would make it thrash.
+    // level. Hook tiles outlive the view that drew them; wanting more of
+    // them than the cache holds would make it thrash.
     const { renderer, gl } = await makeRenderer({ single: true })
     const map = viewportAt(0)
     renderer.update(map, gl)
@@ -1348,7 +1437,7 @@ describe('single-resolution datasets', () => {
     }
     const nearest: TileRequest = { tileId: { z: 3, x: 1, y: 1 }, zoom: 2 }
     tiles.push(nearest)
-    renderer.setCoveringTiles(tiles)
+    for (const tile of tiles) renderer.noteDrawnTile(tile, 1)
     renderer.update(map, gl)
 
     const wanted = seam(renderer).wantedKeys
@@ -1358,7 +1447,7 @@ describe('single-resolution datasets', () => {
     expect(wanted.has(makeRegionKey(0, 5, 5))).toBe(true)
   })
 
-  it('shows what it has of the only level when a tile cannot want it in full', async () => {
+  it('shows what it has of the only level when a hook tile cannot want it in full', async () => {
     // With no coarser level to fall back to, the tile keeps its own level,
     // never counts as complete, and draws the regions the cap let through.
     const { renderer, gl } = await makeRenderer({ single: true })
@@ -1367,7 +1456,7 @@ describe('single-resolution datasets', () => {
     await settle(renderer)
     const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
 
-    renderer.setCoveringTiles([world])
+    renderer.noteDrawnTile(world, 1)
     renderer.update(map, gl)
     expect(seam(renderer).wantedKeys.size).toBe(WANTED_REGIONS)
     await settle(renderer)
@@ -1390,7 +1479,7 @@ describe('single-resolution datasets', () => {
     renderer.update(map, gl)
     await settle(renderer)
 
-    renderer.setCoveringTiles([{ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }])
+    renderer.noteDrawnTile({ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }, 1)
     renderer.update(map, gl)
 
     const wanted = seam(renderer).wantedKeys

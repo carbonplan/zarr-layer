@@ -34,6 +34,7 @@ import type {
 } from './types'
 import type { RenderContext, TileId } from './renderer-types'
 import { RegionRenderer, type TileRequest } from './region-renderer'
+import type { LonLatBounds } from './region-math'
 import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
   computeWorldOffsets,
@@ -54,6 +55,9 @@ import {
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
 import { ZarrLayerNotReadyError } from './errors'
+
+/** Share of the viewport's span added on each side when cutting tiles to it. */
+const VIEWPORT_MARGIN = 0.02
 
 /** MapLibre's terrain tile ID. `wrap` is the world copy, which draws the
  *  same content as every other copy, so only `canonical` is used. */
@@ -900,7 +904,7 @@ export class ZarrLayer {
       !!this.map.getTerrain?.() ||
       (!cover && this.isGlobeProjection() && !this.usingDirectMapboxGlobePath)
     if (!draped) this.regionRenderer.clearDrawnTiles()
-    this.regionRenderer.setCoveringTiles(cover)
+    this.regionRenderer.setCoveringTiles(cover, cover && this.coverViewport())
     this.regionRenderer.update(this.map, this.gl)
   }
 
@@ -929,6 +933,31 @@ export class ZarrLayer {
         poles,
         wrap: wrap ?? 0,
       }))
+  }
+
+  /**
+   * The area of the map the viewport shows, to cut the tile cover down to,
+   * with a margin so regions at its edge are not lost to rounding. Only on
+   * a flat Mercator map without terrain, where the map's bounds are exact
+   * and include its padding; on the globe they are estimated from a few
+   * screen points, and terrain shows ground the flat bounds leave out.
+   */
+  private coverViewport(): LonLatBounds | null {
+    const map = this.map
+    if (!map || this.isGlobeProjection() || map.getTerrain?.()) return null
+    if (this.worldMapping()) return null
+    const bounds = map.getBounds?.()?.toArray?.()
+    if (!bounds) return null
+    const [[west, south], [rawEast, north]] = bounds
+    const east = rawEast < west ? rawEast + 360 : rawEast
+    const lonMargin = (east - west) * VIEWPORT_MARGIN
+    const latMargin = (north - south) * VIEWPORT_MARGIN
+    return {
+      west: west - lonMargin,
+      east: east + lonMargin,
+      south: Math.max(-90, south - latMargin),
+      north: Math.min(90, north + latMargin),
+    }
   }
 
   /**
