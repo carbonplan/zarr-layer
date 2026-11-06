@@ -281,6 +281,15 @@ describe('computeWorldOffsets', () => {
     ])
   })
 
+  it("follows a viewport reaching past the map's bounds", () => {
+    // Mapbox's bounds leave padded edges out; the layer passes the whole
+    // view, here padded past the antimeridian.
+    const viewport = { west: 160, east: 193 }
+    expect(computeWorldOffsets(mapSpanning(160, 170), false, viewport)).toEqual(
+      [0, 1]
+    )
+  })
+
   it('falls back to one copy without a map or bounds', () => {
     expect(computeWorldOffsets(null, false)).toEqual([0])
     expect(computeWorldOffsets({ getBounds: () => null }, false)).toEqual([0])

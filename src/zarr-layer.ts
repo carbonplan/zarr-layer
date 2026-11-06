@@ -1075,7 +1075,8 @@ export class ZarrLayer {
     // A registered projection's world is drawn once, without copies.
     const worldOffsets = computeWorldOffsets(
       this.map,
-      isGlobe || !!this.worldMapping()
+      isGlobe || !!this.worldMapping(),
+      this.regionRenderer.viewport
     )
     const colormapTexture = this.colormap.ensureTexture(this.gl)
     // The direct globe path draws straight onto the sphere, so it needs the

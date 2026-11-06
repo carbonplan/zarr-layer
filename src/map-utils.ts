@@ -377,14 +377,19 @@ export function resolveProjectionParams(
   return { matrix, shaderData, projectionData, mapbox }
 }
 
+/**
+ * The world copies the view shows. `viewport` overrides the map's bounds
+ * where they leave part of the view out.
+ */
 export function computeWorldOffsets(
   map: MapLike | null,
-  isGlobe: boolean
+  isGlobe: boolean,
+  viewport: { west: number; east: number } | null = null
 ): number[] {
   if (!map) return [0]
 
   const bounds = map.getBounds ? map.getBounds() : null
-  if (!bounds) return [0]
+  if (!bounds && !viewport) return [0]
 
   const renderWorldCopies =
     typeof map.getRenderWorldCopies === 'function'
@@ -392,8 +397,8 @@ export function computeWorldOffsets(
       : true
   if (isGlobe || !renderWorldCopies) return [0]
 
-  const west = bounds.getWest()
-  const east = bounds.getEast()
+  const west = viewport ? viewport.west : bounds!.getWest()
+  const east = viewport ? viewport.east : bounds!.getEast()
 
   let effectiveEast = east
   if (west > east) {

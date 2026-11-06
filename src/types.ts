@@ -242,6 +242,7 @@ export interface MapLike {
     right?: number
   }
   getContainer?(): { clientWidth: number; clientHeight: number }
+  unproject?(point: [number, number]): { lng: number; lat: number }
   getCenter?(): { lng: number; lat: number }
   getZoom?(): number
   painter?: { context?: { gl?: unknown } }

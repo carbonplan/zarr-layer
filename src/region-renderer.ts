@@ -163,7 +163,10 @@ function intersectLon(
   east: number
 ): Array<[number, number]> {
   const parts: Array<[number, number]> = []
-  for (const shift of [-360, 0, 360]) {
+  const first = Math.ceil((west - tileEast) / 360)
+  const last = Math.floor((east - tileWest) / 360)
+  for (let k = first; k <= last; k++) {
+    const shift = k * 360
     const a = Math.max(tileWest + shift, west)
     const b = Math.min(tileEast + shift, east)
     if (a < b) parts.push([a, b])
@@ -171,45 +174,52 @@ function intersectLon(
   return parts
 }
 
-const mercatorNormToLat = (y: number) =>
-  (Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180) / Math.PI
+/** Points sampled along each edge of the screen to bound the view's area. */
+const EDGE_SAMPLES = 8
 
 /**
- * The map's bounds with east past west, widened by the map's padding where
- * `getBounds` leaves the padded edges out (Mapbox). Those edges still show
- * the layer. The widening is linear in Mercator: exact for a flat,
- * unrotated view and a fair margin otherwise.
+ * The map's bounds with east past west, widened to the whole screen where
+ * `getBounds` leaves the padded edges out (Mapbox): those edges still show
+ * the layer. The screen's edges are unprojected, so a rotated or pitched
+ * view is bounded by the ground it shows.
  */
 export function viewportBounds(map: MapLike): LonLatBounds | null {
   const bounds = map.getBounds?.()?.toArray?.()
   if (!bounds) return null
-  const [[west, south], [rawEast, north]] = bounds
-  const east = rawEast < west ? rawEast + 360 : rawEast
+  let [[west, south], [east, north]] = bounds
+  if (east < west) east += 360
   const padding = map.getPadding?.()
   const container = map.getContainer?.()
-  if (!padding || !container) return { west, south, east, north }
-  const { top = 0, bottom = 0, left = 0, right = 0 } = padding
-  const innerWidth = container.clientWidth - left - right
-  const innerHeight = container.clientHeight - top - bottom
-  if (innerWidth <= 0 || innerHeight <= 0 || top + bottom + left + right <= 0) {
+  if (!padding || !container || !map.unproject || east - west >= 360) {
     return { west, south, east, north }
   }
-  const lonPerPixel = (east - west) / innerWidth
-  const yNorth = latToMercatorNorm(north)
-  const ySouth = latToMercatorNorm(south)
-  const yPerPixel = (ySouth - yNorth) / innerHeight
-  return {
-    west: west - left * lonPerPixel,
-    east: east + right * lonPerPixel,
-    north:
-      top > 0
-        ? mercatorNormToLat(Math.max(0, yNorth - top * yPerPixel))
-        : north,
-    south:
-      bottom > 0
-        ? mercatorNormToLat(Math.min(1, ySouth + bottom * yPerPixel))
-        : south,
+  const { top = 0, bottom = 0, left = 0, right = 0 } = padding
+  if (top + bottom + left + right <= 0) return { west, south, east, north }
+  const { clientWidth: width, clientHeight: height } = container
+  const center = (west + east) / 2
+  const corners: Array<[number, number]> = [
+    [0, 0],
+    [width, 0],
+    [width, height],
+    [0, height],
+  ]
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = corners[i]
+    const [bx, by] = corners[(i + 1) % 4]
+    for (let j = 0; j < EDGE_SAMPLES; j++) {
+      const t = j / EDGE_SAMPLES
+      const point = map.unproject([ax + (bx - ax) * t, ay + (by - ay) * t])
+      if (!Number.isFinite(point?.lng) || !Number.isFinite(point?.lat)) {
+        continue
+      }
+      const lng = center + wrapLon(point.lng - center)
+      west = Math.min(west, lng)
+      east = Math.max(east, lng)
+      south = Math.max(-90, Math.min(south, point.lat))
+      north = Math.min(90, Math.max(north, point.lat))
+    }
   }
+  return { west, south, east, north }
 }
 
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
@@ -229,6 +239,7 @@ interface TileDraw {
 
 /** The level a tile targets and its regions there, none until it opens. */
 interface TileTarget {
+  tile: TileRequest
   levelIndex: number
   runtime: LevelRuntime | null
   regions: RegionCoordinate[]
@@ -313,6 +324,7 @@ export class RegionRenderer {
   // A cover made from the viewport when the map gives none and no draped
   // hook is drawing tiles, so that path plans per tile as well.
   private syntheticCover: TileRequest[] | null = null
+  private syntheticViewport: LonLatBounds | null = null
   // Tiles the draped render hooks were asked to draw, which on terrain reach
   // past the sea-level cover. Kept in two generations keyed by the layer's
   // terrain revision: a revision change redraws every visible tile, so the
@@ -656,6 +668,14 @@ export class RegionRenderer {
   }
 
   /**
+   * The area the viewport cover was made for, padded edges included, while
+   * selection tiles the viewport itself; null while the map gives a cover.
+   */
+  get viewport(): LonLatBounds | null {
+    return this.syntheticCover ? this.syntheticViewport : null
+  }
+
+  /**
    * The map's tile cover for this frame, or null when it has none to give.
    * With `viewport`, each tile keeps only the parts of it the viewport
    * shows, so a tile reaching far past the screen's edge wants only the
@@ -819,6 +839,7 @@ export class RegionRenderer {
    */
   private viewportTiles(map: MapLike): TileRequest[] {
     const bounds = viewportBounds(map)
+    this.syntheticViewport = bounds
     if (!bounds) return []
     const { west, south, east, north } = bounds
     const span = east - west
@@ -933,22 +954,21 @@ export class RegionRenderer {
       }
       list.push(region)
     }
-    const targets = this.tileTargets(tiles)
     const extra: TileTarget[] = []
-    targets.forEach((target, i) => {
+    for (const target of this.tileTargets(tiles)) {
       if (!target.runtime) {
         void this.levelLoader.ensureRuntime(target.levelIndex)
         this.pendingLevels.add(target.levelIndex)
-        return
+        continue
       }
-      if (!coverKeys.has(requestKey(tiles[i]))) {
+      if (!coverKeys.has(requestKey(target.tile))) {
         extra.push(target)
-        return
+        continue
       }
       for (const region of target.regions) {
         want(target.levelIndex, target.runtime, region)
       }
-    })
+    }
     for (const { levelIndex, runtime, regions } of extra) {
       for (const region of this.nearestCenterFirst(regions, runtime!, map)) {
         const key = this.makeRegionKey(
@@ -977,7 +997,7 @@ export class RegionRenderer {
       if (levelIndex === null) continue
       const runtime = this.levelLoader.runtime(levelIndex)
       const regions = runtime ? this.tileRegions(levelIndex, runtime, tile) : []
-      targets.push({ levelIndex, runtime, regions })
+      targets.push({ tile, levelIndex, runtime, regions })
     }
     return targets
   }

@@ -16,7 +16,7 @@ import { getRegionsInBounds, type RegionCoordinate } from './region-math'
 import type { ProjectionContext } from './projection-utils'
 import type { RegionState } from './region-state'
 import { boundsIntersect, getTileBounds } from './tile-utils'
-import { latToMercatorNorm } from './map-utils'
+import { computeWorldOffsets, latToMercatorNorm } from './map-utils'
 import type { WorldMapping } from './world-mapping'
 
 /**
@@ -1000,6 +1000,29 @@ describe('per-tile level selection', () => {
     }
   })
 
+  it('reports the padded viewport it tiled, for drawing every world copy', async () => {
+    // Mapbox bounds lon 160..170 over the left 300 of 1000 pixels; the
+    // padded 700 reach past the antimeridian.
+    const { renderer, gl } = await makeRenderer({ single: true })
+    const unproject = ([x, y]: [number, number]) => ({
+      lng: 160 + x / 30,
+      lat: -15 - y / 30,
+    })
+    const map: MapLike = {
+      ...mapAt(160, -20, 170, -15),
+      getPadding: () => ({ right: 700 }),
+      getContainer: () => ({ clientWidth: 1000, clientHeight: 150 }),
+      unproject,
+    }
+    renderer.update(map, gl)
+    expect(renderer.viewport!.east).toBeCloseTo(160 + 1000 / 30)
+    expect(computeWorldOffsets(map, false, renderer.viewport)).toEqual([0, 1])
+
+    renderer.setCoveringTiles([{ tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }])
+    renderer.update(map, gl)
+    expect(renderer.viewport).toBeNull()
+  })
+
   it('falls back to the viewport at the active level without a tile cover', async () => {
     // Mapbox exposes no public tile cover; without terrain its view is read
     // the way it always was.
@@ -1311,6 +1334,43 @@ describe("the view's own tile cover", () => {
     const plan = seam(renderer).planTile(tile, () => true)
     expect(plan.ready).toBe(true)
     expect(plan.regions.length).toBe(seam(renderer).wantedKeys.size)
+  })
+
+  it('wants the same regions of a viewport any number of world turns away', async () => {
+    const { renderer, gl } = await makeRenderer({ single: true })
+    const map = viewportAt(0)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const world: TileRequest = { tileId: { z: 0, x: 0, y: 0 }, zoom: 0 }
+    const wantedFor = (west: number, east: number) => {
+      renderer.setCoveringTiles([world], { west, south: -20, east, north: -15 })
+      renderer.update(map, gl)
+      return [...seam(renderer).wantedKeys].sort()
+    }
+
+    const near = wantedFor(140, 240)
+    expect(near.length).toBeGreaterThan(0)
+    expect(wantedFor(500, 600)).toEqual(near)
+    expect(wantedFor(-940, -840)).toEqual(near)
+  })
+
+  it('holds hook tiles to the budget beside a cover tile no level serves', async () => {
+    const { renderer, gl } = await makeRenderer({ limits: { maxRegions: 4 } })
+    const map = viewportAt(1)
+    renderer.update(map, gl)
+    await waitForActive(renderer, 1)
+    renderer.update(map, gl)
+    await settle(renderer)
+    failLevel(renderer, 0)
+
+    renderer.setCoveringTiles([FAR])
+    renderer.noteDrawnTile(NEAR, 1)
+    renderer.update(map, gl)
+    const runtime = seam(renderer).levelLoader.runtime(1)!
+    expect(seam(renderer).tileRegions(1, runtime, NEAR).length).toBeGreaterThan(
+      2
+    )
+    expect(seam(renderer).wantedKeys.size).toBe(2)
   })
 
   it('is left whole in a registered projection', async () => {
