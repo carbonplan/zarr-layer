@@ -1,3 +1,4 @@
+import { RETRY_BASE_DELAY_MS } from './fetch-retry'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { RegionRenderer } from './region-renderer'
 import {
@@ -198,6 +199,8 @@ async function makeRenderer(
   opts: {
     /** Chunk reads whose key passes this throw, as a failing server would. */
     failReads?: (key: string) => boolean
+    /** What they throw; a client error, final at once, by default. */
+    failWith?: () => Error
     maxRegionFetches?: number
   } = {}
 ) {
@@ -231,7 +234,7 @@ async function makeRenderer(
       if (key.includes('/temperature/c/')) {
         chunkReads.push(key)
         if (opts.failReads?.(key)) {
-          throw new Error('Unexpected response status 500')
+          throw opts.failWith?.() ?? new Error('Unexpected response status 403')
         }
       }
       return memory.get(key)
@@ -876,6 +879,64 @@ describe('RegionRenderer with a region whose fetch fails', () => {
     const states = drawn(renderer, gl)
     expect(states).toHaveLength(3)
     expect(states.map((s) => s.texture)).not.toContain(fallback.texture)
+  })
+})
+
+describe('RegionRenderer with a region whose fetch may pass', () => {
+  const topRight = (key: string) => key.endsWith('/c/0/0/1')
+  const readsOf = (chunkReads: string[]) => chunkReads.filter(topRight).length
+  const serverError = () => new Error('Unexpected response status 503')
+
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      toFake: ['setTimeout', 'Date'],
+    })
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    warnSpy.mockRestore()
+  })
+
+  it('waits out the backoff, then requests it again and draws it', async () => {
+    let failing = true
+    const { renderer, gl, map, chunkReads } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: (key) => failing && topRight(key), failWith: serverError }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(readsOf(chunkReads)).toBe(1)
+
+    // Frames during the backoff do not request it again.
+    for (let i = 0; i < 3; i++) {
+      renderer.update(map, gl)
+      await settle(renderer)
+    }
+    expect(readsOf(chunkReads)).toBe(1)
+
+    failing = false
+    vi.advanceTimersByTime(RETRY_BASE_DELAY_MS)
+    renderer.update(map, gl)
+    await settle(renderer)
+    expect(readsOf(chunkReads)).toBe(2)
+    expect(drawn(renderer, gl)).toHaveLength(4)
+  })
+
+  it('wakes the map when the backoff ends', async () => {
+    const { renderer, gl, map, invalidate } = await makeRenderer(
+      {},
+      undefined,
+      { failReads: topRight, failWith: serverError }
+    )
+    renderer.update(map, gl)
+    await settle(renderer)
+    invalidate.mockClear()
+    vi.advanceTimersByTime(RETRY_BASE_DELAY_MS)
+    expect(invalidate).toHaveBeenCalled()
   })
 })
 

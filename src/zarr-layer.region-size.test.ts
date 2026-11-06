@@ -206,3 +206,48 @@ describe('maxRegionFetches', () => {
     }
   })
 })
+
+describe('maxCacheMB', () => {
+  const layer = (maxCacheMB?: number) =>
+    new ZarrLayer({
+      id: 'zarr',
+      store: store(),
+      variable: 'temperature',
+      colormap: [
+        [0, 0, 0],
+        [255, 255, 255],
+      ],
+      clim: [0, 31],
+      bounds: [-180, -90, 180, 90],
+      latIsAscending: false,
+      maxCacheMB,
+    })
+  const maxBytes = (l: ZarrLayer) =>
+    (
+      l as unknown as {
+        regionRenderer: { regionCache: { limits: { maxBytes: number } } }
+      }
+    ).regionRenderer.regionCache.limits.maxBytes
+  const decodedBytes = (l: ZarrLayer) =>
+    (l as unknown as { zarrStore: { decodedCacheBytes: number } }).zarrStore
+      .decodedCacheBytes
+
+  it('sets how much chunk data the layer caches', async () => {
+    const custom = layer(64)
+    custom.onAdd(map, createRecordingGl())
+    await custom.ready
+    expect(maxBytes(custom)).toBe(64 * 1024 * 1024)
+    expect(decodedBytes(custom)).toBe(32 * 1024 * 1024)
+
+    const byDefault = layer()
+    byDefault.onAdd(map, createRecordingGl())
+    await byDefault.ready
+    expect(maxBytes(byDefault)).toBe(512 * 1024 * 1024)
+  })
+
+  it('rejects a size that is not a positive number', () => {
+    for (const bad of [0, -1, NaN, Infinity]) {
+      expect(() => layer(bad)).toThrow('maxCacheMB must be a positive number')
+    }
+  })
+})

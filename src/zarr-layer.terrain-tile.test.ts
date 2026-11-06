@@ -99,6 +99,7 @@ function fakeMap({
   terrain = true,
   terrainTileSize,
   cover,
+  wrap,
   bounds = WORLD,
 }: {
   globe?: boolean
@@ -106,6 +107,8 @@ function fakeMap({
   terrain?: boolean
   terrainTileSize?: number
   cover?: Canonical[]
+  /** The world copy every covering tile reports. */
+  wrap?: number
   bounds?: Bounds
 } = {}) {
   const state = { globe, zoom, terrain }
@@ -123,7 +126,9 @@ function fakeMap({
         ? { tileSize: terrainTileSize }
         : undefined,
     ...(cover
-      ? { coveringTiles: () => cover.map((canonical) => ({ canonical })) }
+      ? {
+          coveringTiles: () => cover.map((canonical) => ({ canonical, wrap })),
+        }
       : {}),
     getZoom: () => state.zoom,
     getBounds: () => ({
@@ -356,10 +361,44 @@ describe('per-tile levels', () => {
 
     layer.prerender(gl, {})
 
-    expect(setCoveringTiles).toHaveBeenCalledWith([
+    expect(setCoveringTiles.mock.calls[0][0]).toEqual([
       { tileId: { z: 3, x: 1, y: 1 }, zoom: 3.5, poles: false, wrap: 0 },
       { tileId: { z: 1, x: 0, y: 0 }, zoom: 1.5, poles: false, wrap: 0 },
     ])
+  })
+
+  it('matches globe tiles past the antimeridian in any world copy', async () => {
+    const { layer, gl, regionRenderer } = await addLayer({
+      zoom: 2,
+      terrain: false,
+      globe: true,
+      cover: [{ z: 2, x: 0, y: 1 }],
+      wrap: 1,
+    })
+    const setCoveringTiles = vi.spyOn(regionRenderer, 'setCoveringTiles')
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[0][0]![0].wrap).toBeUndefined()
+  })
+
+  it('cuts the cover to the viewport only on a flat map without terrain', async () => {
+    const { layer, gl, regionRenderer, state } = await addLayer({
+      zoom: 3.5,
+      terrain: false,
+      cover: [{ z: 3, x: 1, y: 1 }],
+    })
+    const setCoveringTiles = vi.spyOn(regionRenderer, 'setCoveringTiles')
+
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[0][1]).not.toBeNull()
+
+    state.terrain = true
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[1][1]).toBeNull()
+
+    state.terrain = false
+    state.globe = true
+    layer.prerender(gl, {})
+    expect(setCoveringTiles.mock.calls[2][1]).toBeNull()
   })
 
   it('covers terrain with the map terrain, so tile zooms follow the surface', async () => {

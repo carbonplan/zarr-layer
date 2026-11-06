@@ -423,6 +423,44 @@ describe('Mapbox render parameters as the direct-path key', () => {
   })
 })
 
+describe('renderPoles on a map that cannot honour it', () => {
+  const warnings = async (
+    mapOptions: FakeMapOptions,
+    layerOptions: { renderPoles?: boolean } = {}
+  ) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { prerender } = await addLayer(mapOptions, layerOptions)
+      prerender()
+      prerender()
+      return warn.mock.calls.filter(([message]) =>
+        String(message).includes('renderPoles')
+      ).length
+    } finally {
+      warn.mockRestore()
+    }
+  }
+
+  it('warns once on a Mapbox older than 3.32', async () => {
+    expect(
+      await warnings({ globe: true, zoom: 0, provider: 'mapbox-legacy' })
+    ).toBe(1)
+  })
+
+  it('stays quiet where the direct path is available or not asked for', async () => {
+    expect(await warnings({ globe: true, zoom: 0 })).toBe(0)
+    expect(await warnings({ globe: true, zoom: 0, provider: 'maplibre' })).toBe(
+      0
+    )
+    expect(
+      await warnings(
+        { globe: true, zoom: 0, provider: 'mapbox-legacy' },
+        { renderPoles: false }
+      )
+    ).toBe(0)
+  })
+})
+
 describe('render-path switches never split a Mapbox frame', () => {
   // Mapbox batches draped layers before any callback runs and re-reads
   // renderToTile per tile, so a switch applied inside a callback leaves the

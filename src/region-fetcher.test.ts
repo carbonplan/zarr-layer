@@ -7,7 +7,16 @@ import {
   splitBands,
   type RegionFetcherContext,
 } from './region-fetcher'
-import { RegionCache, createRegionState, makeRegionKey } from './region-cache'
+import {
+  RegionCache,
+  createRegionState,
+  isRegionRetryPending,
+  makeRegionKey,
+} from './region-cache'
+import {
+  MAX_UNKNOWN_FAILURE_ATTEMPTS,
+  RETRY_BASE_DELAY_MS,
+} from './fetch-retry'
 import { createProjectionContext } from './projection-utils'
 import {
   createRequestCanceller,
@@ -121,6 +130,8 @@ async function makeHarness(
     bandTextures?: boolean
     /** Chunk reads whose key passes this throw, as a failing server would. */
     failReads?: (key: string) => boolean
+    // What a failing read throws; a client error, final at once, by default.
+    failWith?: () => Error
     /** Band count of a (band, lat, lon) array, with these bands selected. */
     bands?: {
       count: number
@@ -156,7 +167,7 @@ async function makeHarness(
         chunkReads.push(key)
         if (opts.gateReads) await readsReleased
         if (opts.failReads?.(key)) {
-          throw new Error('Unexpected response status 500')
+          throw opts.failWith?.() ?? new Error('Unexpected response status 403')
         }
       }
       return memory.get(key)
@@ -752,6 +763,122 @@ describe('RegionFetcher', () => {
       } finally {
         errorSpy.mockRestore()
       }
+    })
+
+    describe('that may pass', () => {
+      const serverError = () => new Error('Unexpected response status 503')
+
+      it('is retried after a backoff, keeping what the region shows', async () => {
+        vi.useFakeTimers({
+          shouldAdvanceTime: true,
+          toFake: ['setTimeout', 'Date'],
+        })
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { fetcher, cache, invalidate, setSelectorVersion } =
+            await makeHarness({ failReads: topRight, failWith: serverError })
+          const region = createRegionState(0, 1, 0, false, 0)
+          region.data = new Float32Array(8)
+          cache.set(region.key, region)
+
+          setSelectorVersion(1)
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          expect(region.failedSelectorVersion).toBeNull()
+          expect(region.retry).toMatchObject({
+            selectorVersion: 1,
+            attempts: 1,
+          })
+          expect(isRegionRetryPending(region, 1, Date.now())).toBe(true)
+          expect(region.data).not.toBeNull()
+
+          invalidate.mockClear()
+          vi.advanceTimersByTime(RETRY_BASE_DELAY_MS)
+          expect(invalidate).toHaveBeenCalledTimes(1)
+          expect(isRegionRetryPending(region, 1, Date.now())).toBe(false)
+        } finally {
+          warnSpy.mockRestore()
+          vi.useRealTimers()
+        }
+      })
+
+      it('backs off longer each attempt and keeps retrying', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { fetcher, cache } = await makeHarness({
+            failReads: topRight,
+            failWith: () => new TypeError('Failed to fetch'),
+          })
+          for (let i = 0; i < 6; i++) {
+            await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          }
+          const region = cache.get(makeRegionKey(0, 1, 0))!
+          expect(region.retry?.attempts).toBe(6)
+          expect(region.failedSelectorVersion).toBeNull()
+          expect(warnSpy).toHaveBeenCalledTimes(1)
+        } finally {
+          warnSpy.mockRestore()
+        }
+      })
+
+      it('loads when a retry succeeds', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          let failing = true
+          const { fetcher, cache } = await makeHarness({
+            failReads: (key) => failing && topRight(key),
+            failWith: serverError,
+          })
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          failing = false
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          const region = cache.get(makeRegionKey(0, 1, 0))!
+          expect(region.retry).toBeNull()
+          expect(Array.from(region.data!)).toEqual(chunkData(0, 1))
+        } finally {
+          warnSpy.mockRestore()
+        }
+      })
+
+      it('counts attempts afresh under a new selector', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        try {
+          const { fetcher, cache, setSelectorVersion } = await makeHarness({
+            failReads: topRight,
+            failWith: serverError,
+          })
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          setSelectorVersion(1)
+          await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          const region = cache.get(makeRegionKey(0, 1, 0))!
+          expect(region.retry).toMatchObject({
+            selectorVersion: 1,
+            attempts: 1,
+          })
+        } finally {
+          warnSpy.mockRestore()
+        }
+      })
+
+      it('is final after a few attempts when the error is unrecognised', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          const { fetcher, cache } = await makeHarness({
+            failReads: topRight,
+            failWith: () => new Error('bad codec'),
+          })
+          for (let i = 0; i < MAX_UNKNOWN_FAILURE_ATTEMPTS; i++) {
+            await fetcher.fetchRegions([{ regionX: 1, regionY: 0 }], 0)
+          }
+          const region = cache.get(makeRegionKey(0, 1, 0))!
+          expect(region.failedSelectorVersion).toBe(0)
+          expect(region.retry).toBeNull()
+        } finally {
+          warnSpy.mockRestore()
+          errorSpy.mockRestore()
+        }
+      })
     })
 
     it('is cleared by the next attempt', async () => {

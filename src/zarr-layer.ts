@@ -34,6 +34,7 @@ import type {
 } from './types'
 import type { RenderContext, TileId } from './renderer-types'
 import { RegionRenderer, type TileRequest } from './region-renderer'
+import type { LonLatBounds } from './region-math'
 import { MAX_ACTIVE_REGION_FETCHES } from './region-utils'
 import {
   computeWorldOffsets,
@@ -53,7 +54,13 @@ import {
 } from './mapbox-globe-matrix'
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
+import { MAX_CACHED_REGION_BYTES, WANTED_CACHE_SHARE } from './region-cache'
 import { ZarrLayerNotReadyError } from './errors'
+
+const MB = 1024 * 1024
+
+/** Share of the viewport's span added on each side when cutting tiles to it. */
+const VIEWPORT_MARGIN = 0.02
 
 /** MapLibre's terrain tile ID. `wrap` is the world copy, which draws the
  *  same content as every other copy, so only `canonical` is used. */
@@ -154,6 +161,7 @@ export class ZarrLayer {
   private fixedDataScale: number
   private minRegionSize: number
   private maxRegionFetches: number
+  private maxCacheMB: number
   // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
@@ -229,6 +237,7 @@ export class ZarrLayer {
   private usingDirectMapboxGlobePath: boolean = false
   private renderPathSwitchPending: boolean = false
   private mapboxRenderParametersSeen: boolean = false
+  private warnedPolesUnreachable: boolean = false
 
   /** Latch whether this map hands the public render parameters (mapbox-gl >=
    *  3.32) to render/prerender. The gate below also runs from map events and
@@ -243,6 +252,22 @@ export class ZarrLayer {
       this.mapboxRenderParametersSeen = true
       this.configureMapboxRenderPath()
     }
+  }
+
+  /**
+   * Warn once when `renderPoles` cannot apply: Mapbox before 3.32 passes a
+   * projection to prerender but no render parameters.
+   */
+  private warnIfPolesUnreachable(projection: unknown): void {
+    if (!this.renderPoles || this.warnedPolesUnreachable) return
+    if (this.mapboxRenderParametersSeen) return
+    const name = (projection as { name?: unknown } | undefined)?.name
+    if (name !== 'globe') return
+    this.warnedPolesUnreachable = true
+    console.warn(
+      `[zarr-layer] ${this.id}: renderPoles needs mapbox-gl 3.32 or later. ` +
+        'This map draws the layer draped, which does not reach the poles.'
+    )
   }
 
   /** MapLibre calls render with a single params object, so the render
@@ -369,6 +394,7 @@ export class ZarrLayer {
     uniforms,
     minRegionSize = 0,
     maxRegionFetches = MAX_ACTIVE_REGION_FETCHES,
+    maxCacheMB = MAX_CACHED_REGION_BYTES / MB,
     renderingMode = '3d',
     onLoadingStateChange,
     proj4,
@@ -436,6 +462,12 @@ export class ZarrLayer {
       )
     }
     this.maxRegionFetches = maxRegionFetches
+    if (!Number.isFinite(maxCacheMB) || maxCacheMB <= 0) {
+      throw new Error(
+        `[ZarrLayer] maxCacheMB must be a positive number, got ${maxCacheMB}.`
+      )
+    }
+    this.maxCacheMB = maxCacheMB
 
     this.customFrag = customFrag
     this.customUniforms = checkUniforms(uniforms || {})
@@ -726,7 +758,8 @@ export class ZarrLayer {
       this.fixedDataScale,
       this.minRegionSize,
       this.maxRegionFetches,
-      this.fillValueOption
+      this.fillValueOption,
+      { maxBytes: this.maxCacheMB * MB }
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()
@@ -763,6 +796,7 @@ export class ZarrLayer {
         transformRequest: this.transformRequest,
         onAuthError: this.onAuthError,
         customStore: this.customStore,
+        decodedCacheBytes: this.maxCacheMB * MB * WANTED_CACHE_SHARE,
       })
 
       await this.zarrStore.initialized
@@ -867,7 +901,7 @@ export class ZarrLayer {
   prerender(
     _gl: WebGL2RenderingContext | WebGLRenderingContext,
     _params: unknown,
-    _projection?: { name: string },
+    projection?: { name: string },
     _projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
     _projectionToMercatorTransition?: number,
     _centerInMercator?: number[],
@@ -878,6 +912,7 @@ export class ZarrLayer {
     // Mapbox runs prerender for draped layers too, so this is where the
     // render parameters first show up when the layer starts out draped.
     this.noteMapboxRenderParameters(renderParameters)
+    this.warnIfPolesUnreachable(projection)
 
     // Draped terrain tiles are cached by the map and reused across zoom
     // changes while it moves, so crossing the zoom range has to force a
@@ -900,7 +935,7 @@ export class ZarrLayer {
       !!this.map.getTerrain?.() ||
       (!cover && this.isGlobeProjection() && !this.usingDirectMapboxGlobePath)
     if (!draped) this.regionRenderer.clearDrawnTiles()
-    this.regionRenderer.setCoveringTiles(cover)
+    this.regionRenderer.setCoveringTiles(cover, cover && this.coverViewport())
     this.regionRenderer.update(this.map, this.gl)
   }
 
@@ -915,7 +950,8 @@ export class ZarrLayer {
     if (!map?.coveringTiles) return null
     // Drawn directly on the globe, the layer reaches the poles, so the
     // cover's polar edge tiles must too; draped tiles stay Mercator.
-    const poles = this.isGlobeProjection() && !map.getTerrain?.()
+    const globe = this.isGlobeProjection()
+    const poles = globe && !map.getTerrain?.()
     const terrain = map.terrain ?? undefined
     return map
       .coveringTiles(
@@ -927,8 +963,31 @@ export class ZarrLayer {
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
         poles,
-        wrap: wrap ?? 0,
+        // The globe is one world, so tiles match regions in any copy.
+        wrap: globe ? undefined : wrap ?? 0,
       }))
+  }
+
+  /**
+   * The viewport plus a margin, to cut the tile cover to. Only on a flat
+   * Mercator map without terrain, where `getBounds` is exact.
+   */
+  private coverViewport(): LonLatBounds | null {
+    const map = this.map
+    if (!map || this.isGlobeProjection() || map.getTerrain?.()) return null
+    if (this.worldMapping()) return null
+    const bounds = map.getBounds?.()?.toArray?.()
+    if (!bounds) return null
+    const [[west, south], [rawEast, north]] = bounds
+    const east = rawEast < west ? rawEast + 360 : rawEast
+    const lonMargin = (east - west) * VIEWPORT_MARGIN
+    const latMargin = (north - south) * VIEWPORT_MARGIN
+    return {
+      west: west - lonMargin,
+      east: east + lonMargin,
+      south: Math.max(-90, south - latMargin),
+      north: Math.min(90, north + latMargin),
+    }
   }
 
   /**
@@ -1023,7 +1082,8 @@ export class ZarrLayer {
     // A registered projection's world is drawn once, without copies.
     const worldOffsets = computeWorldOffsets(
       this.map,
-      isGlobe || !!this.worldMapping()
+      isGlobe || !!this.worldMapping(),
+      this.regionRenderer.viewport
     )
     const colormapTexture = this.colormap.ensureTexture(this.gl)
     // The direct globe path draws straight onto the sphere, so it needs the

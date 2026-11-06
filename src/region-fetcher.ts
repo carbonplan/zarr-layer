@@ -17,6 +17,7 @@ import {
 } from './band-format'
 import { interleaveBands } from './webgl-utils'
 import { decodeValues, resolveValueTransform } from './value-transform'
+import { classifyFetchFailure, retryDelay, shouldRetry } from './fetch-retry'
 import {
   type ChunkLoadingDebouncer,
   type RequestCanceller,
@@ -490,6 +491,7 @@ export class RegionFetcher {
 
       // Update region's selector version
       region.selectorVersion = fetchSelectorVersion
+      region.retry = null
 
       // GPU handles reprojection. Source-projected data uses an adaptive mesh
       // (source CRS → WGS84), then the GPU projects to Mercator or ECEF.
@@ -573,14 +575,9 @@ export class RegionFetcher {
       this.context.invalidate()
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) {
-        console.error(`[fetchRegion] Error fetching region ${key}:`, err)
-        // The failure is final under this selector: the region is not
-        // requested again until something starts a fresh attempt, and any
-        // data it held under an earlier selector is dropped so it draws
-        // nothing rather than the wrong selection. A request that was
-        // cancelled or superseded (every level commit is a new runtime
-        // object, and a reload clears failures) must not record one: its
-        // outcome belongs to an attempt nobody is waiting on.
+        // Retry after a backoff, keeping what the region shows, or record a
+        // final failure and drop data from an earlier selector. A cancelled
+        // or superseded request records neither.
         const superseded =
           controller.signal.aborted ||
           this.context.isRemoved() ||
@@ -591,12 +588,33 @@ export class RegionFetcher {
           region.requestId === requestId &&
           fetchSelectorVersion >= region.selectorVersion
         ) {
-          region.failedSelectorVersion = fetchSelectorVersion
-          region.data = null
-          region.bandData.clear()
-          region.bandTextureKey = null
-          region.textureUploaded = false
-          this.context.releaseRegionTextures(region)
+          const attempts =
+            region.retry?.selectorVersion === fetchSelectorVersion
+              ? region.retry.attempts + 1
+              : 1
+          if (shouldRetry(classifyFetchFailure(err), attempts)) {
+            if (attempts === 1) {
+              console.warn(`[fetchRegion] Retrying region ${key}:`, err)
+            }
+            const delay = retryDelay(attempts)
+            region.retry = {
+              selectorVersion: fetchSelectorVersion,
+              attempts,
+              at: Date.now() + delay,
+            }
+            setTimeout(() => {
+              if (!this.context.isRemoved()) this.context.invalidate()
+            }, delay)
+          } else {
+            console.error(`[fetchRegion] Error fetching region ${key}:`, err)
+            region.retry = null
+            region.failedSelectorVersion = fetchSelectorVersion
+            region.data = null
+            region.bandData.clear()
+            region.bandTextureKey = null
+            region.textureUploaded = false
+            this.context.releaseRegionTextures(region)
+          }
         }
       }
     } finally {

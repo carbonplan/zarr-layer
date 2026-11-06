@@ -122,26 +122,52 @@ function uniformSignature(uniforms: Record<string, UniformValue> = {}): string {
     .join(',')
 }
 
+const UNIFORM_DECLARATION =
+  /uniform\s+(?:(?:highp|mediump|lowp)\s+)?(\w+)\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?\s*;/g
+const MATRIX_COLUMNS: Record<string, number> = { mat2: 2, mat3: 3, mat4: 4 }
+
 /**
- * Explains a failed link when uniform arrays are the likely cause. GLSL ES
- * gives each float array element its own vec4 register, so an array of N
- * floats the shader reads takes N of the device's fragment uniform vectors.
- * The driver counts only uniforms the shader uses, so the limit shows only
- * when linking fails.
+ * Fragment uniform vectors each declared uniform takes. GLSL ES gives each
+ * scalar or vector its own register, each array element too, and a matrix
+ * one per column; samplers take none.
+ */
+function uniformVectors(source: string): Map<string, number> {
+  const vectors = new Map<string, number>()
+  for (const [, type, name, length] of source.matchAll(UNIFORM_DECLARATION)) {
+    if (type.includes('sampler') || vectors.has(name)) continue
+    vectors.set(
+      name,
+      (MATRIX_COLUMNS[type] ?? 1) * (length ? Number(length) : 1)
+    )
+  }
+  return vectors
+}
+
+/**
+ * Explains a failed link when uniform arrays are the likely cause, counting
+ * the layer's uniforms beside the custom ones.
  */
 function uniformArrayHint(
   gl: WebGL2RenderingContext,
+  fragmentSource: string,
   uniforms: Record<string, UniformValue> = {}
 ): string {
-  let elements = 0
-  for (const value of Object.values(uniforms)) {
-    if (typeof value !== 'number') elements += value.length
+  const hasArray = Object.values(uniforms).some(
+    (value) => typeof value !== 'number'
+  )
+  if (!hasArray) return ''
+  let total = 0
+  let custom = 0
+  for (const [name, count] of uniformVectors(fragmentSource)) {
+    total += count
+    if (name in uniforms) custom += count
   }
-  if (elements === 0) return ''
   const max = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) as number
   return (
-    ` Its uniform arrays hold ${elements} floats, and each element read by ` +
-    `the shader takes one of this device's ${max} fragment uniform vectors.`
+    ` The fragment shader declares ${total} uniform vectors, ${custom} of ` +
+    `them for the custom uniforms and ${total - custom} for the layer and ` +
+    `the shader's own; this device allows ${max}. Each element of a uniform ` +
+    `array takes a whole vector.`
   )
 }
 
@@ -228,7 +254,7 @@ export function createShaderProgram(
     throw new Error(
       `Failed to create program for variant: ${variantName}.` +
         (useCustomShader && config
-          ? uniformArrayHint(gl, config.customUniforms)
+          ? uniformArrayHint(gl, fragmentSource, config.customUniforms)
           : '')
     )
   }
