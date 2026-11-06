@@ -233,6 +233,7 @@ export class ZarrLayer {
   private usingDirectMapboxGlobePath: boolean = false
   private renderPathSwitchPending: boolean = false
   private mapboxRenderParametersSeen: boolean = false
+  private warnedPolesUnreachable: boolean = false
 
   /** Latch whether this map hands the public render parameters (mapbox-gl >=
    *  3.32) to render/prerender. The gate below also runs from map events and
@@ -247,6 +248,23 @@ export class ZarrLayer {
       this.mapboxRenderParametersSeen = true
       this.configureMapboxRenderPath()
     }
+  }
+
+  /**
+   * Warn once when `renderPoles` cannot take effect because the map is a
+   * Mapbox older than 3.32: only Mapbox passes a projection to prerender,
+   * and from 3.32 the render parameters arrive with it.
+   */
+  private warnIfPolesUnreachable(projection: unknown): void {
+    if (!this.renderPoles || this.warnedPolesUnreachable) return
+    if (this.mapboxRenderParametersSeen) return
+    const name = (projection as { name?: unknown } | undefined)?.name
+    if (name !== 'globe') return
+    this.warnedPolesUnreachable = true
+    console.warn(
+      `[zarr-layer] ${this.id}: renderPoles needs mapbox-gl 3.32 or later. ` +
+        'This map draws the layer draped, which does not reach the poles.'
+    )
   }
 
   /** MapLibre calls render with a single params object, so the render
@@ -871,7 +889,7 @@ export class ZarrLayer {
   prerender(
     _gl: WebGL2RenderingContext | WebGLRenderingContext,
     _params: unknown,
-    _projection?: { name: string },
+    projection?: { name: string },
     _projectionToMercatorMatrix?: number[] | Float32Array | Float64Array,
     _projectionToMercatorTransition?: number,
     _centerInMercator?: number[],
@@ -882,6 +900,7 @@ export class ZarrLayer {
     // Mapbox runs prerender for draped layers too, so this is where the
     // render parameters first show up when the layer starts out draped.
     this.noteMapboxRenderParameters(renderParameters)
+    this.warnIfPolesUnreachable(projection)
 
     // Draped terrain tiles are cached by the map and reused across zoom
     // changes while it moves, so crossing the zoom range has to force a
