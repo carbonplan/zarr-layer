@@ -855,3 +855,340 @@ export function createHybridMesh(
     meshBounds,
   }
 }
+
+/**
+ * How far, as a share of an edge's length, the projected middle of an edge
+ * may land from the middle of the drawn edge. Past it the edge crosses a seam
+ * or fold in the projection, such as a world projection's antimeridian, and
+ * would draw across the map.
+ */
+const SEAM_MIDPOINT_RATIO = 0.25
+/**
+ * An edge that strays that far is halved toward its widest part this many
+ * times, homing in on any jump. A seam leaves a gap the data doesn't fill, so
+ * the gap's middle maps back far from the edge; a bend, even one sharpened
+ * without bound like a cone's tip, maps back onto it.
+ */
+const SEAM_BISECTIONS = 30
+/** Under a tenth of a pixel at zoom 24, in world units. */
+const SEAM_MIN_LENGTH = 1e-11
+
+interface WorldMeshOptions {
+  geoBounds: { xMin: number; xMax: number; yMin: number; yMax: number }
+  width: number
+  height: number
+  lonSubdivisions: number
+  latSubdivisions: number
+  /** Source CRS to the map's world square and back. */
+  toWorld: (x: number, y: number) => [number, number]
+  fromWorld: (x: number, y: number) => [number, number]
+  latIsAscending: boolean
+  /** Source x is longitude, so positions 360 apart are the same place. */
+  allowUnwrappedLongitudes?: boolean
+  maxError?: number
+}
+
+/** The part of a polygon inside the unit square. */
+function clipToUnitSquare(polygon: [number, number][]): [number, number][] {
+  let points = polygon
+  for (const [axis, bound, keepBelow] of [
+    [0, 0, false],
+    [0, 1, true],
+    [1, 0, false],
+    [1, 1, true],
+  ] as const) {
+    const inside = (p: [number, number]) =>
+      keepBelow ? p[axis] <= bound : p[axis] >= bound
+    const clipped: [number, number][] = []
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i]
+      const q = points[(i + 1) % points.length]
+      if (inside(p)) clipped.push(p)
+      if (inside(p) !== inside(q)) {
+        const f = (bound - p[axis]) / (q[axis] - p[axis])
+        clipped.push([p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f])
+      }
+    }
+    points = clipped
+    if (points.length === 0) break
+  }
+  return points
+}
+
+/**
+ * Mesh for a map in a projection registered with `addProjection`: vertices
+ * go straight from the source CRS to the map's world square, refined where
+ * that mapping bends, and are encoded as deltas from the region's own
+ * anchor like the Mercator mesh. Triangles with a vertex the map's
+ * projection cannot place, spanning a seam in it, or wrapping the map
+ * around a point it sends to infinity are dropped.
+ */
+export function createWorldMesh(options: WorldMeshOptions): AdaptiveMeshResult {
+  const {
+    geoBounds,
+    width,
+    height,
+    lonSubdivisions,
+    latSubdivisions,
+    toWorld,
+    fromWorld,
+    latIsAscending,
+    allowUnwrappedLongitudes = false,
+    maxError = DEFAULT_MESH_MAX_ERROR,
+  } = options
+  const { xMin, xMax, yMin, yMax } = geoBounds
+
+  const reprojector = createReprojector({
+    bounds: [xMin, yMin, xMax, yMax],
+    width,
+    height,
+    latIsAscending,
+    transformer: { forward: toWorld, inverse: fromWorld },
+  })
+  for (
+    let i = 0;
+    i < MAX_ITERATIONS && reprojector.getMaxError() > maxError;
+    i++
+  ) {
+    const prevVertCount = reprojector.uvs.length / 2
+    reprojector.refine()
+    const newVertCount = reprojector.uvs.length / 2
+    if (
+      newVertCount >= MAX_ADAPTIVE_VERTICES ||
+      newVertCount === prevVertCount
+    ) {
+      break
+    }
+  }
+
+  // Edges get a vertex at every data pixel and no others, so neighboring
+  // regions share the vertices along the edge between them and meet without
+  // a gap where the projection curves it.
+  const adaptiveUVs: number[] = []
+  for (let k = 0; k < reprojector.uvs.length; k += 2) {
+    const u = reprojector.uvs[k]
+    const v = reprojector.uvs[k + 1]
+    if (u > 0 && u < 1 && v > 0 && v < 1) adaptiveUVs.push(u, v)
+  }
+  const cols = Math.max(1, Math.ceil(lonSubdivisions))
+  const rows = Math.max(1, Math.ceil(latSubdivisions))
+  const edgeCols = Math.max(1, Math.ceil(width))
+  const edgeRows = Math.max(1, Math.ceil(height))
+  const uvs = new Float64Array(
+    adaptiveUVs.length +
+      (cols - 1) * (rows - 1) * 2 +
+      (edgeCols + 1 + edgeRows + 1) * 4
+  )
+  uvs.set(adaptiveUVs)
+  let offset = adaptiveUVs.length
+  for (let row = 1; row < rows; row++) {
+    for (let col = 1; col < cols; col++) {
+      uvs[offset++] = col / cols
+      uvs[offset++] = row / rows
+    }
+  }
+  for (let col = 0; col <= edgeCols; col++) {
+    for (const v of [0, 1]) {
+      uvs[offset++] = col / edgeCols
+      uvs[offset++] = v
+    }
+  }
+  for (let row = 0; row <= edgeRows; row++) {
+    for (const u of [0, 1]) {
+      uvs[offset++] = u
+      uvs[offset++] = row / edgeRows
+    }
+  }
+  const triangles = new Delaunator(uvs).triangles
+
+  const numVerts = uvs.length / 2
+  const world = new Float64Array(numVerts * 2)
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const sourceAt = (u: number, v: number): [number, number] => [
+    xMin + u * (xMax - xMin),
+    latIsAscending ? yMin + v * (yMax - yMin) : yMax - v * (yMax - yMin),
+  ]
+  const worldAt = (u: number, v: number) => toWorld(...sourceAt(u, v))
+  for (let i = 0; i < numVerts; i++) {
+    const [x, y] = worldAt(uvs[i * 2], uvs[i * 2 + 1])
+    world[i * 2] = x
+    world[i * 2 + 1] = y
+  }
+
+  const finite = (i: number) =>
+    Number.isFinite(world[i * 2]) && Number.isFinite(world[i * 2 + 1])
+  // Each edge is checked once, though up to two triangles share it.
+  const seams = new Map<number, boolean>()
+  const hasGap = (a: number, b: number) => {
+    let u0 = uvs[a * 2]
+    let v0 = uvs[a * 2 + 1]
+    let u1 = uvs[b * 2]
+    let v1 = uvs[b * 2 + 1]
+    let p0 = [world[a * 2], world[a * 2 + 1]]
+    let p1 = [world[b * 2], world[b * 2 + 1]]
+    for (let i = 0; i < SEAM_BISECTIONS; i++) {
+      const um = (u0 + u1) / 2
+      const vm = (v0 + v1) / 2
+      const pm = worldAt(um, vm)
+      if (!Number.isFinite(pm[0]) || !Number.isFinite(pm[1])) return true
+      const before = Math.hypot(pm[0] - p0[0], pm[1] - p0[1])
+      const after = Math.hypot(p1[0] - pm[0], p1[1] - pm[1])
+      if (Math.max(before, after) <= SEAM_MIN_LENGTH) return false
+      if (before >= after) {
+        u1 = um
+        v1 = vm
+        p1 = pm
+      } else {
+        u0 = um
+        v0 = vm
+        p0 = pm
+      }
+    }
+    const [sx, sy] = fromWorld((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return true
+    const [jx, jy] = sourceAt((u0 + u1) / 2, (v0 + v1) / 2)
+    let dx = sx - jx
+    if (allowUnwrappedLongitudes) dx -= 360 * Math.round(dx / 360)
+    return (
+      Math.hypot(dx / (xMax - xMin), (sy - jy) / (yMax - yMin)) >
+      Math.hypot(uvs[a * 2] - uvs[b * 2], uvs[a * 2 + 1] - uvs[b * 2 + 1])
+    )
+  }
+  const crossesSeam = (a: number, b: number) => {
+    const key = Math.min(a, b) * numVerts + Math.max(a, b)
+    let crosses = seams.get(key)
+    if (crosses === undefined) {
+      const [mx, my] = worldAt(
+        (uvs[a * 2] + uvs[b * 2]) / 2,
+        (uvs[a * 2 + 1] + uvs[b * 2 + 1]) / 2
+      )
+      const length = Math.hypot(
+        world[a * 2] - world[b * 2],
+        world[a * 2 + 1] - world[b * 2 + 1]
+      )
+      crosses =
+        !(
+          Math.hypot(
+            mx - (world[a * 2] + world[b * 2]) / 2,
+            my - (world[a * 2 + 1] + world[b * 2 + 1]) / 2
+          ) <=
+          length * SEAM_MIDPOINT_RATIO
+        ) && hasGap(a, b)
+      seams.set(key, crosses)
+    }
+    return crosses
+  }
+  // The map draws nothing past the edge of its tile matrix set.
+  const outside = (a: number, b: number, c: number) =>
+    [0, 1].some(
+      (axis) =>
+        Math.max(
+          world[a * 2 + axis],
+          world[b * 2 + axis],
+          world[c * 2 + axis]
+        ) < 0 ||
+        Math.min(
+          world[a * 2 + axis],
+          world[b * 2 + axis],
+          world[c * 2 + axis]
+        ) > 1
+    )
+  // A point the projection sends to infinity, like the far pole of a polar
+  // stereographic map, can sit inside a triangle whose corners all land off
+  // the map. The triangle then spans the map though none of its data is
+  // there, so a triangle with every corner off the map is kept only if a
+  // point it draws on the map maps back to it.
+  const offMap = (i: number) =>
+    world[i * 2] < 0 ||
+    world[i * 2] > 1 ||
+    world[i * 2 + 1] < 0 ||
+    world[i * 2 + 1] > 1
+  const wrapsMap = (a: number, b: number, c: number) => {
+    if (!offMap(a) || !offMap(b) || !offMap(c)) return false
+    const onMap = clipToUnitSquare(
+      [a, b, c].map((i): [number, number] => [world[i * 2], world[i * 2 + 1]])
+    )
+    if (onMap.length === 0) return true
+    let px = 0
+    let py = 0
+    for (const [x, y] of onMap) {
+      px += x / onMap.length
+      py += y / onMap.length
+    }
+    let [sx, sy] = fromWorld(px, py)
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) return true
+    const us = [a, b, c].map((i) => uvs[i * 2])
+    const vs = [a, b, c].map((i) => uvs[i * 2 + 1])
+    if (allowUnwrappedLongitudes) {
+      const cx = xMin + ((us[0] + us[1] + us[2]) / 3) * (xMax - xMin)
+      sx += 360 * Math.round((cx - sx) / 360)
+    }
+    const u = (sx - xMin) / (xMax - xMin)
+    const v = latIsAscending
+      ? (sy - yMin) / (yMax - yMin)
+      : (yMax - sy) / (yMax - yMin)
+    // The drawn triangle is straight where the data's image curves, so the
+    // point may map back beside the triangle, but not further than its size.
+    const reach = Math.max(
+      Math.max(...us) - Math.min(...us),
+      Math.max(...vs) - Math.min(...vs)
+    )
+    return (
+      u < Math.min(...us) - reach ||
+      u > Math.max(...us) + reach ||
+      v < Math.min(...vs) - reach ||
+      v > Math.max(...vs) + reach
+    )
+  }
+  const kept: number[] = []
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t]
+    const b = triangles[t + 1]
+    const c = triangles[t + 2]
+    if (!finite(a) || !finite(b) || !finite(c)) continue
+    if (outside(a, b, c)) continue
+    if (crossesSeam(a, b) || crossesSeam(b, c) || crossesSeam(c, a)) continue
+    if (wrapsMap(a, b, c)) continue
+    kept.push(a, b, c)
+    for (const i of [a, b, c]) {
+      minX = Math.min(minX, world[i * 2])
+      minY = Math.min(minY, world[i * 2 + 1])
+      maxX = Math.max(maxX, world[i * 2])
+      maxY = Math.max(maxY, world[i * 2 + 1])
+    }
+  }
+
+  if (kept.length === 0) {
+    return {
+      positions: new Float32Array(0),
+      texCoords: new Float32Array(0),
+      indices: new Uint32Array(0),
+      meshBounds: { x0: 0, y0: 0, x1: 0, y1: 0 },
+    }
+  }
+
+  const anchorX = (minX + maxX) / 2
+  const anchorY = (minY + maxY) / 2
+  const halfX = (maxX - minX) / 2 || 0.5
+  const halfY = (maxY - minY) / 2 || 0.5
+  const positions = new Float32Array(numVerts * 2)
+  for (let i = 0; i < numVerts; i++) {
+    positions[i * 2] = finite(i) ? (world[i * 2] - anchorX) / halfX : 0
+    positions[i * 2 + 1] = finite(i) ? (world[i * 2 + 1] - anchorY) / halfY : 0
+  }
+
+  return {
+    positions,
+    texCoords: new Float32Array(uvs),
+    indices: new Uint32Array(kept),
+    meshBounds: {
+      x0: anchorX - halfX,
+      y0: anchorY - halfY,
+      x1: anchorX + halfX,
+      y1: anchorY + halfY,
+    },
+  }
+}

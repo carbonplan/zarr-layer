@@ -14,7 +14,8 @@ import { useThemedColormap } from '@carbonplan/colormaps'
 import { Info, RotatingArrow } from '@carbonplan/icons'
 import { Box, Flex, IconButton } from 'theme-ui'
 import { SidebarDivider } from '@carbonplan/layouts'
-import { useAppStore } from '../lib/store'
+import { useAppStore, type DemoProjection } from '../lib/store'
+import { CUSTOM_PROJECTION_IDS } from '../lib/projections'
 import { subheadingSx } from './shared-controls'
 import DatasetBrowser from './dataset-browser'
 import type {
@@ -306,7 +307,7 @@ const Controls = () => {
   const opacity = useAppStore((state) => state.opacity)
   const clim = useAppStore((state) => state.clim)
   const colormap = useAppStore((state) => state.colormap)
-  const globeProjection = useAppStore((state) => state.globeProjection)
+  const projection = useAppStore((state) => state.projection)
   const terrainEnabled = useAppStore((state) => state.terrainEnabled)
   const renderPoles = useAppStore((state) => state.renderPoles)
   const setRenderPoles = useAppStore((state) => state.setRenderPoles)
@@ -352,7 +353,7 @@ const Controls = () => {
   const setOpacity = useAppStore((state) => state.setOpacity)
   const setClim = useAppStore((state) => state.setClim)
   const setColormap = useAppStore((state) => state.setColormap)
-  const setGlobeProjection = useAppStore((state) => state.setGlobeProjection)
+  const setProjection = useAppStore((state) => state.setProjection)
   const setTerrainEnabled = useAppStore((state) => state.setTerrainEnabled)
   const setMapProvider = useAppStore((state) => state.setMapProvider)
   const setRegionResult = useAppStore((state) => state.setRegionResult)
@@ -870,10 +871,17 @@ const Controls = () => {
         </Column>
         <Column start={2} width={3}>
           <Filter
-            values={{ globe: globeProjection, mercator: !globeProjection }}
+            // The options differ by provider, and Filter expects a fixed set.
+            key={mapProvider}
+            values={Object.fromEntries(
+              (mapProvider === 'maplibre'
+                ? ['globe', 'mercator', ...CUSTOM_PROJECTION_IDS]
+                : ['globe', 'mercator']
+              ).map((option) => [option, projection === option])
+            )}
             setValues={(obj: Record<string, boolean>) => {
-              if (obj.mercator) setGlobeProjection(false)
-              if (obj.globe) setGlobeProjection(true)
+              const selected = Object.keys(obj).find((option) => obj[option])
+              if (selected) setProjection(selected as DemoProjection)
             }}
           />
         </Column>

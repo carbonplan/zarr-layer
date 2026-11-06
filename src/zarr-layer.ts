@@ -39,8 +39,14 @@ import {
   computeWorldOffsets,
   resolveProjectionParams,
   isGlobeProjection as checkGlobeProjection,
+  customProjectionName,
 } from './map-utils'
 import { MAPBOX_IDENTITY_MATRIX } from './mapbox-utils'
+import {
+  worldMappingFor,
+  type MapProjection,
+  type WorldMapping,
+} from './world-mapping'
 import {
   mapboxEcefClipMatrix,
   parseMapboxRenderParameters,
@@ -216,8 +222,10 @@ export class ZarrLayer {
   private onAuthError: OnAuthError | undefined
   private customStore: Readable | undefined
   private renderPoles: boolean
+  private mapProjections: readonly MapProjection[]
   private lastIsGlobe: boolean | null = null
-  private lastZoomInRange: boolean | null = null
+  private lastShouldDraw: boolean | null = null
+  private warnedProjection: string | null = null
   private usingDirectMapboxGlobePath: boolean = false
   private renderPathSwitchPending: boolean = false
   private mapboxRenderParametersSeen: boolean = false
@@ -368,6 +376,7 @@ export class ZarrLayer {
     onAuthError,
     store,
     renderPoles = false,
+    mapProjections = [],
   }: ZarrLayerOptions) {
     if (!id) {
       throw new Error('[ZarrLayer] id is required')
@@ -443,6 +452,7 @@ export class ZarrLayer {
     this.onAuthError = onAuthError
     this.customStore = store
     this.renderPoles = renderPoles
+    this.mapProjections = mapProjections
   }
 
   /**
@@ -679,7 +689,8 @@ export class ZarrLayer {
       this.lastIsGlobe = isGlobe
       this.regionRenderer?.onProjectionChange(isGlobe)
 
-      if (this.isZoomInRange()) this.regionRenderer?.update(this.map, this.gl!)
+      this.syncWorldMapping()
+      if (this.shouldDraw()) this.regionRenderer?.update(this.map, this.gl!)
       else this.regionRenderer?.followZoom(this.map, this.gl!)
     } catch (err) {
       this.initError = err instanceof Error ? err : new Error(String(err))
@@ -731,7 +742,8 @@ export class ZarrLayer {
     // per-frame update picks up again once it zooms back in. Until then the
     // level still follows the zoom, for queries and `ready`.
     if (this.map && this.gl) {
-      if (this.isZoomInRange()) this.regionRenderer.update(this.map, this.gl)
+      this.syncWorldMapping()
+      if (this.shouldDraw()) this.regionRenderer.update(this.map, this.gl)
       else this.regionRenderer.followZoom(this.map, this.gl)
     }
   }
@@ -822,6 +834,36 @@ export class ZarrLayer {
     return zoom >= this.minZoom && zoom <= this.maxZoom
   }
 
+  /**
+   * Whether the layer fetches and draws this frame: inside its zoom range and
+   * in a projection it can place data in. A projection registered with
+   * MapLibre's `addProjection` has to be among `mapProjections`.
+   */
+  private shouldDraw(): boolean {
+    const customProjection = customProjectionName(this.map?.getProjection?.())
+    const unplaceable =
+      customProjection && !this.worldMapping() ? customProjection : null
+    if (unplaceable && unplaceable !== this.warnedProjection) {
+      console.warn(
+        `[ZarrLayer] The map is in the ${unplaceable} projection, which is ` +
+          `not among the layer's mapProjections, so the layer is hidden ` +
+          `while it is active.`
+      )
+    }
+    this.warnedProjection = unplaceable
+    return !unplaceable && this.isZoomInRange()
+  }
+
+  /** The world of the map's projection, when it is a registered one. */
+  private worldMapping(): WorldMapping | null {
+    return worldMappingFor(this.map, this.mapProjections)
+  }
+
+  /** Place regions in the world of the map's current projection. */
+  private syncWorldMapping(): void {
+    this.regionRenderer?.setWorldMapping(this.worldMapping())
+  }
+
   prerender(
     _gl: WebGL2RenderingContext | WebGLRenderingContext,
     _params: unknown,
@@ -840,14 +882,15 @@ export class ZarrLayer {
     // Draped terrain tiles are cached by the map and reused across zoom
     // changes while it moves, so crossing the zoom range has to force a
     // redraw or the tiles keep (or lack) the layer until movement stops.
-    const inRange = this.isZoomInRange()
-    if (this.lastZoomInRange !== null && this.lastZoomInRange !== inRange) {
+    const draws = this.shouldDraw()
+    if (this.lastShouldDraw !== null && this.lastShouldDraw !== draws) {
       this.invalidate()
     }
-    this.lastZoomInRange = inRange
-    if (!inRange) return
+    this.lastShouldDraw = draws
+    if (!draws) return
 
     this.syncProjectionState()
+    this.syncWorldMapping()
     const cover = this.coveringTiles()
     // Tiles the draped hooks asked for are only being drawn while the map
     // drapes the layer: MapLibre with terrain, Mapbox with terrain or on its
@@ -939,7 +982,7 @@ export class ZarrLayer {
     }
 
     this.noteMapboxRenderParameters(renderParameters)
-    if (!this.isZoomInRange()) {
+    if (!this.shouldDraw()) {
       return
     }
 
@@ -977,7 +1020,11 @@ export class ZarrLayer {
         : undefined
 
     const isGlobe = this.isGlobeProjection()
-    const worldOffsets = computeWorldOffsets(this.map, isGlobe)
+    // A registered projection's world is drawn once, without copies.
+    const worldOffsets = computeWorldOffsets(
+      this.map,
+      isGlobe || !!this.worldMapping()
+    )
     const colormapTexture = this.colormap.ensureTexture(this.gl)
     // The direct globe path draws straight onto the sphere, so it needs the
     // per-frame globe-world-to-clip matrix; without one this frame it falls
@@ -1070,7 +1117,7 @@ export class ZarrLayer {
       return
     }
 
-    if (!this.isZoomInRange()) {
+    if (!this.shouldDraw()) {
       return
     }
 

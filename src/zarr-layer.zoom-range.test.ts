@@ -3,6 +3,7 @@ import { ZarrLayer } from './zarr-layer'
 import { buildMemoryZarrStore } from './__fixtures__/memory-zarr'
 import { createRecordingGl } from './__fixtures__/fake-gl'
 import type { MapLike } from './types'
+import type { MapProjection } from './world-mapping'
 
 /**
  * A layer outside its zoom range must not fetch. The per-frame path checks
@@ -90,10 +91,10 @@ function countingStore(times?: number, pyramid = false) {
   }
 }
 
-function fakeMap(zoom: number) {
-  const state = { zoom }
+function fakeMap(zoom: number, projection = 'mercator') {
+  const state = { zoom, projection }
   const map = {
-    getProjection: () => ({ type: 'mercator' }),
+    getProjection: () => ({ type: state.projection }),
     getTerrain: () => null,
     getZoom: () => state.zoom,
     getBounds: () => ({
@@ -119,10 +120,12 @@ async function addLayer(
     times?: number
     pyramid?: boolean
     selector?: ConstructorParameters<typeof ZarrLayer>[0]['selector']
+    projection?: string
+    mapProjections?: MapProjection[]
   } = {}
 ) {
   const { store, chunkReads } = countingStore(opts.times, opts.pyramid)
-  const { map, state } = fakeMap(zoom)
+  const { map, state } = fakeMap(zoom, opts.projection)
   const gl = createRecordingGl()
 
   let ready: () => void
@@ -142,6 +145,7 @@ async function addLayer(
     latIsAscending: false,
     minzoom,
     selector: opts.selector,
+    mapProjections: opts.mapProjections,
     onLoadingStateChange: (loadingState) => {
       if (!loadingState.metadata) ready()
     },
@@ -215,5 +219,60 @@ describe('zoom range', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(chunkReads.length).toBeGreaterThan(0)
     expect(chunkReads.every((key) => key.includes('/c/1/'))).toBe(true)
+  })
+})
+
+describe('custom projection', () => {
+  it('fetches in a registered projection the layer was given', async () => {
+    const { chunkReads } = await addLayer(6, 0, {
+      projection: 'custom:plate',
+      mapProjections: [
+        {
+          name: 'custom:plate',
+          projection: {
+            forward: ([lng, lat]) => [lng, lat],
+            inverse: ([x, y]) => [x, y],
+          },
+          tileMatrixSet: { origin: [-180, 90], extentAtZoom0: 360 },
+        },
+      ],
+    })
+    expect(chunkReads.length).toBeGreaterThan(0)
+  })
+
+  it('fetches nothing and warns once in a registered projection it was not given', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { layer, gl, chunkReads } = await addLayer(6, 0, {
+        projection: 'EPSG:3031',
+      })
+      layer.prerender(gl, {})
+      layer.prerender(gl, {})
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(chunkReads).toEqual([])
+      const warnings = warn.mock.calls.filter(([message]) =>
+        String(message).includes('EPSG:3031')
+      )
+      expect(warnings).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('fetches once the map returns to a built-in projection from one it was not given', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { layer, gl, state, chunkReads } = await addLayer(6, 0, {
+        projection: 'EPSG:3031',
+      })
+      expect(chunkReads).toEqual([])
+
+      state.projection = 'mercator'
+      layer.prerender(gl, {})
+      await until(() => chunkReads.length > 0)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

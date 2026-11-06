@@ -49,6 +49,28 @@ export function tileClipBounds({ tileId, poles }: ClipTile): Box {
   return bounds
 }
 
+/** Box and mesh edges closer than this are the same edge. */
+const SHARED_EDGE = 1e-12
+
+/**
+ * A box edge on the mesh's own edge clips nothing the mesh draws, but the
+ * compare there falls either way by a rounding error: where a tile edge
+ * meets a region edge, the region's edge pixels can fail it while the
+ * neighbouring region does not reach them, leaving a hairline gap. Move
+ * such edges a mesh width out, so only edges inside the mesh clip.
+ */
+function openMeshEdges(box: Box, mesh: MeshMercatorBounds): Box {
+  const width = mesh.x1 - mesh.x0
+  const height = mesh.y1 - mesh.y0
+  const on = (a: number, b: number) => Math.abs(a - b) <= SHARED_EDGE
+  return {
+    x0: on(box.x0, mesh.x0) ? mesh.x0 - width : box.x0,
+    y0: on(box.y0, mesh.y0) ? mesh.y0 - height : box.y0,
+    x1: on(box.x1, mesh.x1) ? mesh.x1 + width : box.x1,
+    y1: on(box.y1, mesh.y1) ? mesh.y1 + height : box.y1,
+  }
+}
+
 const overlaps = (a: Box, b: Box) =>
   a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
 
@@ -115,7 +137,7 @@ export function tileClipPasses(
       if (overlaps(box, mesh)) boxes.push(box)
     }
   }
-  const merged = mergeRows(boxes)
+  const merged = mergeRows(boxes).map((box) => openMeshEdges(box, mesh))
   const passes: Float32Array[] = []
   for (let start = 0; start < merged.length; start += MAX_CLIP_BOXES) {
     const chunk = merged.slice(start, start + MAX_CLIP_BOXES)

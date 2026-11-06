@@ -16,6 +16,8 @@ import { getRegionsInBounds, type RegionCoordinate } from './region-math'
 import type { ProjectionContext } from './projection-utils'
 import type { RegionState } from './region-state'
 import { boundsIntersect, getTileBounds } from './tile-utils'
+import { latToMercatorNorm } from './map-utils'
+import type { WorldMapping } from './world-mapping'
 
 /**
  * Per-tile level selection. The map picks a zoom per tile by distance when
@@ -124,9 +126,22 @@ const failLevel = (renderer: RegionRenderer, levelIndex: number) =>
 
 type Box = { x0: number; y0: number; x1: number; y1: number }
 
+/** A box cut to a region's mesh: what of it the region can draw. */
+const withinMesh = (draw: Draw, box: Box): Box => {
+  const mesh = draw.region.meshBounds!
+  return {
+    x0: Math.max(box.x0, mesh.x0),
+    y0: Math.max(box.y0, mesh.y0),
+    x1: Math.min(box.x1, mesh.x1),
+    y1: Math.min(box.y1, mesh.y1),
+  }
+}
+
 /**
  * A draw's clip boxes back in absolute Mercator of the base world, for the
- * passes drawn at one world offset.
+ * passes drawn at one world offset, each cut to the region's mesh: a box
+ * edge on the mesh edge is moved out, and only what lies inside the mesh
+ * is drawn.
  */
 const absoluteBoxes = (draw: Draw, worldOffset = 0): Box[] => {
   const mesh = draw.region.meshBounds!
@@ -137,12 +152,14 @@ const absoluteBoxes = (draw: Draw, worldOffset = 0): Box[] => {
     if (pass.worldOffset !== worldOffset) continue
     const p = pass.boxes
     for (let i = 0; i < p.length; i += 4) {
-      boxes.push({
-        x0: p[i] + ax,
-        y0: p[i + 1] + ay,
-        x1: p[i + 2] + ax,
-        y1: p[i + 3] + ay,
-      })
+      boxes.push(
+        withinMesh(draw, {
+          x0: p[i] + ax,
+          y0: p[i + 1] + ay,
+          x1: p[i + 2] + ax,
+          y1: p[i + 3] + ay,
+        })
+      )
     }
   }
   return boxes
@@ -544,7 +561,9 @@ describe('per-tile level selection', () => {
       const tile = draw.region.levelIndex === 1 ? NEAR : FAR_EAST
       const boxes = absoluteBoxes(draw)
       expect(boxes).toHaveLength(1)
-      expect(sameBox(boxes[0], getTileBounds(tile.tileId))).toBe(true)
+      expect(
+        sameBox(boxes[0], withinMesh(draw, getTileBounds(tile.tileId)))
+      ).toBe(true)
     }
   })
 
@@ -568,12 +587,18 @@ describe('per-tile level selection', () => {
       if (draw.region.levelIndex === 0) {
         expect(offsets).toEqual([0])
         expect(
-          sameBox(absoluteBoxes(draw, 0)[0], getTileBounds(FAR.tileId))
+          sameBox(
+            absoluteBoxes(draw, 0)[0],
+            withinMesh(draw, getTileBounds(FAR.tileId))
+          )
         ).toBe(true)
       } else {
         expect(offsets).toEqual([-1])
         expect(
-          sameBox(absoluteBoxes(draw, -1)[0], getTileBounds(NEAR.tileId))
+          sameBox(
+            absoluteBoxes(draw, -1)[0],
+            withinMesh(draw, getTileBounds(NEAR.tileId))
+          )
         ).toBe(true)
       }
     }
@@ -607,7 +632,9 @@ describe('per-tile level selection', () => {
     const tileBounds = getTileBounds(NEAR_IN_FAR_EAST.tileId)
     for (const draw of draws) {
       expect(cache.isProtected(draw.region.key)).toBe(true)
-      expect(sameBox(absoluteBoxes(draw)[0], tileBounds)).toBe(true)
+      expect(
+        sameBox(absoluteBoxes(draw)[0], withinMesh(draw, tileBounds))
+      ).toBe(true)
     }
     await settle(renderer)
   })
@@ -1371,5 +1398,71 @@ describe('single-resolution datasets', () => {
     // Column 25 (lon 101..112), row 19 (lat -17..-22) holds the center.
     expect(wanted.has(makeRegionKey(0, 25, 19))).toBe(true)
     expect(wanted.has(makeRegionKey(0, 0, 0))).toBe(false)
+  })
+})
+
+describe('registered projections', () => {
+  // Plate carrée over the top half of the world square, standing in for a
+  // map projection registered with addProjection.
+  const PLATE: WorldMapping = {
+    toWorld: (lng, lat) => [(lng + 180) / 360, (90 - lat) / 360],
+    toLngLat: (x, y) => {
+      const lat = 90 - y * 360
+      return lat < -90 || lat > 90 ? null : [x * 360 - 180, lat]
+    },
+  }
+  // The world square's tile 4/0/0: lon -180..-157.5, lat 90..67.5, two
+  // columns and four rows of the 32x32 grid.
+  const CORNER: TileRequest = { tileId: { z: 4, x: 0, y: 0 }, zoom: 0 }
+
+  async function rendererInPlate() {
+    const made = await makeRenderer({ single: true })
+    made.renderer.setWorldMapping(PLATE)
+    made.renderer.setCoveringTiles([CORNER])
+    const map = mapAt(-180, 67.5, -157.5, 90, 0)
+    made.renderer.update(map, made.gl)
+    await settle(made.renderer)
+    return { ...made, map }
+  }
+
+  it('selects the regions under each tile of the projection', async () => {
+    const { renderer } = await rendererInPlate()
+
+    expect(wantedAt(renderer, 0)).toEqual([
+      '0,0',
+      '0,1',
+      '0,2',
+      '0,3',
+      '1,0',
+      '1,1',
+      '1,2',
+      '1,3',
+    ])
+  })
+
+  it('places regions in the world square of the projection', async () => {
+    const { renderer } = await rendererInPlate()
+
+    // Region 1,3: lon -168.75..-157.5, lat 73.125..67.5.
+    const mesh = seam(renderer).regionCache.get(makeRegionKey(0, 1, 3))!
+      .meshBounds!
+    expect(mesh.x0).toBeCloseTo(11.25 / 360, 9)
+    expect(mesh.x1).toBeCloseTo(22.5 / 360, 9)
+    expect(mesh.y0).toBeCloseTo(16.875 / 360, 9)
+    expect(mesh.y1).toBeCloseTo(22.5 / 360, 9)
+  })
+
+  it('rebuilds cached regions in Web Mercator once the map leaves the projection', async () => {
+    const { renderer, invalidate } = await rendererInPlate()
+    const region = seam(renderer).regionCache.get(makeRegionKey(0, 1, 3))!
+    region.geometryUploaded = true
+    invalidate.mockClear()
+
+    renderer.setWorldMapping(null)
+
+    expect(region.geometryUploaded).toBe(false)
+    expect(region.meshBounds!.y1).toBeCloseTo(latToMercatorNorm(67.5), 6)
+    expect(region.mercatorBounds!.y1).toBeCloseTo(latToMercatorNorm(67.5), 6)
+    expect(invalidate).toHaveBeenCalled()
   })
 })
