@@ -44,7 +44,7 @@ Chunks are loaded based on viewport intersection, at the level matching the scre
 
 When the chunks in view would exceed the layer's memory budget (`maxCacheMB`), chunks away from the center load from a coarser level. Data with no coarser level, such as single-resolution arrays, loads in full regardless, which can use a lot of memory in wide views.
 
-Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with backoff. Other HTTP errors leave the chunk blank until the selector changes.
+Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with backoff. Other HTTP errors leave the chunk blank until the selector changes or its level reloads.
 
 ## globe rendering and polar coverage
 
