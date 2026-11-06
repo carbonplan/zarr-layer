@@ -38,7 +38,13 @@ Where these attributes are absent the layer falls back to what it always did: re
 
 ### Multiscales
 
-High resolution datasets require multiscales. Chunks are loaded based on viewport intersection, and the level is chosen to match the screen resolution. On MapLibre the level is chosen per map tile, the way the map's own raster sources work: in a pitched view, tiles near the camera read a fine level and tiles towards the horizon read coarser ones, so distant areas load less data and still show something. Each tile shows exactly one level, its own once that has loaded under the whole tile and the best cached one until then, and each region is drawn only inside the tiles showing its level, so a translucent layer never doubles up where levels meet. A flat, untilted view reads a single level; MapLibre's globe covers its corners with coarser tiles from zoom 5, so they can read a coarser level too. Mapbox without terrain exposes no public tile cover, so there the layer tiles the viewport itself, and a change of level still switches one tile at a time without levels overlapping. On a flat Web Mercator map without terrain only the parts of each tile on screen are loaded. When the regions in view would exceed the layer's memory budget, tiles away from the center drop to a coarser level where one exists; without one, as in single-resolution data, every region in view is still loaded, past the budget if need be. A chunk read that fails with a network error, a timeout, a 429 or a 5xx is retried with backoff while its region is wanted, and the region keeps what it showed meanwhile; other HTTP errors leave it blank until the selector changes or its level reloads, and anything else gets three attempts. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+High resolution datasets require multiscales. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
+
+Chunks are loaded based on viewport intersection, at the level matching the screen resolution. On MapLibre the level is chosen per map tile, like the map's own raster sources, so the distant part of a pitched view loads coarser data. Each tile shows a single level, so a translucent layer never doubles up where levels meet.
+
+When the chunks in view would exceed the layer's memory budget, tiles away from the center drop to a coarser level. Data with no coarser level, such as single-resolution arrays, is loaded in full regardless, which can use a lot of memory in wide views.
+
+Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with backoff. Other HTTP errors leave the chunk blank until the selector changes.
 
 ## globe rendering and polar coverage
 
@@ -46,7 +52,7 @@ Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" 
 
 **MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed. The exception is terrain: with terrain enabled the layer is draped as Mercator tiles and the poles show holes (see [terrain](#terrain)).
 
-**Mapbox** — Set `renderPoles: true` to enable an experimental direct ECEF path that bypasses tile draping. It projects with the public render parameters (view and projection matrices) that Mapbox GL JS passes to custom layers since 3.32, so it requires `mapbox-gl >= 3.32`; on older versions the layer falls back to the standard draped path and warns once. Switching between the draped and direct paths relies on undocumented Mapbox behaviour (a custom layer is draped whenever it exposes `renderToTile`), which may change across Mapbox GL JS versions. During Mapbox's globe-to-mercator zoom morph the layer automatically falls back to the draped path as well (with pole holes visible). Incompatible with terrain — when terrain is enabled the layer always uses the draped tile path.
+**Mapbox** — Set `renderPoles: true` to enable an experimental direct path that bypasses tile draping and covers the poles. Requires `mapbox-gl >= 3.32`; on older versions the layer uses the draped path and warns once. It relies on undocumented Mapbox behaviour that may change between versions. During the globe-to-mercator zoom transition, and with terrain enabled, the layer uses the draped path, so the pole holes show.
 
 ```ts
 new ZarrLayer({
@@ -63,11 +69,11 @@ The layer drapes over 3D terrain on both providers, with no configuration needed
 
 **Mapbox** — Uses Mapbox's `renderToTile` tile draping.
 
-With terrain enabled the layer always renders through the draped Mercator-tile path, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom, so a pitched view over terrain gets fine data near the camera and coarse data at the horizon rather than nothing.
+With terrain enabled the layer is draped as Mercator tiles, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom.
 
 ## custom map projections
 
-On MapLibre (maplibre-gl 6.15 or later), the layer renders in planar map projections registered with MapLibre's [`addProjection`](https://maplibre.org/maplibre-gl-js/docs/API/functions/addProjection/), such as Antarctic Polar Stereographic (EPSG:3031). Both that API and this support are experimental and may change in a minor release. Pass the layer the same projection objects given to `addProjection`: it places the data in the projection's world, selects the regions each of the map's tiles covers, and reads the pyramid level matching the projection's own scale.
+On MapLibre (maplibre-gl 6.15 or later), the layer renders in planar map projections registered with MapLibre's [`addProjection`](https://maplibre.org/maplibre-gl-js/docs/API/functions/addProjection/), such as Antarctic Polar Stereographic (EPSG:3031). Both that API and this support are experimental and may change in a minor release. Pass the layer the same projection objects given to `addProjection`.
 
 ```ts
 import proj4 from 'proj4'
@@ -87,7 +93,7 @@ map.setProjection({ type: 'EPSG:3031' })
 const layer = new ZarrLayer({ ...options, mapProjections: [antarctic] })
 ```
 
-Data in any CRS the layer reads is reprojected into the map's projection. A map in a registered projection draws a single world without copies, and its basemap and terrain tiles must be cut in the same projection. The demo has polar stereographic (EPSG:3031, EPSG:3413), plate carrée, Equal Earth and CONUS Albers (EPSG:5070) maps over Natural Earth GeoJSON, which MapLibre projects in its workers. While the map is in a registered projection that is not among `mapProjections`, the layer is hidden and logs a warning.
+Data in any CRS the layer reads is reprojected into the map's projection. A map in a registered projection draws a single world without copies, and its basemap and terrain tiles must be cut in the same projection. While the map is in a registered projection not listed in `mapProjections`, the layer is hidden and logs a warning. The demo includes several polar and equal-area examples.
 
 ## install
 
@@ -159,7 +165,7 @@ map.on('load', () => {
 | transformRequest | function | - | Transform request URLs and add headers/credentials (see [authentication](#authentication)) |
 | onAuthError | function | - | Called with the HTTP status when a signed request fails with expired credentials (see [authentication](#authentication)) |
 | renderPoles | boolean | `false` | Enable polar coverage in Mapbox globe for EPSG:4326/proj4 datasets (see [globe rendering](#globe-rendering-and-polar-coverage)). No effect on EPSG:3857 data. MapLibre always renders to the poles. |
-| mapProjections | MapProjection[] | `[]` | Projections registered with MapLibre's experimental `addProjection` that the layer renders in: the same objects given to `addProjection` (see [custom map projections](#custom-map-projections)). |
+| mapProjections | MapProjection[] | `[]` | Projections registered with MapLibre's experimental `addProjection` that the layer renders in (see [custom map projections](#custom-map-projections)) |
 
 ## methods
 
@@ -278,7 +284,7 @@ const layer = new ZarrLayer({
 layer.setUniforms({ u_query: [0.1, 0.1, 0.8] })
 ```
 
-Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile. The layer's own uniforms take about 45 vectors, 33 of them for its per-tile level clipping (32 clip boxes and their count), so budget a long array against what remains. When a shader fails to link, the error reports both counts against the device's limit.
+Updating an array's values is cheap; changing its length recompiles the shader, so keep the length fixed (pad unused entries). Each element uses one of the device's fragment uniform vectors (at least 224 in WebGL2, shared with the layer's own uniforms), so a very long array can exceed the device's limit and fail to compile. The layer itself uses about 45 vectors, so budget long arrays against the rest.
 
 ### NDVI example
 
