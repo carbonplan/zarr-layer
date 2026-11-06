@@ -40,9 +40,9 @@ Where these attributes are absent the layer falls back to what it always did: re
 
 High resolution datasets require multiscales. Supports the zarr [multiscales convention](https://github.com/zarr-conventions/multiscales) and legacy [ndpyramid](https://github.com/carbonplan/ndpyramid) outputs, and tries to interpret other multiscale formats. See [topozarr](https://github.com/norlandrhagen/topozarr) for a look at how to create these datasets.
 
-Chunks are loaded based on viewport intersection, at the level matching the screen resolution. On MapLibre the level is chosen per map tile, like the map's own raster sources, so the distant part of a pitched view loads coarser data. Each tile shows a single level, so a translucent layer never doubles up where levels meet.
+Chunks are loaded based on viewport intersection, at the level matching the screen resolution. On MapLibre, the distant part of a pitched view loads coarser data.
 
-When the chunks in view would exceed the layer's memory budget, tiles away from the center drop to a coarser level. Data with no coarser level, such as single-resolution arrays, is loaded in full regardless, which can use a lot of memory in wide views.
+When the chunks in view would exceed the layer's memory budget, chunks away from the center load from a coarser level. Data with no coarser level, such as single-resolution arrays, loads in full regardless, which can use a lot of memory in wide views.
 
 Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with backoff. Other HTTP errors leave the chunk blank until the selector changes.
 
@@ -50,9 +50,9 @@ Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with
 
 Web Mercator rendering clips near ±85° latitude, leaving visible "pole holes" on globe projections. For EPSG:4326 and `proj4` datasets:
 
-**MapLibre** — Full polar coverage is always enabled via a direct ECEF rendering path. No configuration needed. The exception is terrain: with terrain enabled the layer is draped as Mercator tiles and the poles show holes (see [terrain](#terrain)).
+**MapLibre** — Full polar coverage, with no configuration needed, except with terrain enabled, where the poles show holes (see [terrain](#terrain)).
 
-**Mapbox** — Set `renderPoles: true` to enable an experimental direct path that bypasses tile draping and covers the poles. Requires `mapbox-gl >= 3.32`; on older versions the layer uses the draped path and warns once. It relies on undocumented Mapbox behaviour that may change between versions. During the globe-to-mercator zoom transition, and with terrain enabled, the layer uses the draped path, so the pole holes show.
+**Mapbox** — Set `renderPoles: true` to cover the poles (experimental). Requires `mapbox-gl >= 3.32`; on older versions it has no effect and warns once. It relies on undocumented Mapbox behaviour that may change between versions. The pole holes still show during the globe-to-mercator zoom transition and with terrain enabled.
 
 ```ts
 new ZarrLayer({
@@ -63,13 +63,7 @@ new ZarrLayer({
 
 ## terrain
 
-The layer drapes over 3D terrain on both providers, with no configuration needed: enable terrain on the map (`map.setTerrain(...)`) and the layer follows the terrain surface.
-
-**MapLibre** — Uses MapLibre's experimental `renderToTerrainTile` custom-layer hook, which requires maplibre-gl 6.13 or later. On older versions the layer still draws, but flat, without following the terrain.
-
-**Mapbox** — Uses Mapbox's `renderToTile` tile draping.
-
-With terrain enabled the layer is draped as Mercator tiles, on the globe too, so the poles show the usual Web Mercator holes on both providers. Each draped tile reads the pyramid level matching its own zoom.
+The layer drapes over 3D terrain on both providers, with no configuration needed: enable terrain on the map (`map.setTerrain(...)`) and the layer follows the terrain surface. On MapLibre this relies on an experimental API in maplibre-gl 6.13 or later; on older versions the layer draws flat. With terrain enabled the poles show the usual Web Mercator holes.
 
 ## custom map projections
 
