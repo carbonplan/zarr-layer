@@ -77,7 +77,7 @@ describe('custom uniforms', () => {
     expect(() => renderer.getProgram(FAKE_SHADER_DATA, config)).not.toThrow()
   })
 
-  it('names the uniform arrays when a program fails to link', () => {
+  it('counts the uniform vectors when a program fails to link', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const gl = createRecordingGl({
@@ -95,7 +95,7 @@ describe('custom uniforms', () => {
         config
       )
       expect(() => renderer.getProgram(FAKE_SHADER_DATA, config)).toThrow(
-        "Its uniform arrays hold 64 floats, and each element read by the shader takes one of this device's 16 fragment uniform vectors."
+        /declares \d+ uniform vectors, 65 of them for the custom uniforms and \d+ for the layer and the shader's own; this device allows 16\./
       )
     } finally {
       errorSpy.mockRestore()
