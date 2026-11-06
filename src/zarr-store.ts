@@ -84,6 +84,8 @@ interface ZarrStoreOptions {
   onAuthError?: OnAuthError
   /** Custom store to use instead of FetchStore. When provided, source becomes optional. */
   customStore?: Readable | AsyncReadable
+  /** Bytes of decoded chunks to cache. */
+  decodedCacheBytes?: number
 }
 
 interface StoreDescription {
@@ -173,6 +175,7 @@ export class ZarrStore {
   private transformRequest?: TransformRequest
   private onAuthError?: OnAuthError
   private customStore?: Readable | AsyncReadable
+  private decodedCacheBytes?: number
 
   dimensions: string[] = []
   shape: number[] = []
@@ -223,6 +226,7 @@ export class ZarrStore {
     transformRequest,
     onAuthError,
     customStore,
+    decodedCacheBytes,
   }: ZarrStoreOptions) {
     if (!source && !customStore) {
       throw new Error('source is required when customStore is not provided')
@@ -268,6 +272,7 @@ export class ZarrStore {
     this.transformRequest = transformRequest
     this.onAuthError = onAuthError
     this.customStore = customStore
+    this.decodedCacheBytes = decodedCacheBytes
 
     this.initialized = this._initialize()
   }
@@ -290,10 +295,13 @@ export class ZarrStore {
         ? ((await zarr.extendStore(
             this.customStore as AsyncReadable,
             (store) => zarr.withRangeCoalescing(store),
-            (store) => withDecodedChunkCaching(store)
+            (store) =>
+              withDecodedChunkCaching(store, {
+                maxBytes: this.decodedCacheBytes,
+              })
           )) as ZarrStoreType)
         : ((await zarr.extendStore(this.customStore as AsyncReadable, (store) =>
-            withDecodedChunkCaching(store)
+            withDecodedChunkCaching(store, { maxBytes: this.decodedCacheBytes })
           )) as ZarrStoreType)
     } else {
       // Layered data access:
@@ -319,7 +327,8 @@ export class ZarrStore {
             .withMaybeConsolidatedMetadata(store, consolidatedOpts)
             .catch(() => store),
         (store) => zarr.withRangeCoalescing(store),
-        (store) => withDecodedChunkCaching(store)
+        (store) =>
+          withDecodedChunkCaching(store, { maxBytes: this.decodedCacheBytes })
       )) as ZarrStoreType
     }
 

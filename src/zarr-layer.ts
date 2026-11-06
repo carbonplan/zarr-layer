@@ -54,7 +54,10 @@ import {
 } from './mapbox-globe-matrix'
 import type { QueryGeometry, QueryOptions, QueryResult } from './query/types'
 import { SPATIAL_DIM_NAMES } from './constants'
+import { MAX_CACHED_REGION_BYTES, WANTED_CACHE_SHARE } from './region-cache'
 import { ZarrLayerNotReadyError } from './errors'
+
+const MB = 1024 * 1024
 
 /** Share of the viewport's span added on each side when cutting tiles to it. */
 const VIEWPORT_MARGIN = 0.02
@@ -158,6 +161,7 @@ export class ZarrLayer {
   private fixedDataScale: number
   private minRegionSize: number
   private maxRegionFetches: number
+  private maxCacheMB: number
   // Once true, fixedDataScale is locked (the renderer has captured it)
   private dataScaleLocked: boolean = false
 
@@ -390,6 +394,7 @@ export class ZarrLayer {
     uniforms,
     minRegionSize = 0,
     maxRegionFetches = MAX_ACTIVE_REGION_FETCHES,
+    maxCacheMB = MAX_CACHED_REGION_BYTES / MB,
     renderingMode = '3d',
     onLoadingStateChange,
     proj4,
@@ -457,6 +462,12 @@ export class ZarrLayer {
       )
     }
     this.maxRegionFetches = maxRegionFetches
+    if (!Number.isFinite(maxCacheMB) || maxCacheMB <= 0) {
+      throw new Error(
+        `[ZarrLayer] maxCacheMB must be a positive number, got ${maxCacheMB}.`
+      )
+    }
+    this.maxCacheMB = maxCacheMB
 
     this.customFrag = customFrag
     this.customUniforms = checkUniforms(uniforms || {})
@@ -747,7 +758,8 @@ export class ZarrLayer {
       this.fixedDataScale,
       this.minRegionSize,
       this.maxRegionFetches,
-      this.fillValueOption
+      this.fillValueOption,
+      { maxBytes: this.maxCacheMB * MB }
     )
 
     // Lock immediately after the renderer captures the value, before async initialize()
@@ -784,6 +796,7 @@ export class ZarrLayer {
         transformRequest: this.transformRequest,
         onAuthError: this.onAuthError,
         customStore: this.customStore,
+        decodedCacheBytes: this.maxCacheMB * MB * WANTED_CACHE_SHARE,
       })
 
       await this.zarrStore.initialized

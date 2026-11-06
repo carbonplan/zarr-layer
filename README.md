@@ -42,7 +42,7 @@ High resolution datasets require multiscales. Supports the zarr [multiscales con
 
 Chunks are loaded based on viewport intersection, at the level matching the screen resolution. On MapLibre, the distant part of a pitched view loads coarser data.
 
-When the chunks in view would exceed the layer's memory budget, chunks away from the center load from a coarser level. Data with no coarser level, such as single-resolution arrays, loads in full regardless, which can use a lot of memory in wide views.
+When the chunks in view would exceed the layer's memory budget (`maxCacheMB`), chunks away from the center load from a coarser level. Data with no coarser level, such as single-resolution arrays, loads in full regardless, which can use a lot of memory in wide views.
 
 Chunk reads that fail with a network error, timeout, 429 or 5xx are retried with backoff. Other HTTP errors leave the chunk blank until the selector changes.
 
@@ -146,6 +146,7 @@ map.on('load', () => {
 | maxzoom | number | `Infinity` | Maximum zoom level for rendering |
 | fillValue | number | auto | Stored value treated as no data, in place of the metadata `fill_value`. Compared with raw values, before `scale_factor`/`add_offset`. Cleared by `setVariable` |
 | maxRegionFetches | number | `16` | Region fetches in flight at once; the rest wait in a queue, nearest the viewport center first. Raise it for viewports of many small, quick regions |
+| maxCacheMB | number | `512` | Megabytes of data the layer may cache, plus half as much again for decoded chunks. Lower it on memory-constrained devices; chunks in view load even past it |
 | minRegionSize | number | one chunk | Smallest region, in pixels per axis, loaded and drawn as a unit. Regions are whole numbers of chunks, so this groups small chunks into fewer, larger regions. Growth stops at 2048 px per axis |
 | spatialDimensions | object | auto | Custom `{ lat, lon }` dim names |
 | crs | string | auto | CRS identifier. Not needed for `EPSG:4326`/`EPSG:3857` data (detected automatically). Codes proj4 defines (the WGS84 UTM zones, among others) or that were registered with `proj4.defs` work without a `proj4` string. |

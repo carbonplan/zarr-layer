@@ -141,6 +141,12 @@ export interface ZarrLayerOptions {
    * queue, nearest the viewport center first. Defaults to 16.
    */
   maxRegionFetches?: number
+  /**
+   * Megabytes of region data the layer may cache, in memory and on the GPU,
+   * with half as much again for decoded chunks. Chunks in view load even
+   * past it. Defaults to 512.
+   */
+  maxCacheMB?: number
   customFrag?: string
   uniforms?: Record<string, UniformValue>
   renderingMode?: '2d' | '3d'
