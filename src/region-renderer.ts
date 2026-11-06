@@ -171,6 +171,47 @@ function intersectLon(
   return parts
 }
 
+const mercatorNormToLat = (y: number) =>
+  (Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180) / Math.PI
+
+/**
+ * The map's bounds with east past west, widened by the map's padding where
+ * `getBounds` leaves the padded edges out (Mapbox). Those edges still show
+ * the layer. The widening is linear in Mercator: exact for a flat,
+ * unrotated view and a fair margin otherwise.
+ */
+export function viewportBounds(map: MapLike): LonLatBounds | null {
+  const bounds = map.getBounds?.()?.toArray?.()
+  if (!bounds) return null
+  const [[west, south], [rawEast, north]] = bounds
+  const east = rawEast < west ? rawEast + 360 : rawEast
+  const padding = map.getPadding?.()
+  const container = map.getContainer?.()
+  if (!padding || !container) return { west, south, east, north }
+  const { top = 0, bottom = 0, left = 0, right = 0 } = padding
+  const innerWidth = container.clientWidth - left - right
+  const innerHeight = container.clientHeight - top - bottom
+  if (innerWidth <= 0 || innerHeight <= 0 || top + bottom + left + right <= 0) {
+    return { west, south, east, north }
+  }
+  const lonPerPixel = (east - west) / innerWidth
+  const yNorth = latToMercatorNorm(north)
+  const ySouth = latToMercatorNorm(south)
+  const yPerPixel = (ySouth - yNorth) / innerHeight
+  return {
+    west: west - left * lonPerPixel,
+    east: east + right * lonPerPixel,
+    north:
+      top > 0
+        ? mercatorNormToLat(Math.max(0, yNorth - top * yPerPixel))
+        : north,
+    south:
+      bottom > 0
+        ? mercatorNormToLat(Math.min(1, ySouth + bottom * yPerPixel))
+        : south,
+  }
+}
+
 const tileKey = (tile: TileId) => `${tile.z}/${tile.x}/${tile.y}`
 const requestKey = (tile: TileRequest) =>
   `${tileKey(tile.tileId)}@${tile.wrap ?? 'all'}`
@@ -777,10 +818,9 @@ export class RegionRenderer {
    * zoom, nearest the centre first. Empty without map bounds.
    */
   private viewportTiles(map: MapLike): TileRequest[] {
-    const bounds = map.getBounds?.()?.toArray?.()
+    const bounds = viewportBounds(map)
     if (!bounds) return []
-    const [[west, south], [rawEast, north]] = bounds
-    const east = rawEast < west ? rawEast + 360 : rawEast
+    const { west, south, east, north } = bounds
     const span = east - west
     const zoom = map.getZoom?.() ?? 0
     const center = map.getCenter?.() ?? {

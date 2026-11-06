@@ -234,6 +234,14 @@ export interface MapLike {
   off?(event: string, handler: (...args: unknown[]) => void): void
   triggerRepaint?(): void
   getBounds?(): BoundsLike | null
+  /** Mapbox leaves the padded edges of the view out of `getBounds`. */
+  getPadding?(): {
+    top?: number
+    bottom?: number
+    left?: number
+    right?: number
+  }
+  getContainer?(): { clientWidth: number; clientHeight: number }
   getCenter?(): { lng: number; lat: number }
   getZoom?(): number
   painter?: { context?: { gl?: unknown } }
