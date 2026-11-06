@@ -1490,6 +1490,47 @@ describe('single-resolution datasets', () => {
   })
 })
 
+describe('the globe across the antimeridian', () => {
+  it('draws the regions east of it in a tile matched in any world copy', async () => {
+    // Centered just west of the antimeridian, the cover numbers the tiles
+    // east of it as the next world copy. The globe draws one world, so the
+    // regions there are drawn in copy 0 and must still meet those tiles.
+    const { renderer, gl } = await makeRenderer({ single: true })
+    renderer.onProjectionChange(true)
+    const map = mapAt(170, -10, 190, 10, 2)
+    renderer.update(map, gl)
+    await settle(renderer)
+    const west: TileRequest = { tileId: { z: 2, x: 3, y: 1 }, zoom: 2 }
+    const east: TileRequest = { tileId: { z: 2, x: 0, y: 1 }, zoom: 2 }
+
+    renderer.setCoveringTiles([west, east])
+    renderer.update(map, gl)
+    await settle(renderer)
+    renderer.update(map, gl)
+    const runtime = seam(renderer).levelLoader.runtime(0)!
+    const eastKeys = seam(renderer)
+      .tileRegions(0, runtime, east)
+      .map((r) => makeRegionKey(0, r.regionX, r.regionY))
+    const drawn = new Set(
+      seam(renderer)
+        .plannedDraws(gl, [0])
+        .map((draw) => draw.region.key)
+    )
+    expect(eastKeys.length).toBeGreaterThan(0)
+    for (const key of eastKeys) expect(drawn.has(key)).toBe(true)
+
+    // Numbered as the next copy, those tiles miss every region drawn.
+    renderer.setCoveringTiles([west, { ...east, wrap: 1 }])
+    renderer.update(map, gl)
+    const wrapped = new Set(
+      seam(renderer)
+        .plannedDraws(gl, [0])
+        .map((draw) => draw.region.key)
+    )
+    expect(eastKeys.some((key) => wrapped.has(key))).toBe(false)
+  })
+})
+
 describe('registered projections', () => {
   // Plate carrée over the top half of the world square, standing in for a
   // map projection registered with addProjection.

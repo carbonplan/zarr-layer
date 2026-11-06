@@ -919,7 +919,8 @@ export class ZarrLayer {
     if (!map?.coveringTiles) return null
     // Drawn directly on the globe, the layer reaches the poles, so the
     // cover's polar edge tiles must too; draped tiles stay Mercator.
-    const poles = this.isGlobeProjection() && !map.getTerrain?.()
+    const globe = this.isGlobeProjection()
+    const poles = globe && !map.getTerrain?.()
     const terrain = map.terrain ?? undefined
     return map
       .coveringTiles(
@@ -931,7 +932,10 @@ export class ZarrLayer {
         tileId: { z: canonical.z, x: canonical.x, y: canonical.y },
         zoom: this.tileZoom(canonical.z, COVERING_TILE_SIZE),
         poles,
-        wrap: wrap ?? 0,
+        // The globe is one world: tiles past the antimeridian, which the
+        // cover numbers as the next copy, meet regions in whichever copy
+        // their mesh lies.
+        wrap: globe ? undefined : wrap ?? 0,
       }))
   }
 
