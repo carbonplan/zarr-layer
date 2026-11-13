@@ -107,6 +107,7 @@ type RenderSeam = {
     region: RegionState
   ): void
   regionCache: RegionCache
+  drawableWith(gl: WebGL2RenderingContext): (region: RegionState) => boolean
   loadingDebouncer: ChunkLoadingDebouncer
   loadLevel(
     levelIndex: number,
@@ -361,6 +362,54 @@ describe('RegionRenderer', () => {
     expect(gl.createTexture).toHaveBeenCalledTimes(4)
     // The mesh doesn't depend on the selector, so it isn't re-sent.
     expect(gl.bufferData).toHaveBeenCalledTimes(geometryUploads)
+  })
+
+  it('never draws an off-screen region fetched under the previous selector', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle(renderer)
+    drawn(renderer, gl)
+    const west = mapAt(-170, -85, -10, 85)
+    renderer.update(west, gl)
+    await settle(renderer)
+    drawn(renderer, gl)
+
+    await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+    renderer.update(west, gl)
+    await settle(renderer)
+    const current = drawn(renderer, gl)[0].selectorVersion
+
+    renderer.update(map, gl)
+    expect(
+      drawn(renderer, gl).every((region) => region.selectorVersion === current)
+    ).toBe(true)
+    await settle(renderer)
+    const states = drawn(renderer, gl)
+    expect(states).toHaveLength(4)
+    expect(states.every((region) => region.selectorVersion === current)).toBe(
+      true
+    )
+  })
+
+  it('never draws an off-screen region of the previous selector before an update', async () => {
+    const { renderer, gl, map } = await makeRenderer()
+    renderer.update(map, gl)
+    await settle(renderer)
+    drawn(renderer, gl)
+    renderer.update(mapAt(-170, -85, -10, 85), gl)
+    await settle(renderer)
+    const cache = seam(renderer).regionCache
+    const regions = [...cache.values()]
+    const shown = regions.filter((region) => cache.isProtected(region.key))
+    const offscreen = regions.filter((region) => !cache.isProtected(region.key))
+    expect(shown.length).toBeGreaterThan(0)
+    expect(offscreen.length).toBeGreaterThan(0)
+
+    await renderer.setSelector({ time: { selected: 20, type: 'value' } })
+
+    const drawable = seam(renderer).drawableWith(gl)
+    expect(shown.every(drawable)).toBe(true)
+    expect(offscreen.some(drawable)).toBe(false)
   })
 
   it('sends regenerated geometry to the GPU on the next frame', async () => {

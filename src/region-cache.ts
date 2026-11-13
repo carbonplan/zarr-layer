@@ -309,6 +309,24 @@ export class RegionCache {
     this.protectedKeys = nextProtected
   }
 
+  /**
+   * Drop the pixels of unprotected regions fetched under an earlier
+   * selector version, so they refetch when next wanted. Protected regions
+   * keep theirs to show until their refetch lands. The geometry stays: it
+   * does not depend on the selector.
+   */
+  releaseStale(gl: WebGL2RenderingContext, selectorVersion: number): void {
+    for (const [key, region] of this.regions) {
+      if (region.selectorVersion === selectorVersion) continue
+      if (this.protectedKeys.has(key)) continue
+      if (!hasRegionData(region)) continue
+      releaseRegionTextures(gl, region)
+      region.data = null
+      region.bandData.clear()
+      region.bandTransform = null
+    }
+  }
+
   /** Regions the cache may keep while an update wants `wantedCount`. */
   maxRegionsFor(wantedCount: number): number {
     const { minRegions, maxRegions } = this.limits
