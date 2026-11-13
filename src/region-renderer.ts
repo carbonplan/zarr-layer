@@ -719,11 +719,18 @@ export class RegionRenderer {
     if (levelIndex === null) return false
     const runtime = this.levelLoader.runtime(levelIndex)
     if (!runtime) return true
+    const now = Date.now()
     return this.tileRegions(levelIndex, runtime, tile).some((region) => {
       const cached = this.regionCache.get(
         this.makeRegionKey(levelIndex, region.regionX, region.regionY)
       )
-      return !cached || (!hasRegionData(cached) && !cached.loading)
+      if (!cached) return true
+      if (cached.loading) return false
+      if (!hasRegionData(cached)) return true
+      return (
+        cached.selectorVersion !== this.selectorVersion &&
+        !isRegionRetryPending(cached, this.selectorVersion, now)
+      )
     })
   }
 
@@ -1395,13 +1402,19 @@ export class RegionRenderer {
     return best
   }
 
-  /** Regions drawable now, uploading what is CPU-ready on demand. */
+  /**
+   * Regions drawable now, uploading what is CPU-ready on demand. A region
+   * from an earlier selector draws only while protected, i.e. it was on
+   * screen at the last update and shows there until its refetch lands.
+   */
   private drawableWith(
     gl: WebGL2RenderingContext
   ): (region: RegionState) => boolean {
     const requiredBands = this.requiredBands()
     const bandFormat = this.bandFormat()
     return (region) =>
+      (region.selectorVersion === this.selectorVersion ||
+        this.regionCache.isProtected(region.key)) &&
       isRegionCpuReady(region) &&
       ensureRegionGpuResources(gl, region, requiredBands, bandFormat)
   }
@@ -1756,6 +1769,11 @@ export class RegionRenderer {
     }
     this.wantedRegions = wanted
     this.wantedKeys = wantedKeys
+
+    // Judged on the protection of the last update, before this one's
+    // wanted set: a region wanted now but not shown when the selector
+    // changed must not draw the previous selector's data.
+    this.regionCache.releaseStale(gl, this.selectorVersion)
 
     // Rebuild eviction protection from what is wanted, plus regions kept as
     // fallbacks: with a tile cover, the regions each tile shows while its

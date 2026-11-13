@@ -365,6 +365,36 @@ describe('RegionCache.rebuildProtection', () => {
   })
 })
 
+describe('RegionCache.releaseStale', () => {
+  function withData(cache: RegionCache, x: number, selectorVersion: number) {
+    const r = createRegionState(0, x, 0, false, selectorVersion)
+    r.data = new Float32Array([1])
+    r.bandData.set('band', new Float32Array([1]))
+    r.texture = {} as WebGLTexture
+    r.textureUploaded = true
+    r.vertexArr = new Float32Array(8)
+    cache.set(r.key, r)
+    return r
+  }
+
+  it('drops the pixels of unprotected regions from an earlier selector', () => {
+    const gl = fakeGl()
+    const cache = new RegionCache()
+    const stale = withData(cache, 0, 0)
+    const shown = withData(cache, 1, 0)
+    const current = withData(cache, 2, 1)
+    cache.rebuildProtection([shown.key], { retain: () => false })
+
+    cache.releaseStale(gl, 1)
+
+    expect(hasRegionData(stale)).toBe(false)
+    expect(stale.vertexArr).not.toBeNull()
+    expect(gl.deleteTexture).toHaveBeenCalledTimes(1)
+    expect(hasRegionData(shown)).toBe(true)
+    expect(hasRegionData(current)).toBe(true)
+  })
+})
+
 describe('RegionCache.clear', () => {
   it('disposes everything and resets protection', () => {
     const gl = fakeGl()

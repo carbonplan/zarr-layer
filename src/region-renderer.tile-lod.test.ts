@@ -1206,6 +1206,18 @@ describe('tiles drawn by the draped hooks', () => {
     await settle(renderer)
     expect(renderer.noteDrawnTile(NEAR, 2)).toBe(false)
   })
+
+  it('asks for a frame when a drawn tile holds an earlier selector', async () => {
+    const { renderer, map, gl } = await rendererAtZoom(1)
+    renderer.noteDrawnTile(NEAR, 1)
+    renderer.update(map, gl)
+    await settle(renderer)
+
+    renderer.setDataScale(2)
+    expect(renderer.noteDrawnTile(NEAR, 2)).toBe(true)
+    renderer.update(map, gl)
+    expect(renderer.noteDrawnTile(NEAR, 2)).toBe(false)
+  })
 })
 
 describe('region byte budget', () => {
